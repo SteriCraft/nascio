@@ -10,6 +10,7 @@
 
 pub mod flow;
 pub mod precip;
+pub mod process;
 pub mod upsample;
 
 use rayon::prelude::*;
@@ -146,11 +147,11 @@ impl Default for ErosionConfig {
             wind_blend_deg: 5.0,
             duration_yr: 1.0e6,
             dt_yr: 5.0e4,
-            k_fluvial: 2.0e-6,
+            k_fluvial: 3.0e-6,
             m_exponent: 0.45,
-            hillslope_diffusivity: 0.02,
+            hillslope_diffusivity: 0.01,
             critical_slope: 1.0,
-            max_diffusion_factor: 10.0,
+            max_diffusion_factor: 3.0,
             deposit_slope: 0.01,
             deposit_top_m: -1.0,
             lake_min_depth_m: 2.0,
@@ -209,10 +210,25 @@ pub struct ErosionOutput {
 pub struct ErosionReport {
     /// `(stage, seconds)` in pipeline order.
     pub timings: Vec<(&'static str, f64)>,
+    pub stats: process::ErosionStats,
+    /// Mean lowering of the land, m.
+    pub mean_land_lowering_m: f64,
 }
 
 impl std::fmt::Display for ErosionReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = &self.stats;
+        writeln!(
+            f,
+            "erosion: {} steps ({} diffusion sub-steps each), fluvial {:.3} km3, coastal {:.3} km3, deposited {:.3} km3 (lost {:.3}), mean land lowering {:.1} m",
+            s.steps,
+            s.diffusion_substeps,
+            s.fluvial_m3 / 1e9,
+            s.coastal_m3 / 1e9,
+            s.deposited_m3 / 1e9,
+            s.lost_m3 / 1e9,
+            self.mean_land_lowering_m
+        )?;
         write!(f, "erosion timings:")?;
         for (name, t) in &self.timings {
             write!(f, " {name} {t:.2} s,")?;
@@ -316,6 +332,15 @@ pub fn run(cfg: &WorldConfig, tect: &TectonicOutput) -> ErosionOutput {
     };
     let rain = rain_volume(&precipitation, shape);
     let sea_min_area_m2 = cfg.tectonics.inland_water_max_km2 * 1e6;
+    let sea = flow::sea_mask(fine.data(), shape, sea_min_area_m2);
+    let mut h = fine.data().to_vec();
+    report.stats = timed(&mut report, "erosion", || {
+        process::erode(&mut h, &rain, shape, &sea, &cfg.erosion)
+    });
+    let land: Vec<usize> = (0..shape.n()).filter(|&k| !sea[k]).collect();
+    report.mean_land_lowering_m =
+        land.iter().map(|&k| fine.data()[k] - h[k]).sum::<f64>() / land.len().max(1) as f64;
+    let fine = PeriodicGrid::from_vec(shape.res, shape.res, shape.cell, h);
     let routing = timed(&mut report, "routing", || {
         route(fine.data(), &rain, shape, sea_min_area_m2)
     });
