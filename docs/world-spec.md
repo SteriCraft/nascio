@@ -130,19 +130,20 @@ Chaque étape lit les couches précédentes et écrit les siennes. Chaque couche
 
 ### 4.1 Tectonique (grille de 625², pas de temps fixes)
 Référence : Cortial et al., *Procedural Tectonic Planets* (2019), adaptée à une grille torique.
-- **Plaques** : de 8 à 12 *(config)*. On les initialise par un Voronoï périodique déformé par du bruit. Chaque plaque reçoit une vitesse de translation, et éventuellement une petite rotation.
-- **Croûte initiale** : environ 30 % de croûte continentale *(config)*, regroupée en quelques masses ; le reste est océanique.
+- **Plaques** : de 8 à 12 *(config)*. On les initialise par un Voronoï périodique déformé par du bruit. Chaque plaque reçoit une vitesse de translation constante. Elle se déplace par cellules entières, à partir d'une translation cumulée exactement. La rotation est reportée.
+- **Croûte continentale** : ≈ 35 % de croûte continentale *(config)*, regroupée en quelques masses ; le reste est océanique. Cette fraction est la fraction *finale* : la fraction initiale est calée en relançant la simulation, car les collisions consomment de la croûte. Le plateau continental en noyant une partie, on vise ainsi environ 29 % de terres émergées.
 - **État par cellule** : id de plaque, type de croûte (océanique ou continentale), épaisseur, âge de la croûte océanique, altitude, drapeaux d'histoire (orogenèse, arc volcanique, rift, point chaud, ophiolite).
 - **À chaque pas** : advection semi-lagrangienne des plaques (périodique), puis traitement des frontières :
   - **divergence** : création de croûte océanique d'âge 0 (dorsale). Sur un continent, création d'un rift ;
   - **subduction océan → continent** : la croûte océanique est consommée, une fosse se forme, et un **arc volcanique** apparaît sur la plaque chevauchante ;
   - **subduction océan → océan** : arc insulaire ;
-  - **collision continent ↔ continent** : épaississement de la croûte et soulèvement (orogenèse), avec suture possible d'ophiolites ;
+  - **collision continent ↔ continent** : épaississement de la croûte et soulèvement (orogenèse), avec suture possible d'ophiolites. La collision freine les plaques : après `collision_shortening_m` *(config, 5 km)* de convergence, les deux plaques sont soudées et prennent une vitesse commune (moyenne pondérée par leur nombre de cellules), ce qui borne le raccourcissement ;
   - **frontière transformante** : simple cisaillement.
 - **Subsidence océanique** : la profondeur croît comme `√âge`.
 - **Points chauds** : de 2 à 5 *(config)*, fixes dans le repère du manteau. La plaque qui défile au-dessus reçoit une suite d'édifices volcaniques dont l'âge augmente avec la distance, ce qui donne des **archipels de type Hawaï**. Ils peuvent aussi tomber sous un continent (trapps, plateaux).
 - Le nombre de pas suffit à faire émerger des continents de formes variées. On n'a pas besoin de cycles de Wilson complets.
-- **Sorties** : `plate_id`, `crust_type`, `crust_thickness`, `crust_age`, `elevation_tectonic`, `moho_depth`, `history_flags`, `hotspot_track`.
+- **Marges et hypsométrie** : plateau de 0 à −150 m sur les marges passives, puis talus vers l'océan profond ; plateau minimal sur les marges actives. Les petites inclusions océaniques (rifts) deviennent des eaux intérieures. Les altitudes des terres et de l'océan profond sont calées par rang sur l'hypsométrie terrestre ramenée aux cibles du §3 *(config)*.
+- **Sorties** : `plate_id`, `crust_type`, `crust_thickness` (épaisseur de la surface au Moho, m), `crust_age`, `elevation_tectonic` (altitude après marges et calage hypsométrique, m), `moho_depth` (profondeur du Moho sous le niveau de la mer, m, positive vers le bas), `history_flags`, `hotspot_track`.
 
 ### 4.2 Érosion (grille de 3 125²)
 - Suréchantillonnage de l'altitude tectonique vers la grille de 32 m, avec du bruit périodique de détail.

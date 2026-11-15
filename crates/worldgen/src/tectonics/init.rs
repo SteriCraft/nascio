@@ -195,7 +195,7 @@ mod tests {
         assert_eq!(t.steps, 50);
         assert!((8..=12).contains(&t.plates.len()));
         assert!((2..=5).contains(&t.hotspots.len()));
-        assert!((t.initial_continental_fraction - 0.30).abs() < 0.01);
+        assert!((t.initial_continental_fraction - 0.35).abs() < 0.01);
         // Every plate owns cells.
         for p in &t.plates {
             assert!(

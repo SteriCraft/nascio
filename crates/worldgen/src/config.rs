@@ -175,7 +175,7 @@ impl Default for TectonicsConfig {
             plate_count: [8, 12],
             plate_warp_amplitude_m: 6_000.0,
             plate_warp_period_m: 20_000.0,
-            continental_fraction: 0.30,
+            continental_fraction: 0.35,
             continental_fraction_tolerance: 0.02,
             continent_noise_period_m: 50_000.0,
             total_displacement_m: 40_000.0,
@@ -406,7 +406,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.tectonics.plate_count, [9, 9]);
-        assert_eq!(c.tectonics.continental_fraction, 0.30);
+        assert_eq!(c.tectonics.continental_fraction, 0.35);
         assert_eq!(c.astro, AstroConfig::default());
     }
 

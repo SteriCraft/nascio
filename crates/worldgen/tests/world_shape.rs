@@ -18,8 +18,8 @@ fn elevations_follow_spec_targets() {
         assert!(lo >= -3_500.0 - 1e-6, "seed {seed}: min {lo}");
         assert!(hi <= 3_000.0 + 1e-6, "seed {seed}: max {hi}");
         let r = &out.report;
-        // 30 % continental crust: about a quarter of the surface is land, a few % shelves.
-        assert!((0.20..=0.30).contains(&r.land_fraction), "seed {seed}: {r}");
+        // 35 % continental crust: about 29 % land (as on Earth), a few % shelves.
+        assert!((0.25..=0.33).contains(&r.land_fraction), "seed {seed}: {r}");
         assert!(
             (0.02..=0.09).contains(&r.shelf_fraction),
             "seed {seed}: {r}"
