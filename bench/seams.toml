@@ -1,0 +1,102 @@
+# Capture path: screenshots crossing both seams and a distant view of mountains (seed 42, full
+# scale). Slow legs and holds let the chunks load before each shot.
+#   cargo run -p nascio-viewer --release -- out/m2/world-42 --bench bench/seams.toml --bench-out out/m2/seams.csv
+view_distance_m = 512.0
+hour = 10.0
+
+# East-west seam: looking east across x = 0, then back west from the other side.
+[[waypoint]]
+x = 99850.0
+z = 600.0
+agl = 40.0
+yaw = 90.0
+pitch = -12.0
+shot = "out/m2/seam-x-east.png"
+
+[[waypoint]]
+x = 150.0
+z = 600.0
+agl = 40.0
+yaw = 90.0
+pitch = -12.0
+speed = 20.0
+
+[[waypoint]]
+x = 151.0
+z = 600.0
+agl = 40.0
+yaw = 270.0
+pitch = -12.0
+speed = 0.2
+shot = "out/m2/seam-x-west.png"
+
+# North-south seam: looking north across z = 0 (north is -z), then back south.
+[[waypoint]]
+x = 1000.0
+z = 150.0
+agl = 40.0
+yaw = 0.0
+pitch = -12.0
+speed = 20.0
+
+[[waypoint]]
+x = 1000.0
+z = 149.0
+agl = 40.0
+yaw = 0.0
+pitch = -12.0
+speed = 0.2
+shot = "out/m2/seam-z-north.png"
+
+[[waypoint]]
+x = 1000.0
+z = 99850.0
+agl = 40.0
+yaw = 180.0
+pitch = -12.0
+speed = 20.0
+
+[[waypoint]]
+x = 1000.0
+z = 99849.0
+agl = 40.0
+yaw = 180.0
+pitch = -12.0
+speed = 0.2
+shot = "out/m2/seam-z-south.png"
+
+# High above the corner where both seams cross.
+[[waypoint]]
+x = 300.0
+z = 300.0
+agl = 900.0
+yaw = 315.0
+pitch = -25.0
+speed = 100.0
+
+[[waypoint]]
+x = 301.0
+z = 300.0
+agl = 900.0
+yaw = 315.0
+pitch = -25.0
+speed = 0.1
+shot = "out/m2/seam-corner-high.png"
+
+# Distant view of the highest range from the sea.
+[[waypoint]]
+x = 88000.0
+z = 34000.0
+y = 500.0
+yaw = 15.0
+pitch = -4.0
+speed = 2000.0
+
+[[waypoint]]
+x = 88000.0
+z = 34001.0
+y = 500.0
+yaw = 15.0
+pitch = -4.0
+speed = 0.1
+shot = "out/m2/mountains-far.png"

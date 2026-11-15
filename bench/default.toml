@@ -1,0 +1,41 @@
+# Default benchmark path for the seed-42 world at full scale:
+#   cargo run -p nascio-worldgen --release -- generate --seed 42 --scale 1 --out out/m2/world-42
+#   cargo run -p nascio-viewer --release -- out/m2/world-42 --bench bench/default.toml --bench-out out/bench.csv
+# Maximum settings: 1 024 m view distance, horizon on, vsync off, 1920x1080.
+view_distance_m = 1024.0
+hour = 10.0
+settle_frames = 30
+max_load_s = 120.0
+
+# Low flight east across the x seam (x = 100 000 -> 0).
+[[waypoint]]
+x = 98800.0
+z = 500.0
+agl = 25.0
+
+[[waypoint]]
+x = 1200.0
+z = 500.0
+agl = 25.0
+speed = 60.0
+
+# North across the z seam (z = 0 -> 100 000).
+[[waypoint]]
+x = 1200.0
+z = 98800.0
+agl = 25.0
+speed = 60.0
+
+# Climb and cross 38 km at full speed (streaming cannot keep up: the horizon covers it).
+[[waypoint]]
+x = 88000.0
+z = 34000.0
+agl = 600.0
+speed = 2000.0
+
+# Fast low pass along the highest range.
+[[waypoint]]
+x = 91000.0
+z = 25000.0
+agl = 200.0
+speed = 250.0

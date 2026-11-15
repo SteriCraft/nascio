@@ -66,7 +66,11 @@ fn begin_frame(mut stats: ResMut<FrameStats>) {
     stats.begin = Some(Instant::now());
 }
 
-fn end_frame(mut stats: ResMut<FrameStats>, time: Res<Time<Real>>, store: Res<DiagnosticsStore>) {
+pub fn end_frame(
+    mut stats: ResMut<FrameStats>,
+    time: Res<Time<Real>>,
+    store: Res<DiagnosticsStore>,
+) {
     let cpu_ms = stats
         .begin
         .map_or(0.0, |b| b.elapsed().as_secs_f64() * 1_000.0);

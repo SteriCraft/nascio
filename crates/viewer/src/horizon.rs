@@ -294,7 +294,9 @@ fn build_level(
             } else {
                 let rdx = f64::from(h.at(i + 1, j) - h.at(i - 1, j)) / (2.0 * s);
                 let rdz = f64::from(h.at(i, j + 1) - h.at(i, j - 1)) / (2.0 * s);
-                let block = terrain.surface_block(raw.floor() as i32, rdx.hypot(rdz));
+                // Beaches are too thin to show at horizon scale.
+                let top = (raw.floor() as i32).max(terrain.config().beach_high_m + 1);
+                let block = terrain.surface_block(top, rdx.hypot(rdz));
                 let c = linear_color(block);
                 [c[0], c[1], c[2], 1.0]
             };

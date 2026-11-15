@@ -387,6 +387,7 @@ pub fn stream_chunks(
                         let col = ColumnSet::new(&terrain, key.0, key.1);
                         let meshes = col
                             .chunk_range(underground)
+                            .filter(|&cy| col.may_have_faces(cy))
                             .map(|cy| (cy, mesh_chunk(&col.padded_chunk(&terrain, cy))))
                             .filter(|(_, m)| !m.is_empty())
                             .collect();
@@ -594,9 +595,9 @@ pub fn update_sun(
         light.illuminance = 12_000.0 * day;
     }
     // Dev viewer: night keeps a twilight floor so the relief stays readable.
-    let sky = Color::srgb(0.10 + 0.35 * day, 0.14 + 0.50 * day, 0.24 + 0.66 * day);
+    let sky = Color::srgb(0.16 + 0.29 * day, 0.22 + 0.42 * day, 0.36 + 0.54 * day);
     clear.0 = sky;
-    ambient.brightness = 350.0 + 500.0 * day;
+    ambient.brightness = 650.0 + 250.0 * day;
     if let Ok(mut f) = fog.single_mut() {
         f.color = sky;
     }

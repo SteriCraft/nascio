@@ -5,6 +5,7 @@
 //! cargo run -p nascio-viewer --release -- out/m2/world-42 --fly --pos 21000,1500
 //! ```
 
+mod bench;
 mod fly;
 mod horizon;
 mod map;
@@ -68,6 +69,13 @@ struct Args {
     /// Disable vsync (measure the real frame cost).
     #[arg(long)]
     no_vsync: bool,
+    /// Run a scripted benchmark path (TOML, see `bench/default.toml`), then quit.
+    /// Implies the 3D mode, 1920x1080, no vsync and the file's settings.
+    #[arg(long)]
+    bench: Option<PathBuf>,
+    /// Benchmark output: one CSV line per frame, plus a `.summary.txt` next to it.
+    #[arg(long, default_value = "out/bench.csv")]
+    bench_out: PathBuf,
 }
 
 #[derive(States, Default, Clone, Copy, Eq, PartialEq, Hash, Debug)]
@@ -85,7 +93,21 @@ fn main() {
     }
 }
 
-fn run(args: Args) -> anyhow::Result<()> {
+fn run(mut args: Args) -> anyhow::Result<()> {
+    let bench_file = args
+        .bench
+        .as_deref()
+        .map(bench::BenchFile::load)
+        .transpose()?;
+    if let Some(b) = &bench_file {
+        args.fly = true;
+        args.no_vsync = true;
+        args.no_horizon = false;
+        args.view_distance = b.view_distance_m.unwrap_or(fly::VIEW_MAX);
+        args.hour = Some(b.hour.unwrap_or(10.0));
+        let w = &b.waypoint[0];
+        args.pos = Some(vec![w.x, w.z]);
+    }
     let world = World::load(&args.world).map_err(|e| {
         anyhow::anyhow!(
             "cannot load world from {}: {e:#}\ngenerate one first: cargo run -p nascio-worldgen --release -- generate --seed 42 --scale 1",
@@ -138,6 +160,11 @@ fn run(args: Args) -> anyhow::Result<()> {
         },
         ..default()
     };
+    if bench_file.is_some() {
+        // Exactly 1920x1080 physical pixels whatever the desktop scaling.
+        window.resolution =
+            bevy::window::WindowResolution::new(1920, 1080).with_scale_factor_override(1.0);
+    }
     if args.fullscreen {
         window.mode =
             bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Primary);
@@ -194,6 +221,16 @@ fn run(args: Args) -> anyhow::Result<()> {
     .add_systems(OnEnter(Mode::Map), hide_scene);
     if args.fly {
         app.insert_state(Mode::Fly);
+    }
+    if let Some(file) = bench_file {
+        app.insert_resource(bench::Bench::new(file, args.bench_out.clone()))
+            .add_systems(
+                Update,
+                bench::drive
+                    .before(fly::fly_input)
+                    .run_if(in_state(Mode::Fly)),
+            )
+            .add_systems(Last, bench::record.after(perf::end_frame));
     }
     if let Some(path) = args.screenshot {
         app.insert_resource(AutoScreenshot {
