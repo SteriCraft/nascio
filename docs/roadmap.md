@@ -36,6 +36,10 @@ Chaque jalon se termine par une revue avec l'auteur. On ne passe pas au jalon su
 
 **Validation** : les vallées et les bassins versants sont crédibles, et les rivières atteignent la mer ou un lac.
 
+**Notes issues de M1** :
+- la ligne de lacs en pointillés de la graine 7 (chenal de rift dans le grand continent) : à transformer en vrais lacs ou en vallée avec l'hydrologie ;
+- la tranche −200..0 m presque vide dans l'histogramme hypsométrique : le plateau, très étroit (1,2 km en 1/5), et le premier anneau du talus laissent un creux ; à reprendre avec l'érosion et la sédimentation côtière.
+
 ## M4 — Climat, saisons, biomes, ciel
 - Climat (§4.3) avec stockage en harmoniques, hydrologie finale (§4.4), biomes (§4.5).
 - Visualiseur : couches climatiques animées selon la date, superposition jour/nuit.

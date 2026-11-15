@@ -47,3 +47,4 @@
 | 2026-11-15 | Altitudes calées par rang sur l'hypsométrie terrestre ramenée aux cibles du §3 (bandes dans `[tectonics.hypsometry]`), séparément pour les terres et l'océan profond ; plateaux, talus, arcs et édifices ajoutés ensuite | L'ordre physique est conservé (dorsales, fosses, orogènes) ; avec 30 % de croûte continentale on obtient environ 25 % de terres et 5 % de plateaux |
 | 2026-11-15 | Édifices de points chauds : 6 000 m au-dessus du plancher, perte de hauteur sur 120 Ma | Quelques îles émergent sur chaque graine (testé) |
 | 2026-11-15 | `generator_version` = 2 | Marges, hypsométrie, filtre majoritaire et calage modifient le résultat |
+| 2026-11-15 | continental_fraction portée à 0,35 (fraction finale) | Le plateau continental noie une partie de la croûte. Objectif : environ 29 % de terres émergées, comme sur Terre |
