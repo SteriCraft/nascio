@@ -27,6 +27,7 @@ impl Tectonics {
 
         let plates = make_plates(cfg, max_speed);
         let hotspots = make_hotspots(cfg);
+        let np = plates.len();
 
         // Plate ownership: nearest seed after a domain warp, on the torus.
         let warp_x = Fbm::new(
@@ -113,6 +114,8 @@ impl Tectonics {
             grid: PeriodicGrid::from_vec(res, res, cell_m, cells),
             events: EventCounts::default(),
             initial_continental_fraction: 0.0,
+            contact: vec![0.0; np * np],
+            group: (0..np as u8).collect(),
         };
         s.initial_continental_fraction = s.continental_fraction();
         s

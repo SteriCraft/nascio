@@ -73,6 +73,8 @@ pub struct EventCounts {
     pub ocean_continent_subductions: u64,
     pub ocean_ocean_subductions: u64,
     pub collisions: u64,
+    /// Plate pairs welded after a continental collision.
+    pub welds: u64,
 }
 
 /// The running simulation.
@@ -89,6 +91,11 @@ pub struct Tectonics {
     pub grid: PeriodicGrid<Cell>,
     pub events: EventCounts,
     pub initial_continental_fraction: f64,
+    /// Accumulated relative displacement of each plate pair in continental contact
+    /// (`a * n + b`, `a < b`), in metres.
+    pub contact: Vec<f64>,
+    /// Weld groups (union-find parents; a root is its own parent).
+    pub group: Vec<u8>,
 }
 
 impl Tectonics {

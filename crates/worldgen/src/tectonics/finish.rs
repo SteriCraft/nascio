@@ -51,12 +51,13 @@ impl std::fmt::Display for Report {
         write!(
             f,
             "events: ridge cells {}, rift cells {}, ocean-continent subductions {}, \
-             ocean-ocean subductions {}, collisions {}",
+             ocean-ocean subductions {}, collisions {}, welds {}",
             e.ridge_cells,
             e.rift_cells,
             e.ocean_continent_subductions,
             e.ocean_ocean_subductions,
-            e.collisions
+            e.collisions,
+            e.welds
         )
     }
 }
@@ -221,7 +222,7 @@ impl Tectonics {
                 e + edifice
             } else {
                 let o = f64::from(oro[idx]);
-                if o > 0.1 * relief {
+                if o > 0.25 * relief {
                     f |= flags::OROGENY;
                 }
                 if g_arc > FLAG_LEVEL {

@@ -104,6 +104,9 @@ pub struct TectonicsConfig {
     pub arc_uplift_m: f64,
     /// Half-width of the orogen band on each side of a collision.
     pub orogeny_width_m: f64,
+    /// Relative displacement two plates keep after their continents meet, before they weld
+    /// and move together (bounded crustal shortening).
+    pub collision_shortening_m: f64,
     /// Highest summits.
     pub max_elevation_m: f64,
     /// Elevation of unthickened continental crust.
@@ -164,6 +167,7 @@ impl Default for TectonicsConfig {
             arc_width_m: 2_500.0,
             arc_uplift_m: 1_200.0,
             orogeny_width_m: 6_000.0,
+            collision_shortening_m: 5_000.0,
             max_elevation_m: 3_000.0,
             continent_base_elevation_m: 200.0,
             moho_ocean_m: 700.0,
