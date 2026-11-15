@@ -1,0 +1,15 @@
+[package]
+name = "nascio-voxel"
+description = "Block definitions, 32^3 chunks, chunk generation and meshing for Nascio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+nascio-core.workspace = true
+nascio-worldgen.workspace = true
+
+[lints]
+workspace = true

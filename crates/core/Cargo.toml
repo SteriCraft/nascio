@@ -1,0 +1,19 @@
+[package]
+name = "nascio-core"
+description = "Torus maths, coordinates, constants, game time and astronomy for Nascio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+jiff.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "nascio-viewer"
+description = "Development viewer for Nascio worlds (2D maps and free-flight 3D)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[features]
+# Development only: faster incremental builds. Use `cargo viewer-dev`.
+dev = ["bevy/dynamic_linking"]
+
+[dependencies]
+nascio-core.workspace = true
+nascio-worldgen.workspace = true
+nascio-voxel.workspace = true
+bevy.workspace = true
+bevy_egui.workspace = true
+
+[lints]
+workspace = true

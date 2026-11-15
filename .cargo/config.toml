@@ -1,0 +1,3 @@
+[alias]
+# Development run of the viewer with Bevy dynamic linking (faster incremental builds).
+viewer-dev = "run -p nascio-viewer --features dev --"

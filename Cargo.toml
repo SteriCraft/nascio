@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/worldgen", "crates/voxel", "crates/viewer"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license-file = "LICENSE"
+repository = "https://github.com/SteriCraft/nascio"
+
+[workspace.dependencies]
+nascio-core = { path = "crates/core" }
+nascio-worldgen = { path = "crates/worldgen" }
+nascio-voxel = { path = "crates/voxel" }
+
+# All versions are pinned. Upgrading one is an explicit decision (docs/decisions.md).
+serde = { version = "=1.0.229", features = ["derive"] }
+jiff = { version = "=0.2.45", features = ["serde"] }
+thiserror = "=2.0.21"
+anyhow = "=1.0.104"
+clap = { version = "=4.6.7", features = ["derive"] }
+toml = "=1.2.1"
+rand = "=0.10.4"
+rand_chacha = "=0.10.0"
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+blake3 = "=1.8.7"
+proptest = "=1.12.0"
+bevy = "=0.20.1"
+bevy_egui = "=0.43.1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
