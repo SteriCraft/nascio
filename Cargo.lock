@@ -4176,8 +4176,13 @@ dependencies = [
 name = "nascio-voxel"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "image",
  "nascio-core",
  "nascio-worldgen",
+ "proptest",
+ "serde",
+ "toml",
 ]
 
 [[package]]

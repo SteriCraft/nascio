@@ -10,6 +10,13 @@ repository.workspace = true
 [dependencies]
 nascio-core.workspace = true
 nascio-worldgen.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+image.workspace = true
 
 [lints]
 workspace = true
