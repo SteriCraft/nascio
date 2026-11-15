@@ -17,6 +17,10 @@ rand.workspace = true
 rand_chacha.workspace = true
 image.workspace = true
 blake3.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 
 [lints]
 workspace = true
