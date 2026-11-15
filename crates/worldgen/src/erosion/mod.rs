@@ -8,9 +8,11 @@
 //! 3. erosion steps (stream power and hillslope diffusion) and coastal sediments;
 //! 4. final hydrography: lakes, flow directions, accumulation, basins, rivers.
 
+pub mod flow;
 pub mod precip;
 pub mod upsample;
 
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::config::WorldConfig;
@@ -193,6 +195,12 @@ pub struct ErosionOutput {
     pub elevation: PeriodicGrid<f32>,
     /// Provisional precipitation on the tectonic grid, mm/yr.
     pub precipitation: PeriodicGrid<f32>,
+    /// D8 direction code (index in [`flow::D8`]), [`flow::NO_DIR`] on the sea.
+    pub flow_direction: PeriodicGrid<u8>,
+    /// Mean discharge, m³/s.
+    pub flow_accumulation: PeriodicGrid<f32>,
+    /// Drainage basin, numbered by outlet (1, 2, … in outlet index order); 0 on the sea.
+    pub basin_id: PeriodicGrid<u32>,
     pub report: ErosionReport,
 }
 
@@ -227,7 +235,71 @@ impl ErosionOutput {
         vec![
             Layer::from_f32("elevation", "m", &self.elevation),
             Layer::from_f32("precipitation", "mm/yr", &self.precipitation),
+            Layer::from_u8("flow_direction", "D8 code, 255=none", &self.flow_direction),
+            Layer::from_f32("flow_accumulation", "m3/s", &self.flow_accumulation),
+            Layer::from_u32("basin_id", "id, 0=sea", &self.basin_id),
         ]
+    }
+}
+
+/// Seconds in a year (Julian), to turn m³/yr into m³/s.
+pub const SECONDS_PER_YEAR: f64 = 31_557_600.0;
+
+/// Final flow routing of a fine elevation grid.
+struct Routing {
+    dir: Vec<u8>,
+    /// Discharge, m³/yr.
+    discharge: Vec<f64>,
+    basin: Vec<u32>,
+}
+
+/// Rain per fine cell (m³/yr) from the precipitation grid (mm/yr).
+fn rain_volume(precip: &PeriodicGrid<f32>, shape: flow::Shape) -> Vec<f64> {
+    let area = shape.cell * shape.cell;
+    let mut v = vec![0.0; shape.n()];
+    v.par_chunks_mut(shape.res)
+        .enumerate()
+        .for_each(|(j, row)| {
+            let z = (j as f64 + 0.5) * shape.cell;
+            for (i, o) in row.iter_mut().enumerate() {
+                let x = (i as f64 + 0.5) * shape.cell;
+                *o = precip.sample_bilinear(x, z).max(0.0) / 1_000.0 * area;
+            }
+        });
+    v
+}
+
+/// Routes the flow on `h`: sea, epsilon-filled surface, D8, discharge and basins.
+fn route(h: &[f64], rain: &[f64], shape: flow::Shape, sea_min_area_m2: f64) -> Routing {
+    let sea = flow::sea_mask(h, shape, sea_min_area_m2);
+    let filled = flow::priority_flood(h, &sea, shape, true);
+    let (rec, dir) = flow::receivers(&filled, &sea, shape);
+    let order = flow::stack(&rec);
+    debug_assert_eq!(order.len(), shape.n(), "every cell drains to the sea");
+    let discharge = flow::accumulate(&order, &rec, rain);
+    let outlet = flow::outlets(&order, &rec);
+    // Basins numbered by outlet index; the sea itself is 0.
+    let mut used = vec![false; shape.n()];
+    for k in 0..shape.n() {
+        if !sea[k] {
+            used[outlet[k] as usize] = true;
+        }
+    }
+    let mut id = vec![0u32; shape.n()];
+    let mut next = 1u32;
+    for (k, u) in used.iter().enumerate() {
+        if *u {
+            id[k] = next;
+            next += 1;
+        }
+    }
+    let basin = (0..shape.n())
+        .map(|k| if sea[k] { 0 } else { id[outlet[k] as usize] })
+        .collect();
+    Routing {
+        dir,
+        discharge,
+        basin,
     }
 }
 
@@ -238,9 +310,31 @@ pub fn run(cfg: &WorldConfig, tect: &TectonicOutput) -> ErosionOutput {
     let precipitation = timed(&mut report, "precipitation", || {
         precip::precipitation(cfg, &fine)
     });
+    let shape = flow::Shape {
+        res: fine.width(),
+        cell: fine.cell_size(),
+    };
+    let rain = rain_volume(&precipitation, shape);
+    let sea_min_area_m2 = cfg.tectonics.inland_water_max_km2 * 1e6;
+    let routing = timed(&mut report, "routing", || {
+        route(fine.data(), &rain, shape, sea_min_area_m2)
+    });
+    let (res, cell) = (shape.res, shape.cell);
     ErosionOutput {
         elevation: fine.map(|&v| v as f32),
         precipitation,
+        flow_direction: PeriodicGrid::from_vec(res, res, cell, routing.dir),
+        flow_accumulation: PeriodicGrid::from_vec(
+            res,
+            res,
+            cell,
+            routing
+                .discharge
+                .iter()
+                .map(|q| (q / SECONDS_PER_YEAR) as f32)
+                .collect(),
+        ),
+        basin_id: PeriodicGrid::from_vec(res, res, cell, routing.basin),
         report,
     }
 }

@@ -28,6 +28,10 @@ const INK_2: &str = "#52514e";
 const CONTINENT_GREY: &str = "#c9c6bd";
 const OCEAN_FILL: &str = "#2f6db0";
 const CONTINENT_FILL: &str = "#c9a66b";
+const SEA_PALE: &str = "#dce8f2";
+const RIVER: &str = "#0d366b";
+/// log10 range of the discharge preview, m³/s.
+const ACCUM_LOG_RANGE: (f64, f64) = (-3.0, 3.0);
 
 /// Hypsometric tint, metres → colour.
 const ELEVATION_STOPS: [(f64, &str); 11] = [
@@ -209,6 +213,36 @@ pub fn colorize(world: &World, name: &str) -> Option<Vec<Color>> {
                 }
             })
             .collect(),
+        "flow_accumulation" => (0..n)
+            .map(|i| {
+                if world
+                    .layer("basin_id")
+                    .is_some_and(|b| b.data.get_f64(i) == 0.0)
+                {
+                    return hex(SEA_PALE);
+                }
+                let t = (v(i).max(1e-9).log10() - ACCUM_LOG_RANGE.0)
+                    / (ACCUM_LOG_RANGE.1 - ACCUM_LOG_RANGE.0);
+                if t <= 0.0 { hex(SURFACE) } else { blues(t) }
+            })
+            .collect(),
+        "basin_id" => {
+            let threshold = world.config.erosion.river_threshold_m3s;
+            let accum = world.layer("flow_accumulation");
+            (0..n)
+                .map(|i| {
+                    let id = v(i) as u64;
+                    if id == 0 {
+                        return hex(SEA_PALE);
+                    }
+                    if accum.is_some_and(|a| a.data.get_f64(i) >= threshold) {
+                        return hex(RIVER);
+                    }
+                    let c = hex(SERIES[(crate::rng::mix64(id) % SERIES.len() as u64) as usize]);
+                    lerp_color(c, hex(SURFACE), 0.45)
+                })
+                .collect()
+        }
         "plate_id" => {
             let palette = plate_colors(&u8_grid(layer)?);
             (0..n)
@@ -294,6 +328,21 @@ pub fn legend(name: &str) -> Vec<(Color, &'static str)> {
             (ramp(&PRECIP_STOPS, 1_500.0), "1500"),
             (ramp(&PRECIP_STOPS, 2_500.0), "2500"),
             (ramp(&PRECIP_STOPS, 4_000.0), "4000 (sea: pale)"),
+        ],
+        "flow_accumulation" => vec![
+            (blues(0.0), "0.001 m3/s"),
+            (blues(1.0 / 3.0), "0.1"),
+            (blues(2.0 / 3.0), "10"),
+            (blues(1.0), "1000"),
+            (hex(SEA_PALE), "sea"),
+        ],
+        "basin_id" => vec![
+            (
+                lerp_color(hex(SERIES[0]), hex(SURFACE), 0.45),
+                "basin (random colours)",
+            ),
+            (hex(RIVER), "river"),
+            (hex(SEA_PALE), "sea"),
         ],
         "plate_id" => vec![
             (hex(SERIES[0]), "continental crust (saturated)"),

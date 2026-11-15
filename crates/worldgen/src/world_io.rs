@@ -13,7 +13,7 @@
 //! |---|---|
 //! | 4 | magic `NSCL` |
 //! | 2 | format version (1) |
-//! | 1 | data type: 1 = u8, 2 = u16, 3 = f32 |
+//! | 1 | data type: 1 = u8, 2 = u16, 3 = f32, 4 = u32 |
 //! | 1 | reserved (0) |
 //! | 4 | width |
 //! | 4 | height |
@@ -40,6 +40,7 @@ pub enum LayerData {
     U8(Vec<u8>),
     U16(Vec<u16>),
     F32(Vec<f32>),
+    U32(Vec<u32>),
 }
 
 impl LayerData {
@@ -48,6 +49,7 @@ impl LayerData {
             LayerData::U8(_) => 1,
             LayerData::U16(_) => 2,
             LayerData::F32(_) => 3,
+            LayerData::U32(_) => 4,
         }
     }
 
@@ -56,6 +58,7 @@ impl LayerData {
             LayerData::U8(v) => v.len(),
             LayerData::U16(v) => v.len(),
             LayerData::F32(v) => v.len(),
+            LayerData::U32(v) => v.len(),
         }
     }
 
@@ -65,6 +68,7 @@ impl LayerData {
             LayerData::U8(v) => f64::from(v[i]),
             LayerData::U16(v) => f64::from(v[i]),
             LayerData::F32(v) => f64::from(v[i]),
+            LayerData::U32(v) => f64::from(v[i]),
         }
     }
 
@@ -75,6 +79,9 @@ impl LayerData {
                 .iter()
                 .for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
             LayerData::F32(v) => v
+                .iter()
+                .for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
+            LayerData::U32(v) => v
                 .iter()
                 .for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
         }
@@ -101,6 +108,11 @@ impl Layer {
     /// Layer from a `u16` grid.
     pub fn from_u16(name: &str, unit: &str, g: &PeriodicGrid<u16>) -> Self {
         Self::new(name, unit, g, LayerData::U16(g.data().to_vec()))
+    }
+
+    /// Layer from a `u32` grid.
+    pub fn from_u32(name: &str, unit: &str, g: &PeriodicGrid<u32>) -> Self {
+        Self::new(name, unit, g, LayerData::U32(g.data().to_vec()))
     }
 
     /// Layer from an `f32` grid.
@@ -173,6 +185,14 @@ impl Layer {
                     .0
                     .iter()
                     .map(|c| f32::from_le_bytes(*c))
+                    .collect(),
+            ),
+            4 => LayerData::U32(
+                take(n * 4)?
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| u32::from_le_bytes(*c))
                     .collect(),
             ),
             t => bail!("unknown layer data type {t}"),
@@ -272,10 +292,12 @@ mod tests {
         let g8 = PeriodicGrid::from_fn(25, 25, 4_000.0, |i, j| (i * 3 + j) as u8);
         let g16 = PeriodicGrid::from_fn(25, 25, 4_000.0, |i, j| (i * 1_000 + j) as u16);
         let gf = PeriodicGrid::from_fn(25, 25, 4_000.0, |i, j| i as f32 * -12.5 + j as f32);
+        let g32 = PeriodicGrid::from_fn(25, 25, 4_000.0, |i, j| (i * 100_000 + j) as u32);
         vec![
             Layer::from_u8("crust_type", "", &g8),
             Layer::from_u16("plate_id", "id", &g16),
             Layer::from_f32("elevation_tectonic", "m", &gf),
+            Layer::from_u32("basin_id", "id", &g32),
         ]
     }
 
