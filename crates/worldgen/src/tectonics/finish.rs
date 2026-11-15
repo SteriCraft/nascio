@@ -338,7 +338,7 @@ impl Tectonics {
                 if target > e {
                     e += (target - e) * g_arc[k];
                 }
-                e + edifice
+                (e + edifice).min(t.max_elevation_m)
             } else {
                 if f64::from(oro[k]) > 0.25 * relief {
                     f |= flags::OROGENY;
