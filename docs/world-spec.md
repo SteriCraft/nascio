@@ -94,7 +94,7 @@ La couture est cachée sous un **couvert nuageux permanent**. Ni le soleil, ni l
   - Sous le couvert, elles sont masquées comme le reste du ciel.
 
 ### 2.8 Étoiles et Lune (rendu uniquement)
-- **Étoiles** : catalogue réel, en coordonnées équatoriales. Orientation locale par φ et par l'angle horaire sidéral `H★ = H + λ_☉`, avec `λ_☉ = 2π(N + 10)/365 − π/2` la longitude écliptique du soleil (déjà implicite dans δ, puisque `δ = ε · sin λ_☉`). Cela donne 366 rotations sidérales par an de 365 jours, et l'équinoxe de mars (N ≈ 81,25) correspond à λ_☉ = 0, comme sur Terre.
+- **Étoiles** : catalogue réel, en coordonnées équatoriales. Orientation locale par φ et par l'angle horaire sidéral `H★ = H + λ_☉`, avec `λ_☉ = 2π(N + 10)/365 − π/2` la longitude écliptique du soleil (déjà implicite dans δ, puisque `δ = ε · sin λ_☉`). Cela donne 366 rotations sidérales par an de 365 jours, et l'équinoxe de mars (N ≈ 81,25) correspond à λ_☉ = 0, comme sur Terre. On utilise λ_☉ à la place de l'ascension droite du soleil : on néglige ainsi l'équation du temps, soit au plus environ 2,5° d'écart.
 - **Lune** :
   - lunaison de **29,53 jours de jeu** ;
   - longitude écliptique `λ_☾ = λ_☉ + 360° · (N_total / 29,53) + λ0`, où `N_total = day_index + day_frac` et `λ0` est réglé pour que l'époque tombe à une phase choisie *(config)* ;
