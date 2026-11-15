@@ -1,6 +1,7 @@
 //! Surface height function shared by the chunks and the horizon (spec §5).
 //!
-//! `height = bicubic(elevation) + detail`. `elevation` is the eroded 32 m grid of M3 (one cell
+//! `height = bicubic(elevation) + detail` (bicubic clamped to the surrounding cells, so steep
+//! steps such as the edge of a sediment fan do not overshoot into islets). `elevation` is the eroded 32 m grid of M3 (one cell
 //! per chunk at full resolution). The detail noise is the one of `nascio-worldgen`
 //! ([`Detail`]): the fine grid already contains the octaves at least two cells wide, the chunks
 //! add only the finer ones, with the amplitude of the context (ruggedness, coast, sea floor).
@@ -174,13 +175,13 @@ impl Terrain {
     /// Macro elevation (eroded grid), without the chunk detail.
     #[inline]
     pub fn base_height(&self, x: f64, z: f64) -> f64 {
-        self.elevation.sample_bicubic(x, z)
+        self.elevation.sample_bicubic_clamped(x, z)
     }
 
     /// Surface height keeping only the octaves at least twice as wide as `sample_spacing`
     /// (for coarse horizon meshes, which would alias finer detail).
     pub fn height_lod(&self, x: f64, z: f64, sample_spacing: f64) -> f64 {
-        let e = self.elevation.sample_bicubic(x, z);
+        let e = self.elevation.sample_bicubic_clamped(x, z);
         let min = 2.0 * sample_spacing;
         if min >= self.baked_spacing {
             return e;

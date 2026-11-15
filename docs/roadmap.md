@@ -59,6 +59,7 @@ Chaque jalon se termine par une revue avec l'auteur. On ne passe pas au jalon su
 - chunks et horizon sur la grille érodée, avec l'eau des lacs ;
 - graines 42, 7, 1234 et 2026 : génération complète en pleine résolution en 48 à 60 s (érosion 41 à 53 s), 70 à 115 lacs par monde, terre abaissée de 37 à 68 m en moyenne ;
 - ligne de lacs de la graine 7 : devenue une vallée de graben avec des lacs ; creux −200..0 m : comblé par les cônes de dépôt (voir `hypsometry.png`).
+- benchmark `bench/default.toml` sur la graine 42 érodée (RTX 5060, Windows) : p95 de 4,29 ms, moyenne de 2,96 ms (338 i/s), 1 % low à 144 i/s ; aucune régression par rapport à M2. À refaire sur le portable de référence.
 
 ## M4 — Climat, saisons, biomes, ciel
 - Climat (§4.3) avec stockage en harmoniques, hydrologie finale (§4.4), biomes (§4.5).

@@ -173,6 +173,22 @@ impl<T: Copy + Into<f64>> PeriodicGrid<T> {
         };
         catmull_rom(row(-1), row(0), row(1), row(2), fz)
     }
+
+    /// [`sample_bicubic`](Self::sample_bicubic) clamped to the range of the four surrounding
+    /// cell centres: smooth like the bicubic, without its overshoot next to steep steps (no
+    /// spurious islets in front of a cliff, no pits at its foot).
+    pub fn sample_bicubic_clamped(&self, x: f64, z: f64) -> f64 {
+        let (i, j, _, _) = self.grid_pos(x, z);
+        let c = [
+            (*self.get(i, j)).into(),
+            (*self.get(i + 1, j)).into(),
+            (*self.get(i, j + 1)).into(),
+            (*self.get(i + 1, j + 1)).into(),
+        ];
+        let lo = c.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = c.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        self.sample_bicubic(x, z).clamp(lo, hi)
+    }
 }
 
 #[inline]
@@ -223,6 +239,25 @@ mod tests {
         // x = 0 lies halfway between the centres of columns 24 and 0.
         let v = g.sample_bilinear(0.0, g.cell_center(0, 5).1);
         assert!((v - (2_405.0 + 5.0) / 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn clamped_bicubic_does_not_overshoot_a_step() {
+        let g = PeriodicGrid::from_fn(
+            25,
+            25,
+            4_000.0,
+            |i, _| if i < 12 { -1.0f32 } else { -1_500.0 },
+        );
+        let z = 10_000.0;
+        let (mut raw_max, mut clamped_max) = (f64::MIN, f64::MIN);
+        for k in 0..200 {
+            let x = 40_000.0 + f64::from(k) * 50.0;
+            raw_max = raw_max.max(g.sample_bicubic(x, z));
+            clamped_max = clamped_max.max(g.sample_bicubic_clamped(x, z));
+        }
+        assert!(raw_max > -1.0, "the plain bicubic overshoots: {raw_max}");
+        assert!(clamped_max <= -1.0);
     }
 
     proptest! {
