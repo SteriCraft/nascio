@@ -40,6 +40,8 @@ Chaque jalon se termine par une revue avec l'auteur. On ne passe pas au jalon su
 - aucune couture visible entre les chunks et l'horizon ;
 - 60 i/s en 1080p, réglages maximum, sur le portable de référence (benchmark).
 
+**Mesure de performance (2026-11-15)** : critère atteint sur le portable de référence (RTX 3050 Mobile, Linux) avec `bench/default.toml`. Sur 32 545 images, la moyenne est de 3,84 ms (260 i/s), le p95 de 5,92 ms, le p99 de 7,16 ms et le 1 % low de 116 i/s. Seules 2 images dépassent 16,7 ms (max 25,9 ms). La traversée à 2 km/s est limitée par le CPU (chargement des chunks, GPU sous 1 ms). Le passage le long de la haute chaîne est la phase la plus lourde pour le GPU (3,7 ms en moyenne).
+
 ## M3 — Érosion et hydrographie
 - Érosion de type stream power sur la grille de 32 m, priority-flood, lacs, première ébauche de rivières.
 
