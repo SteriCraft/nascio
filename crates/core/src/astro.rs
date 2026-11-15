@@ -35,7 +35,14 @@ pub struct AstroConfig {
     /// Below this seam distance the sun is always at least 4° under the horizon.
     pub s_dark: f64,
     /// Above this seam distance the visible sun equals the geometric sun.
+    /// Below it the polar cloud deck is opaque.
     pub s_light: f64,
+    /// Above this seam distance the polar cloud deck no longer forces any cover (§2.7).
+    pub s_clear: f64,
+    /// Seam distance of the aurora ring's peak intensity (§2.7).
+    pub s_aurora: f64,
+    /// Outer edge of the aurora ring (§2.7).
+    pub s_aurora_out: f64,
 }
 
 impl Default for AstroConfig {
@@ -44,9 +51,26 @@ impl Default for AstroConfig {
             s_fade: 3_000.0,
             s_dark: 1_000.0,
             s_light: 2_000.0,
+            s_clear: 3_000.0,
+            s_aurora: 3_500.0,
+            s_aurora_out: 5_000.0,
         }
     }
 }
+
+/// Invalid [`AstroConfig`].
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum AstroConfigError {
+    #[error("s_fade must be > 0 (got {0})")]
+    Fade(f64),
+    #[error("seam distances must satisfy 0 < s_dark < s_light < s_clear < s_aurora < s_aurora_out")]
+    Order,
+}
+
+/// Aurorae are visible only at night: full below this visible sun elevation…
+pub const AURORA_NIGHT_FULL_DEG: f64 = -12.0;
+/// …and gone above this one.
+pub const AURORA_NIGHT_NONE_DEG: f64 = -6.0;
 
 /// Solar declination δ(N) = −ε · cos(2π (N + 10) / 365), N the continuous day of year.
 #[inline]
@@ -55,6 +79,26 @@ pub fn declination(n: f64) -> f64 {
 }
 
 impl AstroConfig {
+    /// Checks the ordering of the seam distances.
+    pub fn validate(&self) -> Result<(), AstroConfigError> {
+        if self.s_fade.is_nan() || self.s_fade <= 0.0 {
+            return Err(AstroConfigError::Fade(self.s_fade));
+        }
+        let d = [
+            0.0,
+            self.s_dark,
+            self.s_light,
+            self.s_clear,
+            self.s_aurora,
+            self.s_aurora_out,
+        ];
+        if d.windows(2).all(|w| w[0] < w[1]) {
+            Ok(())
+        } else {
+            Err(AstroConfigError::Order)
+        }
+    }
+
     /// Season weight `w(s) = smoothstep(0, S_FADE, s)`.
     #[inline]
     pub fn season_weight(&self, s: f64) -> f64 {
@@ -113,11 +157,50 @@ impl AstroConfig {
         daily_insolation(latitude(z), self.effective_declination(n, seam_distance(z)))
     }
 
-    /// Aurora intensity in `[0, 1]`: `(1 − smoothstep(S_DARK, S_LIGHT + 1000, s)) · night`.
+    /// Minimum cloud cover of the polar band (§2.7): `c_min(s) = 1 − smoothstep(S_LIGHT, S_CLEAR, s)`.
+    /// Opaque (1) for `s ≤ S_LIGHT`, i.e. wherever `e_vis ≠ e`.
     #[inline]
-    pub fn aurora_intensity(&self, s: f64, night_factor: f64) -> f64 {
-        (1.0 - smoothstep(self.s_dark, self.s_light + 1_000.0, s)) * night_factor.clamp(0.0, 1.0)
+    pub fn min_cloud_cover(&self, s: f64) -> f64 {
+        1.0 - smoothstep(self.s_light, self.s_clear, s)
     }
+
+    /// Rendered cloud cover `c = max(c_min(s), c_weather)`: weather may add clouds, never remove
+    /// them from the band.
+    #[inline]
+    pub fn cloud_cover(&self, s: f64, weather_cover: f64) -> f64 {
+        self.min_cloud_cover(s).max(weather_cover.clamp(0.0, 1.0))
+    }
+
+    /// Geographic aurora ring intensity (§2.7):
+    /// `a(s) = smoothstep(S_CLEAR, S_AUR, s) · (1 − smoothstep(S_AUR, S_AUR_OUT, s))`.
+    #[inline]
+    pub fn aurora_ring(&self, s: f64) -> f64 {
+        smoothstep(self.s_clear, self.s_aurora, s)
+            * (1.0 - smoothstep(self.s_aurora, self.s_aurora_out, s))
+    }
+
+    /// Aurora emission at a point of the ring: `a(s) · night(e_vis)`. Occlusion by clouds along
+    /// the line of sight is the renderer's job (the sky is weighted by `1 − c`).
+    #[inline]
+    pub fn aurora_intensity(&self, s: f64, visible_elevation: f64) -> f64 {
+        self.aurora_ring(s) * aurora_night_factor(visible_elevation)
+    }
+}
+
+/// Night factor for aurorae: `1 − smoothstep(−12°, −6°, e_vis)`.
+#[inline]
+pub fn aurora_night_factor(visible_elevation: f64) -> f64 {
+    1.0 - smoothstep(
+        AURORA_NIGHT_FULL_DEG.to_radians(),
+        AURORA_NIGHT_NONE_DEG.to_radians(),
+        visible_elevation,
+    )
+}
+
+/// Weight of sky objects (stars, Moon) seen through a cloud cover `c`: `1 − c`.
+#[inline]
+pub fn sky_visibility(cloud_cover: f64) -> f64 {
+    1.0 - cloud_cover.clamp(0.0, 1.0)
 }
 
 /// Position of the sun in the local sky.
@@ -409,15 +492,64 @@ mod tests {
     }
 
     #[test]
-    fn light_and_aurora() {
-        let c = cfg();
+    fn light_intensity_fade() {
         assert_eq!(light_intensity(0.0), 0.0);
         assert_eq!(light_intensity(-0.1), 0.0);
         assert_eq!(light_intensity(3f64.to_radians()), 1.0);
-        assert_eq!(c.aurora_intensity(0.0, 1.0), 1.0);
-        assert_eq!(c.aurora_intensity(1_000.0, 1.0), 1.0);
-        assert_eq!(c.aurora_intensity(3_000.0, 1.0), 0.0);
-        assert_eq!(c.aurora_intensity(500.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn polar_cloud_deck() {
+        let c = cfg();
+        assert_eq!(c.min_cloud_cover(0.0), 1.0);
+        assert_eq!(c.min_cloud_cover(2_000.0), 1.0);
+        assert_eq!(c.min_cloud_cover(3_000.0), 0.0);
+        assert_eq!(c.min_cloud_cover(20_000.0), 0.0);
+        assert!((c.min_cloud_cover(2_500.0) - 0.5).abs() < 1e-12);
+        // Weather adds clouds but never removes them in the band.
+        assert_eq!(c.cloud_cover(1_000.0, 0.0), 1.0);
+        assert_eq!(c.cloud_cover(20_000.0, 0.3), 0.3);
+        assert_eq!(c.cloud_cover(2_500.0, 0.8), 0.8);
+        assert_eq!(c.cloud_cover(2_500.0, 0.1), c.min_cloud_cover(2_500.0));
+        assert_eq!(sky_visibility(c.cloud_cover(0.0, 0.0)), 0.0);
+    }
+
+    #[test]
+    fn aurora_ring_and_night() {
+        let c = cfg();
+        let night = (-20f64).to_radians();
+        assert_eq!(c.aurora_intensity(0.0, night), 0.0);
+        assert_eq!(c.aurora_intensity(3_000.0, night), 0.0);
+        assert_eq!(c.aurora_intensity(3_500.0, night), 1.0);
+        assert_eq!(c.aurora_intensity(5_000.0, night), 0.0);
+        assert_eq!(c.aurora_intensity(20_000.0, night), 0.0);
+        assert!(c.aurora_intensity(4_000.0, night) > 0.5);
+        assert_eq!(aurora_night_factor((-12f64).to_radians()), 1.0);
+        assert_eq!(aurora_night_factor((-6f64).to_radians()), 0.0);
+        assert_eq!(aurora_night_factor(0.3), 0.0);
+        assert_eq!(c.aurora_intensity(3_500.0, (-6f64).to_radians()), 0.0);
+        // The ring lies entirely outside the opaque deck.
+        for i in 0..=10_000 {
+            let s = f64::from(i);
+            if c.aurora_ring(s) > 0.0 {
+                assert_eq!(c.min_cloud_cover(s), 0.0, "s={s}");
+            }
+        }
+    }
+
+    #[test]
+    fn config_validation() {
+        assert_eq!(cfg().validate(), Ok(()));
+        let bad = AstroConfig {
+            s_clear: 1_500.0,
+            ..cfg()
+        };
+        assert_eq!(bad.validate(), Err(AstroConfigError::Order));
+        let bad = AstroConfig {
+            s_fade: 0.0,
+            ..cfg()
+        };
+        assert_eq!(bad.validate(), Err(AstroConfigError::Fade(0.0)));
     }
 
     #[test]
@@ -440,6 +572,16 @@ mod tests {
             let sun = cfg().sun_at(n, h, z);
             prop_assert!(deg(sun.visible_elevation) <= -4.0 + 1e-9);
             prop_assert_eq!(sun.light_intensity(), 0.0);
+        }
+
+        #[test]
+        fn deck_opaque_wherever_sun_is_shifted(s in 0.0f64..=10_000.0, n in 0.0f64..365.0, h in -PI..PI, north in any::<bool>()) {
+            let c = cfg();
+            let z = if north { z_north(s) } else { z_south(s) };
+            let sun = c.sun_at(n, h, z);
+            if sun.visible_elevation != sun.elevation {
+                prop_assert_eq!(c.min_cloud_cover(s), 1.0);
+            }
         }
 
         #[test]
