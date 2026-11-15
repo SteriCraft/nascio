@@ -32,7 +32,7 @@ Les valeurs numériques marquées *(config)* sont des valeurs par défaut, modif
 | Climat | 160 m | 625 × 625 | température, précipitations, vents, courants |
 
 Toutes les grilles sont périodiques sur les deux axes. L'échantillonnage à une position quelconque se fait par interpolation **bicubique périodique**, ou bilinéaire quand c'est suffisant.
-Pour itérer vite, le CLI doit pouvoir générer à **résolution réduite** (par exemple 1/4) avec les mêmes paramètres physiques.
+Pour itérer vite, le CLI doit pouvoir générer à **résolution réduite** avec les mêmes paramètres physiques. Les facteurs de réduction doivent diviser 625 pour que les grilles restent alignées sur les chunks : **1/5** (125² pour la tectonique et le climat, 625² pour l'hydrologie) et **1/25** (25², 125²) pour les tests rapides.
 
 ---
 

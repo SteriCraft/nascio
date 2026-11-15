@@ -17,3 +17,10 @@
 | 2026-11-15 | Rust de bout en bout ; Bevy + egui pour le visualiseur | Performance, un seul langage, compilateur strict utile au travail avec l'IA |
 | 2026-11-15 | Seul le serveur génère ; on stocke la carte macro et les modifications des joueurs | Taille du monde (10¹⁰ colonnes) ; pas besoin de déterminisme flottant entre machines différentes |
 | 2026-11-15 | Code en anglais, documentation en français | Convention de l'auteur |
+| 2026-11-15 | Résolution réduite par facteurs 1/5 et 1/25 (et non 1/4) | 625 n'est pas divisible par 4 ; ces facteurs gardent les grilles alignées sur les chunks |
+| 2026-11-15 | Bevy minimal (fenêtre + egui) dès M0 | Figer les versions tôt et détecter en CI les dépendances système (Linux) |
+| 2026-11-15 | Versions figées : bevy =0.20.1, bevy_egui =0.43.1, serde =1.0.229, jiff =0.2.45, thiserror =2.0.21, anyhow =1.0.104, clap =4.6.7, toml =1.2.1, rand =0.10.4, rand_chacha =0.10.0, image =0.25.10, blake3 =1.8.7, proptest =1.12.0 ; édition 2024, rust-version 1.97 | Dernières versions stables au démarrage ; toute mise à jour est une décision explicite |
+| 2026-11-15 | Temps en secondes Unix (POSIX, sans secondes intercalaires) depuis `GAME_EPOCH` ; `t < 0` valide (années négatives) ; `GAME_EPOCH` par défaut = 2026-01-01T00:00:00Z | Calcul simple et identique côté serveur et site web |
+| 2026-11-15 | Azimut mesuré depuis le nord (−z) vers l'est (+x), dans [0, 2π) ; direction du soleil = (cos e·sin A, sin e, −cos e·cos A) en axes monde | Convention géographique usuelle, cohérente avec z vers le sud |
+| 2026-11-15 | `delta(a, b)` vaut +S/2 dans le cas d'égalité exacte, dans les deux sens (seule exception à l'antisymétrie) | Conforme à la spec (§1.2) ; documenté et testé |
+| 2026-11-15 | `bevy/dynamic_linking` derrière la feature `dev` du viewer (alias `cargo viewer-dev`) | Accélère la compilation en développement sans affecter les builds release ni la CI |
