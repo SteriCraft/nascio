@@ -26,3 +26,26 @@ fn elevations_follow_spec_targets() {
         );
     }
 }
+
+#[test]
+fn hotspot_islands_emerge_on_every_seed() {
+    for seed in [42, 7, 1234, 2026] {
+        let (world, _) = generate(&WorldConfig::new(seed, Scale::Fifth)).expect("generation");
+        let e = world.layer("elevation_tectonic").expect("elevation");
+        let crust = world.layer("crust_type").expect("crust");
+        let flags = world.layer("history_flags").expect("flags");
+        let islands = (0..e.width * e.height)
+            .filter(|&i| {
+                crust.data.get_f64(i) == 0.0
+                    && (flags.data.get_f64(i) as u8) & nascio_worldgen::tectonics::flags::HOTSPOT
+                        != 0
+                    && e.data.get_f64(i) > 0.0
+            })
+            .count();
+        println!("seed {seed}: {islands} emerged hotspot cells");
+        assert!(
+            islands >= 3,
+            "seed {seed}: only {islands} emerged hotspot cells"
+        );
+    }
+}
