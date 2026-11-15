@@ -109,8 +109,21 @@ impl Tectonics {
             cells.push(c);
         }
         self.grid.data_mut().copy_from_slice(&cells);
+        self.smooth_plate_ids();
         self.apply_hotspots();
         self.step_index += 1;
+    }
+
+    /// Applies [`majority_plate`] to every cell (gather from the current state).
+    fn smooth_plate_ids(&mut self) {
+        let g = &self.grid;
+        let ids: Vec<u8> = (0..g.data().len())
+            .into_par_iter()
+            .map(|idx| majority_plate(g, idx))
+            .collect();
+        for (c, p) in self.grid.data_mut().iter_mut().zip(ids) {
+            c.plate = p;
+        }
     }
 
     /// Plate pairs (`a * n + b`, `a < b`) whose continental crust lands on each other this step.
@@ -293,6 +306,23 @@ fn resolve(ctx: &StepCtx, idx: usize) -> (Cell, Event) {
             (winner, event)
         }
     }
+}
+
+/// Majority filter on plate ids: a cell with at most one 4-neighbour of its own plate joins
+/// a plate that holds at least three of its 4-neighbours. Crust is unchanged. Removes the
+/// stray cells and one-cell spikes that make boundaries tangle.
+fn majority_plate(g: &PeriodicGrid<Cell>, idx: usize) -> u8 {
+    let (i, j) = g.coords(idx);
+    let (i, j) = (i as i64, j as i64);
+    let own = g.data()[idx].plate;
+    let n = [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)].map(|(di, dj)| g.get(i + di, j + dj).plate);
+    if n.iter().filter(|&&p| p == own).count() > 1 {
+        return own;
+    }
+    n.iter()
+        .copied()
+        .find(|&p| n.iter().filter(|&&q| q == p).count() >= 3)
+        .unwrap_or(own)
 }
 
 fn neighbourhood_has(g: &PeriodicGrid<Cell>, i: i64, j: i64, crust: u8) -> bool {
