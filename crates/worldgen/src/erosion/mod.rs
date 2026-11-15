@@ -157,7 +157,7 @@ impl Default for ErosionConfig {
             deposit_top_m: -1.0,
             lake_min_depth_m: 2.0,
             lake_min_area_m2: 20_000.0,
-            river_threshold_m3s: 0.5,
+            river_threshold_m3s: 0.1,
         }
     }
 }

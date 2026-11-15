@@ -51,6 +51,15 @@ Chaque jalon se termine par une revue avec l'auteur. On ne passe pas au jalon su
 - la ligne de lacs en pointillés de la graine 7 (chenal de rift dans le grand continent) : à transformer en vrais lacs ou en vallée avec l'hydrologie ;
 - la tranche −200..0 m presque vide dans l'histogramme hypsométrique : le plateau, très étroit (1,2 km en 1/5), et le premier anneau du talus laissent un creux ; à reprendre avec l'érosion et la sédimentation côtière.
 
+**Réalisé (2026-11-16, à valider en revue)** :
+- grille fine de 32 m (3 125², ou 625² en 1/5) : suréchantillonnage bicubique, bruit de détail selon la rugosité, rifts en graben continu ;
+- précipitations provisoires (zonales, orographiques le long des vents zonaux, bande polaire) ;
+- 1 Ma d'érosion : stream power implicite, diffusion de Roering, cônes de sédiments côtiers ;
+- lacs (dépressions d'au moins 2 m et 20 000 m²), directions D8, débits, bassins par exutoire, rivières (débit ≥ 0,1 m³/s, ordre de Strahler) ;
+- chunks et horizon sur la grille érodée, avec l'eau des lacs ;
+- graines 42, 7, 1234 et 2026 : génération complète en pleine résolution en 48 à 60 s (érosion 41 à 53 s), 70 à 115 lacs par monde, terre abaissée de 37 à 68 m en moyenne ;
+- ligne de lacs de la graine 7 : devenue une vallée de graben avec des lacs ; creux −200..0 m : comblé par les cônes de dépôt (voir `hypsometry.png`).
+
 ## M4 — Climat, saisons, biomes, ciel
 - Climat (§4.3) avec stockage en harmoniques, hydrologie finale (§4.4), biomes (§4.5).
 - Chunks générés jusqu'au Moho (pierre générique), puis magme du manteau ; la vraie colonne de roches vient en M5.
