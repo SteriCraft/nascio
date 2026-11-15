@@ -4186,6 +4186,7 @@ dependencies = [
  "nascio-core",
  "nascio-worldgen",
  "proptest",
+ "rayon",
  "serde",
  "toml",
 ]

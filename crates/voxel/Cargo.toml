@@ -13,6 +13,7 @@ nascio-worldgen.workspace = true
 serde.workspace = true
 anyhow.workspace = true
 toml.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

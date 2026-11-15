@@ -55,6 +55,11 @@ pub struct VoxelConfig {
     pub sand_depth_m: i32,
     /// Chunks generated below the lowest surface of a column.
     pub underground_chunks: i32,
+    /// Maximum grade (m/m) of the base elevation after talus relaxation; 0 disables it.
+    /// Provisional: the tectonic grid has cell-to-cell cliffs until erosion (M3).
+    pub talus_grade: f64,
+    /// Relaxation sweeps.
+    pub talus_iterations: u32,
 }
 
 impl Default for VoxelConfig {
@@ -79,6 +84,8 @@ impl Default for VoxelConfig {
             beach_high_m: 0,
             sand_depth_m: 3,
             underground_chunks: 2,
+            talus_grade: 0.7,
+            talus_iterations: 400,
         }
     }
 }
@@ -135,6 +142,7 @@ impl Terrain {
         history_flags: &PeriodicGrid<f32>,
         cfg: VoxelConfig,
     ) -> Self {
+        let elevation = relax_talus(elevation, cfg.talus_grade, cfg.talus_iterations);
         let ruggedness = ruggedness(&elevation, history_flags, &cfg);
         let base = stage_u64(seed, "voxel-detail");
         let mut octaves = Vec::new();
@@ -235,6 +243,46 @@ impl Terrain {
     }
 }
 
+/// Mass-conserving thermal relaxation: between neighbours whose difference exceeds
+/// `grade · cell`, a fifth of the excess moves downhill at each sweep. Each cell gathers its own
+/// change from its four neighbours (symmetric exchange), so the parallel sweep is deterministic.
+pub fn relax_talus(grid: PeriodicGrid<f32>, grade: f64, iterations: u32) -> PeriodicGrid<f32> {
+    use rayon::prelude::*;
+    if grade <= 0.0 || iterations == 0 {
+        return grid;
+    }
+    let (w, h, cell) = (grid.width(), grid.height(), grid.cell_size());
+    let max = (grade * cell) as f32;
+    let mut cur: Vec<f32> = grid.data().to_vec();
+    let mut next = cur.clone();
+    for _ in 0..iterations {
+        next.par_chunks_mut(w).enumerate().for_each(|(j, row)| {
+            let up = ((j + h - 1) % h) * w;
+            let down = ((j + 1) % h) * w;
+            let here = j * w;
+            for (i, out) in row.iter_mut().enumerate() {
+                let v = cur[here + i];
+                let flow = |n: f32| {
+                    let d = n - v;
+                    let excess = d.abs() - max;
+                    if excess > 0.0 {
+                        0.2 * excess * d.signum()
+                    } else {
+                        0.0
+                    }
+                };
+                *out = v
+                    + flow(cur[here + (i + w - 1) % w])
+                    + flow(cur[here + (i + 1) % w])
+                    + flow(cur[up + i])
+                    + flow(cur[down + i]);
+            }
+        });
+        std::mem::swap(&mut cur, &mut next);
+    }
+    PeriodicGrid::from_vec(w, h, cell, cur)
+}
+
 /// Ruggedness per tectonic cell: elevation, slope and orogeny, then smoothed.
 fn ruggedness(
     elevation: &PeriodicGrid<f32>,
@@ -288,6 +336,11 @@ pub(crate) mod tests {
 
     /// A small synthetic world: a mountain ridge crossing both seams, and an ocean.
     pub fn test_terrain() -> Terrain {
+        static T: std::sync::OnceLock<Terrain> = std::sync::OnceLock::new();
+        T.get_or_init(build_test_terrain).clone()
+    }
+
+    fn build_test_terrain() -> Terrain {
         let n = 125;
         let cell = WORLD_SIZE_F64 / n as f64;
         let elevation = PeriodicGrid::from_fn(n, n, cell, |i, j| {
@@ -336,6 +389,26 @@ pub(crate) mod tests {
             assert_eq!(t.height(x, 500.0), t.height_lod(x, 500.0, 8.0));
         }
         assert!(coarse < fine);
+    }
+
+    #[test]
+    fn talus_relaxation_conserves_mass_and_caps_grade() {
+        let n = 64;
+        let cell = WORLD_SIZE_F64 / n as f64;
+        let cliff = PeriodicGrid::from_fn(
+            n,
+            n,
+            cell,
+            |i, _| if i < 32 { 3_000.0f32 } else { -3_000.0 },
+        );
+        let sum = |g: &PeriodicGrid<f32>| g.data().iter().map(|&v| f64::from(v)).sum::<f64>();
+        let relaxed = relax_talus(cliff.clone(), 0.1, 2_000);
+        assert!((sum(&relaxed) - sum(&cliff)).abs() < 1e-3 * n as f64 * n as f64);
+        let max_step = (0..n as i64)
+            .map(|i| (relaxed.get(i + 1, 0) - relaxed.get(i, 0)).abs())
+            .fold(0.0f32, f32::max);
+        assert!(f64::from(max_step) < 0.1 * cell * 1.2, "step {max_step}");
+        assert_eq!(relax_talus(cliff.clone(), 0.0, 10), cliff);
     }
 
     #[test]
