@@ -28,3 +28,4 @@
 | 2026-11-15 | Aurores en anneau au bord de la bande, visibles de loin | Elles signalent l'approche du pôle |
 | 2026-11-15 | Le couvert polaire est climatique (nuages et précipitations forcés), pas seulement visuel | Cohérence entre ce qu'on voit et le climat (albédo, neige ou glace permanente) |
 | 2026-11-15 | Lune : lunaison de 29,53 jours de jeu, nœuds fixes. Étoiles : catalogue réel, 366 rotations sidérales par an | Ciel nocturne réaliste avec un modèle simple |
+| 2026-11-15 | Angle horaire sidéral `H★ = H + λ_☉`, avec `λ_☉ = 2π(N + 10)/365 − π/2` | Aligne le ciel étoilé sur les saisons (λ_☉ = 0 à l'équinoxe de mars) ; même λ_☉ pour la Lune |
