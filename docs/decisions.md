@@ -24,3 +24,7 @@
 | 2026-11-15 | Azimut mesuré depuis le nord (−z) vers l'est (+x), dans [0, 2π) ; direction du soleil = (cos e·sin A, sin e, −cos e·cos A) en axes monde | Convention géographique usuelle, cohérente avec z vers le sud |
 | 2026-11-15 | `delta(a, b)` vaut +S/2 dans le cas d'égalité exacte, dans les deux sens (seule exception à l'antisymétrie) | Conforme à la spec (§1.2) ; documenté et testé |
 | 2026-11-15 | `bevy/dynamic_linking` derrière la feature `dev` du viewer (alias `cargo viewer-dev`) | Accélère la compilation en développement sans affecter les builds release ni la CI |
+| 2026-11-15 | Bande polaire sous couvert nuageux permanent (opaque jusqu'à S_LIGHT, dégagé à S_CLEAR) | On cache la voûte céleste, qui ne peut pas être continue à la couture ; e_vis est conservé pour la lumière diffuse |
+| 2026-11-15 | Aurores en anneau au bord de la bande, visibles de loin | Elles signalent l'approche du pôle |
+| 2026-11-15 | Le couvert polaire est climatique (nuages et précipitations forcés), pas seulement visuel | Cohérence entre ce qu'on voit et le climat (albédo, neige ou glace permanente) |
+| 2026-11-15 | Lune : lunaison de 29,53 jours de jeu, nœuds fixes. Étoiles : catalogue réel, 366 rotations sidérales par an | Ciel nocturne réaliste avec un modèle simple |

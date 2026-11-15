@@ -77,11 +77,31 @@ La **direction** du soleil ne peut pas être continue à travers la couture. Au 
 - Éclairage :
   - l'intensité de la lumière directionnelle est une fonction continue de `e_vis`, nulle pour `e_vis ≤ 0` (fondu entre 0 et +3°). **Elle est donc nulle dans la bande : aucune ombre** ;
   - la couleur du ciel et la lumière ambiante sont des fonctions continues de `e_vis` (crépuscule civil, nautique, nuit) ;
-  - les **aurores** ont une intensité égale à `(1 − smoothstep(S_DARK, S_LIGHT + 1 000, s)) × facteur_nuit`.
+  - les aurores ne sont plus calculées ici : voir §2.7.
 - Le **climat** utilise `e` et `δ_eff` (insolation physique), pas `e_vis`. Près de la couture, l'insolation tend de toute façon vers 0.
 
 ### 2.6 Insolation journalière moyenne (climat)
 `Q = (S0/π) · (h0 · sin φ · sin δ_eff + cos φ · cos δ_eff · sin h0)`, avec `h0 = arccos(clamp(−tan φ · tan δ_eff, −1, 1))` et `S0 = 1361 W/m²`.
+
+### 2.7 Bande nuageuse polaire et aurores
+La couture est cachée sous un **couvert nuageux permanent**. Ni le soleil, ni la Lune, ni les étoiles n'y sont visibles, ce qui évite la discontinuité de la voûte céleste.
+- **Couverture minimale** : `c_min(s) = 1 − smoothstep(S_LIGHT, S_CLEAR, s)`, avec `S_CLEAR = 3 000 m` *(config)*. Le couvert est opaque (`c = 1`) pour `s ≤ S_LIGHT`, c'est-à-dire partout où `e_vis ≠ e`.
+- **Couverture rendue** : `c = max(c_min, c_météo)`. La météo locale peut ajouter des nuages, mais jamais en retirer dans la bande.
+- `e_vis` (§2.5) est conservé : la lumière diffuse sous les nuages reste une fonction continue de `e_vis` (jour gris, nuit noire).
+- **Aurores** : rideaux lumineux situés géographiquement sur un anneau au bord de la bande, à haute altitude, et visibles de loin à l'horizon. Les repérer indique qu'on approche du pôle.
+  - Intensité en un point de l'anneau : `a(s) = smoothstep(S_CLEAR, S_AUR, s) · (1 − smoothstep(S_AUR, S_AUR_OUT, s))`, avec `S_AUR = 3 500 m` et `S_AUR_OUT = 5 000 m` *(config)*.
+  - Elles ne sont visibles que de nuit : `× (1 − smoothstep(−12°, −6°, e_vis))`.
+  - Sous le couvert, elles sont masquées comme le reste du ciel.
+
+### 2.8 Étoiles et Lune (rendu uniquement)
+- **Étoiles** : catalogue réel, en coordonnées équatoriales. Orientation locale par φ et par l'angle horaire sidéral `H★ = H + 2π · N/365`, qui donne 366 rotations sidérales par an de 365 jours.
+- **Lune** :
+  - lunaison de **29,53 jours de jeu** ;
+  - longitude écliptique `λ_☾ = λ_☉ + 360° · (N_total / 29,53) + λ0`, où `N_total = day_index + day_frac` et `λ0` est réglé pour que l'époque tombe à une phase choisie *(config)* ;
+  - inclinaison de 5,14° sur l'écliptique, avec des nœuds fixes (pas de précession) ;
+  - phase et éclairement déduits de l'angle entre la Lune et le soleil.
+- Les étoiles et la Lune sont pondérées par `(1 − c)` : elles sont invisibles dans la bande.
+- Ni la Lune ni les étoiles n'éclairent l'intérieur de la bande.
 
 ---
 
@@ -141,6 +161,7 @@ On stocke `(X0, A1, p1, A2, p2)` par cellule. L'évaluation à n'importe quel in
 - **Vents dominants** : trois cellules par hémisphère, définies **en latitude φ** (alizés pour 0–30°, vents d'ouest pour 30–60°, vents polaires d'est pour 60–90°). Les bandes se déplacent avec δ_eff selon la saison. La couture est un anticyclone polaire : les deux côtés divergent, ce qui est cohérent.
 - **Courants océaniques** : gyres simplifiés entraînés par les vents et déviés par les côtes. On advecte des anomalies chaudes et froides : courants chauds sur les bords ouest des bassins, remontées froides sur les bords est en zone subtropicale.
 - **Humidité et précipitations** : évaporation sur l'océan, advection par le vent, pluies orographiques au vent des reliefs et sécheresse à l'abri des montagnes, ZCIT (zone de convergence intertropicale) qui suit δ_eff, ceintures sèches vers 30°.
+- **Bande polaire** : couverture nuageuse forcée (`c ≥ c_min(s)`, §2.7) et précipitations renforcées dans la bande, avec un impact réel sur le climat (albédo, neige ou glace permanente). Le facteur de précipitations est en *(config)*.
 - **Cycle diurne** (à l'exécution) : son amplitude dépend de l'humidité et de la continentalité. Le maximum est vers 14–15 h solaires locales.
 - **Sorties** : harmoniques de `temperature`, `precipitation`, `wind` (vecteur), `snow_fraction` ; champ `ocean_current`.
 
@@ -213,6 +234,6 @@ La version du générateur est incrémentée à chaque changement qui modifie le
 - Caméra libre (ZQSD/WASD et souris, vitesse ajustable de 5 m/s à 2 km/s), téléportation vers des coordonnées.
 - Chargement des chunks autour de la caméra par génération asynchrone, maillage glouton (*greedy meshing*), couleurs par bloc (les textures viendront plus tard), et niveaux de détail simples pour l'horizon dans un second temps.
 - Rendu relatif à la caméra. Traverser la couture ne doit produire aucun artefact.
-- Soleil, ciel et aurores selon le §2.5. Le temps est contrôlable : temps réel, accéléré, ou figé sur une date et une heure.
+- Soleil, ciel, couvert polaire, aurores, Lune et étoiles selon les §2.5 à §2.8. Le temps est contrôlable : temps réel, accéléré, ou figé sur une date et une heure.
 - Interface affichée : position, φ, λ, s, heure solaire locale, date du jeu, biome, roche sous le curseur.
 - Cible : 60 i/s sur une RTX 5060.

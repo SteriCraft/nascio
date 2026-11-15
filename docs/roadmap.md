@@ -39,7 +39,7 @@ Chaque jalon se termine par une revue avec l'auteur. On ne passe pas au jalon su
 ## M4 — Climat, saisons, biomes, ciel
 - Climat (§4.3) avec stockage en harmoniques, hydrologie finale (§4.4), biomes (§4.5).
 - Visualiseur : couches climatiques animées selon la date, superposition jour/nuit.
-- Ciel 3D : course du soleil, crépuscule de la couture, aurores, neige saisonnière en surface.
+- Ciel 3D : course du soleil, crépuscule et couvert nuageux de la couture, anneau d'aurores, Lune et étoiles, neige saisonnière en surface.
 
 **Validation** : des cartes de température et de pluie plausibles en janvier et en juillet, des déserts subtropicaux, des forêts équatoriales, une sécheresse visible à l'abri des montagnes, une bande polaire sombre sans saut du soleil.
 
