@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push on the same ref cancels the run still in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -33,4 +38,5 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
-        run: cargo test --workspace
+        # The viewer has no tests; skipping it avoids a full Bevy test build.
+        run: cargo test --workspace --exclude nascio-viewer
