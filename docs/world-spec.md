@@ -233,8 +233,10 @@ La version du générateur est incrémentée à chaque changement qui modifie le
 
 **Mode 3D (vol libre)**
 - Caméra libre (ZQSD/WASD et souris, vitesse ajustable de 5 m/s à 2 km/s), téléportation vers des coordonnées.
-- Chargement des chunks autour de la caméra par génération asynchrone, maillage glouton (*greedy meshing*), couleurs par bloc (les textures viendront plus tard), et niveaux de détail simples pour l'horizon dans un second temps.
+- Chargement des chunks autour de la caméra par génération asynchrone, maillage glouton (*greedy meshing*), couleurs par bloc (les textures viendront plus tard). Distance de vue réglable, 512 m par défaut.
+- **Horizon** : au-delà des chunks, un maillage de hauteurs en anneaux emboîtés dont la résolution diminue de moitié à chaque anneau, sur plusieurs dizaines de km. La portée reste sous 50 km, pour ne jamais revoir le même relief par l'autre côté du tore. Les hauteurs viennent de la même fonction de surface que les chunks, avec des jupes entre niveaux. Aucune couture visible, ni avec les chunks ni à la couture du tore.
 - Rendu relatif à la caméra. Traverser la couture ne doit produire aucun artefact.
 - Soleil, ciel, couvert polaire, aurores, Lune et étoiles selon les §2.5 à §2.8. Le temps est contrôlable : temps réel, accéléré, ou figé sur une date et une heure.
 - Interface affichée : position, φ, λ, s, heure solaire locale, date du jeu, biome, roche sous le curseur.
-- Cible : 60 i/s sur une RTX 5060.
+- Compteur à l'écran des temps CPU et GPU par image ; mode benchmark (trajet de caméra scripté, sortie en ms par image).
+- **Cible** : 60 i/s en 1080p, réglages maximum, sur un portable Linux (Ryzen 5 5600H, RTX 3050 Mobile).

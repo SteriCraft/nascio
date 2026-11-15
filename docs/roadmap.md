@@ -25,11 +25,20 @@ Chaque jalon se termine par une revue avec l'auteur. On ne passe pas au jalon su
 
 **Validation** : plusieurs graines donnent des continents variés, des chaînes de montagnes aux collisions, des dorsales, des fosses, des archipels de points chauds, et une couture invisible.
 
-## M2 — Premier terrain 3D
-- Registre de blocs minimal et `generate_chunk` à partir de l'altitude tectonique, avec du bruit de détail périodique.
-- Visualiseur, mode 3D : caméra libre, chargement des chunks, greedy meshing, éclairage simple.
+## M2 — Premier terrain 3D et horizon
+- Registre de blocs minimal (`u16`, couleurs provisoires) et `generate_chunk` pure et déterministe. L'altitude vient de la bicubique périodique de la grille tectonique de 160 m (provisoire jusqu'à M3), plus un bruit de détail périodique selon le contexte. Colonne simple : herbe, terre, pierre, sable, eau jusqu'à y = 0. L'interface `generate ⊕ delta` est déclarée, sans implémentation.
+- Visualiseur, mode 3D :
+  - caméra libre (5 m/s à 2 km/s) et téléportation ;
+  - génération asynchrone, maillage glouton, rendu relatif à la caméra, éclairage simple ;
+  - affichage de la position, de φ, λ et s ;
+  - distance de vue de 512 m par défaut.
+- Horizon : niveaux de détail en maillage de hauteurs au-delà des chunks, sur plusieurs dizaines de km.
+- Compteur des temps CPU et GPU par image, et mode benchmark scripté.
 
-**Validation** : on se promène sur le relief, on traverse les coutures est-ouest et nord-sud sans artefact, à 60 i/s.
+**Validation** :
+- on traverse les coutures est-ouest et nord-sud sans artefact, ni dans les chunks ni dans l'horizon ;
+- aucune couture visible entre les chunks et l'horizon ;
+- 60 i/s en 1080p, réglages maximum, sur le portable de référence (benchmark).
 
 ## M3 — Érosion et hydrographie
 - Érosion de type stream power sur la grille de 32 m, priority-flood, lacs, première ébauche de rivières.
@@ -42,6 +51,7 @@ Chaque jalon se termine par une revue avec l'auteur. On ne passe pas au jalon su
 
 ## M4 — Climat, saisons, biomes, ciel
 - Climat (§4.3) avec stockage en harmoniques, hydrologie finale (§4.4), biomes (§4.5).
+- Chunks générés jusqu'au Moho (pierre générique), puis magme du manteau ; la vraie colonne de roches vient en M5.
 - Visualiseur : couches climatiques animées selon la date, superposition jour/nuit.
 - Ciel 3D : course du soleil, crépuscule et couvert nuageux de la couture, anneau d'aurores, Lune et étoiles, neige saisonnière en surface.
 
@@ -54,8 +64,8 @@ Chaque jalon se termine par une revue avec l'auteur. On ne passe pas au jalon su
 **Validation** : une coupe à travers une zone de subduction et à travers un orogène montre les bonnes roches, la bonne profondeur du Moho et les bons gisements.
 
 ## M6 — Finition du générateur de chunks
-- Biomes et climat dans les chunks (sol, végétation provisoire, neige, glace), eau des rivières et des lacs, niveaux de détail à l'horizon.
-- Préparation pour le serveur : interface `generate ⊕ delta`, mesures de performance (chunks par seconde).
+- Biomes et climat dans les chunks (sol, végétation provisoire, neige, glace), eau des rivières et des lacs.
+- Préparation pour le serveur : implémentation du stockage des deltas (`generate ⊕ delta`), mesures de performance (chunks par seconde).
 
 ---
 Ensuite viendra la **Phase « Serveur et réseau »**, qui fera l'objet d'une feuille de route séparée.

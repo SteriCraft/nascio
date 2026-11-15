@@ -48,3 +48,8 @@
 | 2026-11-15 | Édifices de points chauds : 6 000 m au-dessus du plancher, perte de hauteur sur 120 Ma | Quelques îles émergent sur chaque graine (testé) |
 | 2026-11-15 | `generator_version` = 2 | Marges, hypsométrie, filtre majoritaire et calage modifient le résultat |
 | 2026-11-15 | continental_fraction portée à 0,35 (fraction finale) | Le plateau continental noie une partie de la croûte. Objectif : environ 29 % de terres émergées, comme sur Terre |
+| 2026-11-15 | Objectif de performance : 60 i/s en 1080p, réglages maximum, sur un portable Linux (Ryzen 5 5600H, RTX 3050 Mobile), mesuré par un benchmark scripté (ms CPU et GPU par image) | Décision de l'auteur ; remplace « 60 i/s sur une RTX 5060 » au §7 |
+| 2026-11-15 | Horizon (niveaux de détail en maillage de hauteurs) avancé de M6 à M2 | Décision de l'auteur : le vol libre n'a de sens qu'avec un horizon lointain |
+| 2026-11-15 | Altitude des chunks provisoirement tirée de la grille tectonique de 160 m (bicubique périodique + bruit de détail), jusqu'à la grille de 32 m de M3 | Décision de l'auteur ; la grille de 32 m n'existe qu'après l'érosion |
+| 2026-11-15 | Génération des chunks jusqu'au Moho (pierre générique, puis magme) à partir de M4 ; la colonne géologique réelle en M5. En M2, seuls quelques chunks sous la surface | Décision de l'auteur |
+| 2026-11-15 | CI réduite au job Ubuntu, non bloquante pour l'avancement ; Windows est testé localement par l'auteur | Décision de l'auteur |
