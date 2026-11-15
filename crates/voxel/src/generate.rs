@@ -93,6 +93,16 @@ impl ColumnSet {
         bottom..=top
     }
 
+    /// Whether chunk `cy` (with its border) can have a visible face. A chunk that is all
+    /// solid, all water or all air cannot: it needs no filling for meshing.
+    pub fn may_have_faces(&self, cy: i32) -> bool {
+        let (lo_top, hi_top) = self.top_range();
+        let (lo, hi) = (cy * CHUNK_SIZE - 1, cy * CHUNK_SIZE + CHUNK_SIZE);
+        let all_solid = hi <= lo_top;
+        let all_fluid_or_air = lo > hi_top && (hi < 0 || lo >= 0);
+        !(all_solid || all_fluid_or_air)
+    }
+
     /// Block at local column `(x, z)` (in `-1..=32`) and world height `y`.
     #[inline]
     pub fn block(&self, terrain: &Terrain, x: i32, y: i32, z: i32) -> BlockId {
@@ -175,6 +185,19 @@ mod tests {
                         };
                         assert_eq!(in_b, border_a, "{a:?}->{b:?} cy {cy} u {u} y {y}");
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn trivial_chunks_have_no_faces() {
+        let t = test_terrain();
+        for cx in (0..CHUNKS_PER_AXIS).step_by(131) {
+            let col = ColumnSet::new(&t, cx, 2_000);
+            for cy in col.chunk_range(3) {
+                if !col.may_have_faces(cy) {
+                    assert!(crate::mesh::mesh_chunk(&col.padded_chunk(&t, cy)).is_empty());
                 }
             }
         }
