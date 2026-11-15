@@ -112,7 +112,7 @@ fn main() -> anyhow::Result<()> {
             let (world, tect) = generate(&cfg)?;
             let elapsed = start.elapsed();
             world.save(&out)?;
-            let previews = write_previews(&tect, &out.join("previews"))?;
+            let previews = write_previews(&world, &tect.plates, &out.join("previews"))?;
             println!("{}", tect.report);
             println!("generated in {:.2} s", elapsed.as_secs_f64());
             println!("hash: {}", world.hash());
