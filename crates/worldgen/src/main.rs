@@ -6,7 +6,7 @@ use std::time::Instant;
 use clap::{Parser, Subcommand, ValueEnum};
 use nascio_core::astro::AstroConfig;
 use nascio_worldgen::config::{GENERATOR_VERSION, Scale, WorldConfig};
-use nascio_worldgen::generate::generate;
+use nascio_worldgen::generate::generate_full;
 use nascio_worldgen::preview::write_previews;
 use nascio_worldgen::sun_curves::{self, Hemisphere};
 
@@ -109,11 +109,12 @@ fn main() -> anyhow::Result<()> {
             cfg.generator_version = GENERATOR_VERSION;
             let out = out.unwrap_or_else(|| PathBuf::from(format!("out/world-{seed}")));
             let start = Instant::now();
-            let (world, tect) = generate(&cfg)?;
+            let (world, tect, ero) = generate_full(&cfg)?;
             let elapsed = start.elapsed();
             world.save(&out)?;
             let previews = write_previews(&world, &tect.plates, &out.join("previews"))?;
             println!("{}", tect.report);
+            println!("{}", ero.report);
             println!("generated in {:.2} s", elapsed.as_secs_f64());
             println!("hash: {}", world.hash());
             println!(

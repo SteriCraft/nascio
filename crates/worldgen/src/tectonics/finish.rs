@@ -93,6 +93,9 @@ pub struct TectonicOutput {
     pub history_flags: PeriodicGrid<u8>,
     /// Age of the hotspot edifice in Ma, −1 where none.
     pub hotspot_track: PeriodicGrid<f32>,
+    /// 1 on inland water (small oceanic inclusions such as rift holes), 0 elsewhere. Not a
+    /// layer: erosion turns it into rift grabens.
+    pub inland_water: PeriodicGrid<u8>,
     pub plates: Vec<Plate>,
     pub hotspots: Vec<Hotspot>,
     pub report: Report,
@@ -398,6 +401,10 @@ impl Tectonics {
             moho_depth: PeriodicGrid::from_vec(w, h, cm, moho),
             history_flags: PeriodicGrid::from_vec(w, h, cm, history),
             hotspot_track: PeriodicGrid::from_vec(w, h, cm, track),
+            inland_water: PeriodicGrid::from_fn(w, h, cm, |i, j| {
+                let k = j * w + i;
+                u8::from(g.data()[k].crust == OCEANIC && !open[k])
+            }),
             plates: self.plates.clone(),
             hotspots: self.hotspots.clone(),
             report,

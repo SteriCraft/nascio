@@ -44,6 +44,17 @@ const ELEVATION_STOPS: [(f64, &str); 11] = [
     (3_000.0, "#f4f2ee"),
 ];
 
+/// Precipitation, mm/yr → colour (dry tan to wet blue).
+const PRECIP_STOPS: [(f64, &str); 7] = [
+    (0.0, "#f2e6c8"),
+    (250.0, "#e3c98f"),
+    (500.0, "#c9cf86"),
+    (1_000.0, "#7fb069"),
+    (1_500.0, "#3f9b6e"),
+    (2_500.0, "#2a78d6"),
+    (4_000.0, "#0d366b"),
+];
+
 /// History flags in drawing priority (first match wins).
 const FLAG_ORDER: [(u8, &str, &str); 7] = [
     (flags::HOTSPOT, SERIES[3], "hotspot"),
@@ -93,6 +104,38 @@ fn faded_elevation(e: f64) -> Color {
     let c = elevation_color(e);
     let grey = (0.3 * f64::from(c[0]) + 0.59 * f64::from(c[1]) + 0.11 * f64::from(c[2])) as u8;
     lerp_color(Rgb([grey, grey, grey]), hex(SURFACE), 0.45)
+}
+
+/// Hypsometric tint with a hillshade on land (light from the north-west, 45° high).
+fn shaded_relief(l: &Layer) -> Vec<Color> {
+    let (w, h) = (l.width as i64, l.height as i64);
+    let at = |i: i64, j: i64| {
+        l.data
+            .get_f64((j.rem_euclid(h) * w + i.rem_euclid(w)) as usize)
+    };
+    // Vertical exaggeration grows with the cell size so coarse grids stay readable.
+    let ve = (l.cell_m / 32.0).sqrt().max(1.0);
+    let (lx, ly, lz) = {
+        let (az, alt) = (315f64.to_radians(), 45f64.to_radians());
+        (az.sin() * alt.cos(), alt.sin(), -az.cos() * alt.cos())
+    };
+    (0..w * h)
+        .map(|k| {
+            let (i, j) = (k % w, k / w);
+            let e = at(i, j);
+            let c = elevation_color(e);
+            if e <= 0.0 {
+                return c;
+            }
+            let gx = ve * (at(i + 1, j) - at(i - 1, j)) / (2.0 * l.cell_m);
+            let gz = ve * (at(i, j + 1) - at(i, j - 1)) / (2.0 * l.cell_m);
+            let n = (1.0 + gx * gx + gz * gz).sqrt();
+            let shade = ((-gx * lx + ly - gz * lz) / n).max(0.0);
+            let f = 0.45 + 0.75 * shade;
+            let ch = |v: u8| (f64::from(v) * f).round().clamp(0.0, 255.0) as u8;
+            Rgb([ch(c[0]), ch(c[1]), ch(c[2])])
+        })
+        .collect()
 }
 
 fn u8_grid(l: &Layer) -> Option<PeriodicGrid<u8>> {
@@ -155,6 +198,17 @@ pub fn colorize(world: &World, name: &str) -> Option<Vec<Color>> {
     let v = |i: usize| layer.data.get_f64(i);
     let colors = match name {
         "elevation_tectonic" => (0..n).map(|i| elevation_color(v(i))).collect(),
+        "elevation" => shaded_relief(layer),
+        "precipitation" => (0..n)
+            .map(|i| {
+                let c = ramp(&PRECIP_STOPS, v(i));
+                if elev(i) > 0.0 {
+                    c
+                } else {
+                    lerp_color(c, hex(SURFACE), 0.6)
+                }
+            })
+            .collect(),
         "plate_id" => {
             let palette = plate_colors(&u8_grid(layer)?);
             (0..n)
@@ -222,6 +276,24 @@ pub fn legend(name: &str) -> Vec<(Color, &'static str)> {
             (elevation_color(1_000.0), "1000"),
             (elevation_color(2_000.0), "2000"),
             (elevation_color(3_000.0), "3000"),
+        ],
+        "elevation" => vec![
+            (elevation_color(-3_200.0), "-3200 m"),
+            (elevation_color(-1_500.0), "-1500"),
+            (elevation_color(-100.0), "-100"),
+            (elevation_color(200.0), "200"),
+            (elevation_color(1_000.0), "1000"),
+            (elevation_color(2_000.0), "2000"),
+            (elevation_color(3_000.0), "3000"),
+        ],
+        "precipitation" => vec![
+            (ramp(&PRECIP_STOPS, 0.0), "0 mm/yr"),
+            (ramp(&PRECIP_STOPS, 250.0), "250"),
+            (ramp(&PRECIP_STOPS, 500.0), "500"),
+            (ramp(&PRECIP_STOPS, 1_000.0), "1000"),
+            (ramp(&PRECIP_STOPS, 1_500.0), "1500"),
+            (ramp(&PRECIP_STOPS, 2_500.0), "2500"),
+            (ramp(&PRECIP_STOPS, 4_000.0), "4000 (sea: pale)"),
         ],
         "plate_id" => vec![
             (hex(SERIES[0]), "continental crust (saturated)"),
@@ -394,7 +466,12 @@ pub fn write_previews(world: &World, plates: &[Plate], dir: &Path) -> anyhow::Re
             continue;
         };
         let img = upscale(&colors, layer.width, layer.height);
-        if layer.name == "elevation_tectonic" {
+        let tiled_source = if world.layer("elevation").is_some() {
+            "elevation"
+        } else {
+            "elevation_tectonic"
+        };
+        if layer.name == tiled_source {
             let mut tiled = RgbImage::new(img.width() * 2, img.height() * 2);
             for (ox, oy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                 image::imageops::replace(
@@ -451,7 +528,10 @@ fn band_share(bands: &[[f64; 3]], lo: f64, hi: f64, total: f64) -> f64 {
 /// Histogram of elevations (bars, % of the surface per 100 m) against the target hypsometry
 /// (step line): Earth's curve scaled to the spec §3 targets.
 pub fn write_hypsometry(world: &World, path: &Path) -> anyhow::Result<()> {
-    let Some(elev) = world.layer("elevation_tectonic") else {
+    let Some(elev) = world
+        .layer("elevation")
+        .or_else(|| world.layer("elevation_tectonic"))
+    else {
         return Ok(());
     };
     let h = &world.config.tectonics.hypsometry;
@@ -500,6 +580,7 @@ pub fn write_hypsometry(world: &World, path: &Path) -> anyhow::Result<()> {
 
     let land = (0..n).filter(|&i| elev.data.get_f64(i) > 0.0).count() as f64 / n as f64;
     let crust = world.layer("crust_type").map_or(0.0, |l| {
+        let n = l.width * l.height;
         (0..n)
             .filter(|&i| l.data.get_f64(i) as u8 == CONTINENTAL)
             .count() as f64
@@ -516,7 +597,8 @@ pub fn write_hypsometry(world: &World, path: &Path) -> anyhow::Result<()> {
         left,
         38,
         &format!(
-            "seed {}, scale 1/{}: land {:.1}%, continental crust {:.1}%",
+            "{}, seed {}, scale 1/{}: land {:.1}%, continental crust {:.1}%",
+            elev.name,
             world.config.seed,
             world.config.scale.divisor(),
             100.0 * land,

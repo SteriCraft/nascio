@@ -1,16 +1,21 @@
 //! World configuration, stored as `world.toml` (spec §6).
 
+use crate::erosion::ErosionConfig;
 use nascio_core::astro::AstroConfig;
 use nascio_core::time::GameClock;
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a change alters generated output for a given config.
-pub const GENERATOR_VERSION: u32 = 2;
+pub const GENERATOR_VERSION: u32 = 3;
 
 /// Full-resolution cell size of the tectonic grid, in metres (spec §1.4).
 pub const TECTONIC_CELL_M: u32 = 160;
 /// Full-resolution width of the tectonic grid.
 pub const TECTONIC_RES: u32 = 625;
+/// Full-resolution cell size of the hydrology / fine relief grid, in metres (one chunk).
+pub const FINE_CELL_M: u32 = 32;
+/// Full-resolution width of the hydrology / fine relief grid.
+pub const FINE_RES: u32 = 3_125;
 
 /// Resolution divisor. Factors divide 625 so grids stay aligned with chunks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +47,16 @@ impl Scale {
     /// Cell size of the tectonic grid, in metres.
     pub fn tectonic_cell_m(self) -> f64 {
         f64::from(TECTONIC_CELL_M * self.divisor())
+    }
+
+    /// Width (and height) of the hydrology / fine relief grid.
+    pub fn fine_res(self) -> usize {
+        (FINE_RES / self.divisor()) as usize
+    }
+
+    /// Cell size of the hydrology / fine relief grid, in metres.
+    pub fn fine_cell_m(self) -> f64 {
+        f64::from(FINE_CELL_M * self.divisor())
     }
 }
 
@@ -338,6 +353,8 @@ pub struct WorldConfig {
     pub astro: AstroConfig,
     #[serde(default)]
     pub tectonics: TectonicsConfig,
+    #[serde(default)]
+    pub erosion: ErosionConfig,
 }
 
 impl WorldConfig {
@@ -350,6 +367,7 @@ impl WorldConfig {
             clock: GameClock::default(),
             astro: AstroConfig::default(),
             tectonics: TectonicsConfig::default(),
+            erosion: ErosionConfig::default(),
         }
     }
 
@@ -360,6 +378,9 @@ impl WorldConfig {
         self.tectonics
             .validate()
             .map_err(|e| anyhow::anyhow!("tectonics: {e}"))?;
+        self.erosion
+            .validate()
+            .map_err(|e| anyhow::anyhow!("erosion: {e}"))?;
         Ok(())
     }
 
@@ -385,6 +406,8 @@ mod tests {
         assert_eq!(Scale::TwentyFifth.tectonic_res(), 25);
         for s in [Scale::Full, Scale::Fifth, Scale::TwentyFifth] {
             assert_eq!(s.tectonic_res() as f64 * s.tectonic_cell_m(), 100_000.0);
+            assert_eq!(s.fine_res() as f64 * s.fine_cell_m(), 100_000.0);
+            assert_eq!(s.fine_res(), 5 * s.tectonic_res());
         }
         assert!(Scale::try_from(4).is_err());
     }
