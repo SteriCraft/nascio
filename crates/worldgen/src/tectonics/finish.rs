@@ -8,6 +8,7 @@ use nascio_core::math::smoothstep;
 
 use super::{CONTINENTAL, EventCounts, Hotspot, OCEANIC, Plate, Tectonics, flags};
 use crate::grid::PeriodicGrid;
+use crate::hypsometry::match_ranks;
 use crate::noise::Fbm;
 use crate::rng::stage_u64;
 
@@ -28,6 +29,12 @@ pub struct Report {
     pub continental_fraction_ok: bool,
     /// Tectonic runs used to calibrate the initial continental share.
     pub calibration_runs: u32,
+    /// Share of cells above sea level.
+    pub land_fraction: f64,
+    /// Share of cells on submerged continental crust (shelves).
+    pub shelf_fraction: f64,
+    /// Width of passive-margin shelves, m.
+    pub shelf_width_m: f64,
     pub events: EventCounts,
 }
 
@@ -49,6 +56,11 @@ impl std::fmt::Display for Report {
                 "OUT OF TOLERANCE"
             },
             self.calibration_runs
+        )?;
+        writeln!(
+            f,
+            "land above sea level: {:.3}, submerged shelves: {:.3} (passive shelf width {:.0} m)",
+            self.land_fraction, self.shelf_fraction, self.shelf_width_m
         )?;
         let e = &self.events;
         write!(
@@ -176,70 +188,174 @@ impl Tectonics {
             box_blur(&mut oro, w, h, radius);
         }
 
-        // 3. Per-cell elevation and derived layers.
+        // 3. Raw elevations, before calibration. Their *order* matters, not their values:
+        //    land rises inland and with orogens/arcs/plateaus; ocean deepens with age, with
+        //    abyssal hills and trenches.
         let relief = t.max_elevation_m - t.continent_base_elevation_m;
         let ridge_age = (0.1 * t.abyssal_age_ma).max(1.5 * self.dt_ma);
-        let arc_noise = Fbm::new(
-            stage_u64(self.cfg.seed, "tectonics/island-arcs"),
-            (2.5 * self.cell_m).max(4_000.0),
-            2,
-            0.5,
-        );
+        let noise = |label: &str, spacing: f64| {
+            Fbm::new(
+                stage_u64(self.cfg.seed, label),
+                spacing.max(2.5 * self.cell_m),
+                3,
+                0.5,
+            )
+        };
+        let arc_noise = noise("tectonics/island-arcs", 4_000.0);
+        let plains = noise("tectonics/plains", 10_000.0);
+        let hills = noise("tectonics/abyssal-hills", 3_000.0);
+
+        // Coast distances: through continental crust (d_in) and through ocean (d_out).
+        // Small oceanic inclusions (rift holes) are inland water (lochs): they neither carry
+        // shelves nor count as open ocean. "Landward" = continental crust or inland water.
+        let open = self.open_ocean();
+        let is_cont = |k: usize| !open[k];
+        let coast = |want_cont: bool| -> Vec<(usize, u8)> {
+            (0..n)
+                .filter(|&k| is_cont(k) == want_cont)
+                .filter(|&k| {
+                    let (i, j) = g.coords(k);
+                    [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)]
+                        .iter()
+                        .any(|&(di, dj)| {
+                            is_cont(g.index(i as i64 + di, j as i64 + dj)) != want_cont
+                        })
+                })
+                .map(|k| (k, 0))
+                .collect()
+        };
+        let reach = t
+            .shelf_width_m
+            .max(t.slope_width_m)
+            .max(t.coastal_plain_width_m)
+            + self.cell_m;
+        let d_in = self.distance_field(&coast(true), reach, |k, _| is_cont(k));
+        let d_out = self.distance_field(&coast(false), reach, |k, _| !is_cont(k));
+
+        let mut raw = vec![0f64; n];
+        let mut g_trench = vec![0f64; n];
+        let mut g_arc = vec![0f64; n];
+        // Passive-margin shelf width: the distance quantile that gives shelves `shelf_share` of
+        // the continental crust (Earth-like), within [minimal feature, shelf_width_m].
+        let passive_shelf = {
+            let mut d: Vec<f64> = (0..n)
+                .filter(|&k| g.data()[k].crust == CONTINENTAL)
+                .filter(|&k| f64::from(d_arc[k]) >= arc_d + arc_w)
+                .map(|k| f64::from(d_in[k]))
+                .collect();
+            d.sort_by(f64::total_cmp);
+            let q = ((t.shelf_share * d.len() as f64) as usize).min(d.len().saturating_sub(1));
+            d.get(q)
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(self.feature(0.0), t.shelf_width_m.max(self.feature(0.0)))
+        };
+        let mut shelf_w = vec![0f64; n];
+        let (mut land_cells, mut deep_cells) = (Vec::new(), Vec::new());
+        for (k, c) in g.data().iter().enumerate() {
+            let (x, z) = g.cell_center(k % w, k / w);
+            g_trench[k] = gauss(f64::from(d_trench[k]) / trench_w);
+            g_arc[k] = gauss((f64::from(d_arc[k]) - arc_d) / arc_w);
+            if c.crust == OCEANIC && !open[k] {
+                continue; // inland water, built below
+            }
+            if c.crust == OCEANIC {
+                let base =
+                    self.ocean_depth(f64::from(c.age)) + t.abyssal_hill_m * hills.sample(x, z);
+                raw[k] = base + (t.trench_depth_m - base).min(0.0) * g_trench[k];
+                deep_cells.push(k);
+            } else {
+                // Active margins (arc on the seaward side) keep only a minimal shelf.
+                let active = f64::from(d_arc[k]) < arc_d + arc_w;
+                shelf_w[k] = if active {
+                    self.feature(0.0)
+                } else {
+                    passive_shelf
+                };
+                let din = f64::from(d_in[k]);
+                if din < shelf_w[k] {
+                    continue; // shelf, built below
+                }
+                let o = f64::from(oro[k]);
+                let plateau =
+                    t.hotspot_plateau_m * self.edifice_height(c) / t.hotspot_edifice_height_m;
+                raw[k] = t.continent_base_elevation_m
+                    + t.plains_relief_m * plains.sample(x, z)
+                    + 2.0
+                        * t.plains_relief_m
+                        * smoothstep(shelf_w[k], shelf_w[k] + t.coastal_plain_width_m, din)
+                    + relief * (o / relief).tanh()
+                    + t.arc_uplift_m * g_arc[k]
+                    + plateau;
+                land_cells.push(k);
+            }
+        }
+
+        // 4. Calibrate land and deep ocean on the target hypsometry (rank-preserving).
+        let mut elev = raw.clone();
+        match_ranks(&mut elev, &land_cells, &t.hypsometry.land);
+        match_ranks(&mut elev, &deep_cells, &t.hypsometry.deep);
+        let calibrated_floor = elev.clone();
+
+        // 5. Margins, island arcs and edifices on top of the calibrated surfaces.
         let mut elevation = Vec::with_capacity(n);
         let mut thickness = Vec::with_capacity(n);
         let mut moho = Vec::with_capacity(n);
         let mut history = Vec::with_capacity(n);
         let mut track = Vec::with_capacity(n);
-        for (idx, c) in g.data().iter().enumerate() {
+        for (k, c) in g.data().iter().enumerate() {
             let mut f = c.flags & (flags::RIFT | flags::OPHIOLITE);
-            let g_trench = gauss(f64::from(d_trench[idx]) / trench_w);
-            let g_arc = gauss((f64::from(d_arc[idx]) - arc_d) / arc_w);
             let edifice = self.edifice_height(c);
             if edifice > 0.0 {
                 f |= flags::HOTSPOT;
             }
-            let e = if c.crust == OCEANIC {
-                let base = self.ocean_depth(f64::from(c.age));
+            if g_arc[k] > FLAG_LEVEL {
+                f |= flags::ARC;
+            }
+            let e = if c.crust == OCEANIC && !open[k] {
+                t.inland_water_depth_m
+            } else if c.crust == OCEANIC {
                 if f64::from(c.age) < ridge_age {
                     f |= flags::RIDGE;
                 }
-                let mut e = base + (t.trench_depth_m - base).min(0.0) * g_trench;
-                if g_trench > FLAG_LEVEL {
+                if g_trench[k] > FLAG_LEVEL {
                     f |= flags::TRENCH;
+                }
+                let mut e = elev[k];
+                // Continental slope on passive margins.
+                let active = g_trench[k] > 0.05 || g_arc[k] > 0.05;
+                let dout = f64::from(d_out[k]);
+                if !active && dout < t.slope_width_m {
+                    let s = smoothstep(0.0, t.slope_width_m, dout);
+                    e = t.shelf_depth_m + (e - t.shelf_depth_m) * s;
                 }
                 // Island arc: a submerged ridge with discrete volcanic islands where the
                 // along-arc noise is high.
-                let (x, z) = g.cell_center(idx % w, idx / w);
+                let (x, z) = g.cell_center(k % w, k / w);
                 let v = smoothstep(0.55, 0.8, 0.5 + 0.5 * arc_noise.sample(x, z));
                 let target =
                     t.island_arc_ridge_m + (t.island_arc_peak_m - t.island_arc_ridge_m) * v;
                 if target > e {
-                    e += (target - e) * g_arc;
-                }
-                if g_arc > FLAG_LEVEL {
-                    f |= flags::ARC;
+                    e += (target - e) * g_arc[k];
                 }
                 e + edifice
             } else {
-                let o = f64::from(oro[idx]);
-                if o > 0.25 * relief {
+                if f64::from(oro[k]) > 0.25 * relief {
                     f |= flags::OROGENY;
                 }
-                if g_arc > FLAG_LEVEL {
-                    f |= flags::ARC;
+                let din = f64::from(d_in[k]);
+                if din < shelf_w[k] {
+                    // Shelf: from the coast (0 m) down to its outer edge.
+                    t.shelf_depth_m * (1.0 - din / shelf_w[k])
+                } else {
+                    elev[k]
                 }
-                let plateau = t.hotspot_plateau_m * edifice / t.hotspot_edifice_height_m;
-                (t.continent_base_elevation_m
-                    + relief * (o / relief).tanh()
-                    + t.arc_uplift_m * g_arc
-                    + plateau)
-                    .min(t.max_elevation_m)
             };
             let thick = if c.crust == OCEANIC {
                 // Edifices and arcs are crust too.
-                t.moho_ocean_m + 0.5 * (e - self.ocean_depth(f64::from(c.age))).max(0.0)
+                t.moho_ocean_m + 0.5 * (e - calibrated_floor[k]).max(0.0)
             } else {
-                let k = ((e - t.continent_base_elevation_m) / relief).clamp(0.0, 1.0);
+                let k = (e / t.max_elevation_m).clamp(0.0, 1.0);
                 t.moho_continent_m + (t.moho_orogen_max_m - t.moho_continent_m) * k
             };
             elevation.push(e as f32);
@@ -248,6 +364,13 @@ impl Tectonics {
             history.push(f);
             track.push(if c.hotspot > 0.0 { c.hotspot_age } else { -1.0 });
         }
+        let land_fraction = elevation.iter().filter(|&&e| e > 0.0).count() as f64 / n as f64;
+        let shelf_fraction = elevation
+            .iter()
+            .zip(g.data())
+            .filter(|(e, c)| c.crust == CONTINENTAL && **e <= 0.0)
+            .count() as f64
+            / n as f64;
 
         let final_cf = self.continental_fraction();
         let report = Report {
@@ -260,6 +383,9 @@ impl Tectonics {
             continental_fraction_ok: (final_cf - t.continental_fraction).abs()
                 <= t.continental_fraction_tolerance,
             calibration_runs: 1,
+            land_fraction,
+            shelf_fraction,
+            shelf_width_m: passive_shelf,
             events: self.events,
         };
         let cm = self.cell_m;
@@ -278,18 +404,69 @@ impl Tectonics {
         }
     }
 
+    /// Oceanic cells belonging to a 4-connected oceanic region of at least
+    /// `inland_water_max_km2` (open ocean); smaller regions are inland water. Deterministic
+    /// flood fill in cell order.
+    fn open_ocean(&self) -> Vec<bool> {
+        let g = &self.grid;
+        let n = g.data().len();
+        let cell_km2 = (self.cell_m / 1_000.0).powi(2);
+        let min_cells = (self.cfg.tectonics.inland_water_max_km2 / cell_km2).ceil() as usize;
+        let mut comp = vec![usize::MAX; n];
+        let mut sizes = Vec::new();
+        for start in 0..n {
+            if comp[start] != usize::MAX || g.data()[start].crust != OCEANIC {
+                continue;
+            }
+            let id = sizes.len();
+            let mut stack = vec![start];
+            comp[start] = id;
+            let mut size = 0;
+            while let Some(k) = stack.pop() {
+                size += 1;
+                let (i, j) = g.coords(k);
+                for (di, dj) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
+                    let m = g.index(i as i64 + di, j as i64 + dj);
+                    if comp[m] == usize::MAX && g.data()[m].crust == OCEANIC {
+                        comp[m] = id;
+                        stack.push(m);
+                    }
+                }
+            }
+            sizes.push(size);
+        }
+        (0..n)
+            .map(|k| comp[k] != usize::MAX && sizes[comp[k]] >= min_cells)
+            .collect()
+    }
+
     /// Distance in metres from `seeds` (cell, plate), propagating only through cells of the
-    /// seed's plate, up to `max_m`. Seeds sit on a boundary, half a cell from their centre.
-    /// Unreached cells get `f32::INFINITY`. Dijkstra on 8 neighbours, ties by cell index.
+    /// seed's plate, up to `max_m`.
     fn plate_distance(&self, seeds: &[(usize, u8)], max_m: f64) -> Vec<f32> {
+        let g = &self.grid;
+        self.distance_field(seeds, max_m, |k, plate| g.data()[k].plate == plate)
+    }
+
+    /// Distance in metres from `seeds` (cell, label), propagating to cells where
+    /// `allowed(cell, label)` holds, up to `max_m`. Seeds sit on a boundary, half a cell from
+    /// their centre. Unreached cells get `f32::INFINITY`. Dijkstra on 8 neighbours, ties by
+    /// cell index.
+    fn distance_field(
+        &self,
+        seeds: &[(usize, u8)],
+        max_m: f64,
+        allowed: impl Fn(usize, u8) -> bool,
+    ) -> Vec<f32> {
         let g = &self.grid;
         let n = g.data().len();
         let mut dist = vec![f64::INFINITY; n];
+        let mut label = vec![0u8; n];
         let mut heap = BinaryHeap::new();
-        for &(idx, plate) in seeds {
+        for &(idx, l) in seeds {
             let d0 = 0.5 * self.cell_m;
-            if d0 < dist[idx] && g.data()[idx].plate == plate {
+            if d0 < dist[idx] && allowed(idx, l) {
                 dist[idx] = d0;
+                label[idx] = l;
                 heap.push(Reverse((d0.to_bits(), idx)));
             }
         }
@@ -300,7 +477,7 @@ impl Tectonics {
                 continue;
             }
             let (i, j) = g.coords(idx);
-            let plate = g.data()[idx].plate;
+            let l = label[idx];
             for (di, dj) in [
                 (-1i64, -1i64),
                 (0, -1),
@@ -312,7 +489,7 @@ impl Tectonics {
                 (1, 1),
             ] {
                 let nidx = g.index(i as i64 + di, j as i64 + dj);
-                if g.data()[nidx].plate != plate {
+                if !allowed(nidx, l) {
                     continue;
                 }
                 let nd = d + if di != 0 && dj != 0 {
@@ -322,6 +499,7 @@ impl Tectonics {
                 };
                 if nd <= max_m && nd < dist[nidx] {
                     dist[nidx] = nd;
+                    label[nidx] = l;
                     heap.push(Reverse((nd.to_bits(), nidx)));
                 }
             }

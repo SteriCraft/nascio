@@ -3,6 +3,7 @@
 pub mod config;
 pub mod generate;
 pub mod grid;
+pub mod hypsometry;
 pub mod noise;
 pub mod plot;
 pub mod preview;

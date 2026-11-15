@@ -5,7 +5,7 @@ use nascio_core::time::GameClock;
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a change alters generated output for a given config.
-pub const GENERATOR_VERSION: u32 = 1;
+pub const GENERATOR_VERSION: u32 = 2;
 
 /// Full-resolution cell size of the tectonic grid, in metres (spec §1.4).
 pub const TECTONIC_CELL_M: u32 = 160;
@@ -145,6 +145,28 @@ pub struct TectonicsConfig {
     /// Relative normal speed, as a fraction of the fastest plate, separating convergent and
     /// divergent boundaries from transform ones.
     pub boundary_threshold: f64,
+    /// Depth of the outer edge of a continental shelf (passive margins).
+    pub shelf_depth_m: f64,
+    /// Maximum width of a continental shelf on passive margins (active margins keep a minimal
+    /// one). The actual width is set by `shelf_share`.
+    pub shelf_width_m: f64,
+    /// Share of continental crust under shelves: 7.6 / (29.2 + 7.6) on Earth.
+    pub shelf_share: f64,
+    /// Width of the continental slope, from the shelf edge down to the deep ocean.
+    pub slope_width_m: f64,
+    /// Distance inland over which coastal plains rise (orders land before calibration).
+    pub coastal_plain_width_m: f64,
+    /// Amplitude of the low-frequency relief of continental plains (before calibration).
+    pub plains_relief_m: f64,
+    /// Amplitude of abyssal hills on the ocean floor (before calibration).
+    pub abyssal_hill_m: f64,
+    /// Oceanic regions smaller than this are inland water (lochs in rift zones), not open
+    /// ocean: no shelves around them.
+    pub inland_water_max_km2: f64,
+    /// Water depth of inland water.
+    pub inland_water_depth_m: f64,
+    /// Target elevation distribution (Earth hypsometry scaled to the spec §3 targets).
+    pub hypsometry: HypsometryConfig,
 }
 
 impl Default for TectonicsConfig {
@@ -186,6 +208,16 @@ impl Default for TectonicsConfig {
             hotspot_decay_ma: 80.0,
             hotspot_plateau_m: 500.0,
             boundary_threshold: 0.15,
+            shelf_depth_m: -150.0,
+            shelf_width_m: 5_000.0,
+            shelf_share: 0.2,
+            slope_width_m: 2_500.0,
+            coastal_plain_width_m: 15_000.0,
+            plains_relief_m: 150.0,
+            abyssal_hill_m: 100.0,
+            inland_water_max_km2: 50.0,
+            inland_water_depth_m: -80.0,
+            hypsometry: HypsometryConfig::default(),
         }
     }
 }
@@ -222,8 +254,72 @@ impl TectonicsConfig {
                 "hotspot_duty must lie in (0, 1] and hotspot_island_spacing_m be > 0".into(),
             );
         }
+        self.hypsometry.validate()?;
+        if !(self.shelf_depth_m < 0.0 && self.shelf_width_m > 0.0 && self.slope_width_m > 0.0) {
+            return Err("shelf_depth_m must be < 0, shelf and slope widths > 0".into());
+        }
         if self.total_displacement_m <= 0.0 || self.duration_ma <= 0.0 {
             return Err("total_displacement_m and duration_ma must be > 0".into());
+        }
+        Ok(())
+    }
+}
+
+/// Target elevation distribution: Earth's hypsometric curve with its elevations remapped to
+/// the spec §3 targets. Each band is `[low m, high m, share of Earth's surface in %]`, values
+/// uniform inside a band, bands ascending and contiguous.
+///
+/// Earth → Nascio remapping: land 0/1 000/2 000/4 000/8 848 m → 0/400/900/1 800/3 000 m;
+/// ocean −2 000/−3 000/−4 000/−5 000/−6 000/−11 000 m → −1 500/−2 200/−2 700/−3 000/−3 200/
+/// −3 500 m. Shelves (0 to −200 m on Earth, 0 to −150 m here) and slopes are built
+/// geometrically and are not remapped; their Earth shares are kept for the histogram.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HypsometryConfig {
+    /// Land above sea level (continents outside shelves).
+    pub land: Vec<[f64; 3]>,
+    /// Deep ocean floor (outside shelves and slopes; edifices and arcs are added afterwards).
+    pub deep: Vec<[f64; 3]>,
+    /// Earth's share of continental shelves, %.
+    pub shelf_pct: f64,
+    /// Earth's share of continental slopes, %.
+    pub slope_pct: f64,
+}
+
+impl Default for HypsometryConfig {
+    fn default() -> Self {
+        Self {
+            land: vec![
+                [0.0, 400.0, 20.8],
+                [400.0, 900.0, 4.5],
+                [900.0, 1_800.0, 3.9],
+                [1_800.0, 3_000.0, 0.9],
+            ],
+            deep: vec![
+                [-3_500.0, -3_200.0, 1.0],
+                [-3_200.0, -3_000.0, 13.8],
+                [-3_000.0, -2_700.0, 23.3],
+                [-2_700.0, -2_200.0, 13.6],
+                [-2_200.0, -1_500.0, 4.5],
+            ],
+            shelf_pct: 7.6,
+            slope_pct: 6.1,
+        }
+    }
+}
+
+impl HypsometryConfig {
+    /// Bands must be ascending, contiguous, non-empty, with positive shares.
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, bands) in [("land", &self.land), ("deep", &self.deep)] {
+            let ok = !bands.is_empty()
+                && bands.iter().all(|b| b[0] < b[1] && b[2] > 0.0)
+                && bands.windows(2).all(|w| w[0][1] == w[1][0]);
+            if !ok {
+                return Err(format!(
+                    "hypsometry.{name} bands must be ascending, contiguous, with positive shares"
+                ));
+            }
         }
         Ok(())
     }

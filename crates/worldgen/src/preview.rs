@@ -424,5 +424,168 @@ pub fn write_previews(world: &World, plates: &[Plate], dir: &Path) -> anyhow::Re
         cv.save(&p)?;
         written.push(p);
     }
+    let p = dir.join("hypsometry.png");
+    write_hypsometry(world, &p)?;
+    written.push(p);
     Ok(written)
+}
+
+/// Bin width of the hypsometry histogram, m.
+const HYPSO_BIN_M: f64 = 100.0;
+/// Range of the hypsometry histogram, m.
+const HYPSO_RANGE: (f64, f64) = (-3_600.0, 3_100.0);
+
+/// Target share (%) of the surface in `[lo, hi)`, from piecewise-uniform bands.
+fn band_share(bands: &[[f64; 3]], lo: f64, hi: f64, total: f64) -> f64 {
+    bands
+        .iter()
+        .map(|b| {
+            let overlap = (hi.min(b[1]) - lo.max(b[0])).max(0.0);
+            b[2] * overlap / (b[1] - b[0])
+        })
+        .sum::<f64>()
+        * 100.0
+        / total
+}
+
+/// Histogram of elevations (bars, % of the surface per 100 m) against the target hypsometry
+/// (step line): Earth's curve scaled to the spec §3 targets.
+pub fn write_hypsometry(world: &World, path: &Path) -> anyhow::Result<()> {
+    let Some(elev) = world.layer("elevation_tectonic") else {
+        return Ok(());
+    };
+    let h = &world.config.tectonics.hypsometry;
+    let t = &world.config.tectonics;
+    let shelf = [[t.shelf_depth_m, 0.0, h.shelf_pct]];
+    let slope = [[-1_500.0, t.shelf_depth_m, h.slope_pct]];
+    let total: f64 =
+        h.land.iter().chain(&h.deep).map(|b| b[2]).sum::<f64>() + h.shelf_pct + h.slope_pct;
+    let n_bins = ((HYPSO_RANGE.1 - HYPSO_RANGE.0) / HYPSO_BIN_M) as usize;
+    let n = elev.width * elev.height;
+    let mut counts = vec![0usize; n_bins];
+    for i in 0..n {
+        let b = ((elev.data.get_f64(i) - HYPSO_RANGE.0) / HYPSO_BIN_M).floor();
+        counts[(b.max(0.0) as usize).min(n_bins - 1)] += 1;
+    }
+    let world_pct: Vec<f64> = counts
+        .iter()
+        .map(|&c| 100.0 * c as f64 / n as f64)
+        .collect();
+    let target_pct: Vec<f64> = (0..n_bins)
+        .map(|k| {
+            let lo = HYPSO_RANGE.0 + k as f64 * HYPSO_BIN_M;
+            let hi = lo + HYPSO_BIN_M;
+            [&h.land[..], &h.deep[..], &shelf[..], &slope[..]]
+                .iter()
+                .map(|bands| band_share(bands, lo, hi, total))
+                .sum()
+        })
+        .collect();
+    let y_max = world_pct
+        .iter()
+        .chain(&target_pct)
+        .fold(1.0f64, |m, &v| m.max(v))
+        .ceil();
+
+    let (w, hgt) = (1_100, 540);
+    let (left, right, top, bottom) = (70, 30, 110, 50);
+    let mut cv = Canvas::new(w as u32, hgt as u32, hex(SURFACE));
+    let (ink, ink2, grid) = (hex(INK), hex(INK_2), hex("#e4e3df"));
+    let (bar_c, line_c) = (hex(SERIES[0]), hex(SERIES[1]));
+    let px = |v: f64| {
+        left as f64
+            + (v - HYPSO_RANGE.0) / (HYPSO_RANGE.1 - HYPSO_RANGE.0) * (w - left - right) as f64
+    };
+    let py = |p: f64| (hgt - bottom) as f64 - p / y_max * (hgt - top - bottom) as f64;
+
+    let land = (0..n).filter(|&i| elev.data.get_f64(i) > 0.0).count() as f64 / n as f64;
+    let crust = world.layer("crust_type").map_or(0.0, |l| {
+        (0..n)
+            .filter(|&i| l.data.get_f64(i) as u8 == CONTINENTAL)
+            .count() as f64
+            / n as f64
+    });
+    cv.text(
+        left,
+        14,
+        "hypsometry: share of the surface per 100 m of elevation",
+        2,
+        ink,
+    );
+    cv.text(
+        left,
+        38,
+        &format!(
+            "seed {}, scale 1/{}: land {:.1}%, continental crust {:.1}%",
+            world.config.seed,
+            world.config.scale.divisor(),
+            100.0 * land,
+            100.0 * crust
+        ),
+        2,
+        ink2,
+    );
+    cv.rect(left, 72, 18, 10, bar_c);
+    cv.text(left + 26, 68, "this world", 2, ink2);
+    cv.rect(left + 200, 75, 18, 3, line_c);
+    cv.text(
+        left + 226,
+        68,
+        "target: earth hypsometry scaled to spec 3",
+        2,
+        ink2,
+    );
+
+    // Recessive grid and axes.
+    let step = if y_max > 8.0 { 2.0 } else { 1.0 };
+    let mut p = 0.0;
+    while p <= y_max + 1e-9 {
+        let y = py(p).round() as i32;
+        cv.hline(left, w - right, y, 1, grid);
+        let label = format!("{p:.0}%");
+        cv.text(
+            left - 8 - text_width(&label, 2),
+            y - text_height(2) / 2,
+            &label,
+            2,
+            ink2,
+        );
+        p += step;
+    }
+    let mut e = -3_500.0;
+    while e <= 3_000.0 {
+        let x = px(e).round() as i32;
+        let label = format!("{e:.0}");
+        cv.text(
+            x - text_width(&label, 2) / 2,
+            hgt - bottom + 10,
+            &label,
+            2,
+            ink2,
+        );
+        e += 500.0;
+    }
+    // Bars with a 2 px gap.
+    for (k, &v) in world_pct.iter().enumerate() {
+        let lo = HYPSO_RANGE.0 + k as f64 * HYPSO_BIN_M;
+        let (x0, x1) = (
+            px(lo).round() as i32 + 1,
+            px(lo + HYPSO_BIN_M).round() as i32 - 1,
+        );
+        let y = py(v).round() as i32;
+        cv.rect(x0, y, (x1 - x0).max(1), hgt - bottom - y, bar_c);
+    }
+    // Sea level.
+    cv.vline(px(0.0).round() as i32, top, hgt - bottom, 1, ink2);
+    cv.text(px(0.0) as i32 + 4, top, "sea level", 2, ink2);
+    // Target step line.
+    let mut pts = Vec::new();
+    for (k, &v) in target_pct.iter().enumerate() {
+        let lo = HYPSO_RANGE.0 + k as f64 * HYPSO_BIN_M;
+        pts.push((px(lo), py(v)));
+        pts.push((px(lo + HYPSO_BIN_M), py(v)));
+    }
+    cv.polyline(&pts, 2, line_c, None);
+    cv.hline(left, w - right, hgt - bottom, 1, ink);
+    cv.save(path)
 }
