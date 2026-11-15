@@ -143,6 +143,30 @@ pub struct UiCapture(pub bool);
 // ---------------------------------------------------------------------------------------------
 // Streaming
 
+/// Worker threads shared by chunk and horizon generation.
+#[derive(Resource, Clone)]
+pub struct Workers {
+    pub pool: Arc<rayon::ThreadPool>,
+    pub threads: usize,
+}
+
+impl Workers {
+    pub fn new() -> Self {
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        // Leave room for Bevy's main, render and compute threads.
+        let threads = (cores / 2).max(1);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("terrain-worker-{i}"))
+            .build()
+            .expect("terrain worker pool");
+        Self {
+            pool: Arc::new(pool),
+            threads,
+        }
+    }
+}
+
 struct ColumnResult {
     key: (i32, i32),
     meshes: Vec<(i32, ChunkMesh)>,
@@ -150,14 +174,19 @@ struct ColumnResult {
 
 enum Slot {
     Pending,
-    Ready { entities: Vec<Entity>, quads: usize },
+    Ready {
+        entities: Vec<Entity>,
+        quads: usize,
+        shown: bool,
+    },
 }
 
 /// Chunk column loader.
+///
+/// A ready column is *shown* only once the displayed horizon has a hole for it, and stays
+/// until the horizon covers it again: chunks and horizon never overlap and never leave a gap.
 #[derive(Resource)]
 pub struct Streamer {
-    pool: rayon::ThreadPool,
-    threads: usize,
     tx: Sender<ColumnResult>,
     rx: Mutex<Receiver<ColumnResult>>,
     slots: HashMap<(i32, i32), Slot>,
@@ -165,6 +194,10 @@ pub struct Streamer {
     /// Column offsets within the view radius, nearest first.
     offsets: Vec<(i32, i32)>,
     radius: i32,
+    /// Camera chunk column.
+    center: (i32, i32),
+    /// Bumped whenever the set of ready columns in range changes.
+    pub version: u64,
     /// Desired columns not ready yet (0 when everything in range is meshed).
     pub missing: usize,
     pub quads: usize,
@@ -173,31 +206,20 @@ pub struct Streamer {
 
 impl Streamer {
     pub fn new() -> Self {
-        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-        let threads = (cores / 2).max(1);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .thread_name(|i| format!("chunk-worker-{i}"))
-            .build()
-            .expect("chunk worker pool");
         let (tx, rx) = channel();
         Self {
-            pool,
-            threads,
             tx,
             rx: Mutex::new(rx),
             slots: HashMap::new(),
             in_flight: 0,
             offsets: Vec::new(),
             radius: -1,
+            center: (i32::MIN, i32::MIN),
+            version: 0,
             missing: usize::MAX,
             quads: 0,
             ready_columns: 0,
         }
-    }
-
-    pub fn threads(&self) -> usize {
-        self.threads
     }
 
     fn set_radius(&mut self, radius: i32) {
@@ -205,6 +227,7 @@ impl Streamer {
             return;
         }
         self.radius = radius;
+        self.version += 1;
         let r2 = radius * radius;
         let mut v: Vec<(i32, i32)> = (-radius..=radius)
             .flat_map(|dz| (-radius..=radius).map(move |dx| (dx, dz)))
@@ -213,9 +236,24 @@ impl Streamer {
         v.sort_by_key(|&(dx, dz)| (dx * dx + dz * dz, dz, dx));
         self.offsets = v;
     }
+
+    /// Whether column `key` lies within `radius` columns of the camera column.
+    fn within(&self, key: (i32, i32), radius: i32) -> bool {
+        let (dx, dz) = (
+            chunk_delta(self.center.0, key.0),
+            chunk_delta(self.center.1, key.1),
+        );
+        dx * dx + dz * dz <= radius * radius
+    }
+
+    /// Whether column `key` is meshed and within the view distance: the horizon leaves a hole
+    /// for exactly these columns.
+    pub fn wants_hole(&self, key: (i32, i32)) -> bool {
+        matches!(self.slots.get(&key), Some(Slot::Ready { .. })) && self.within(key, self.radius)
+    }
 }
 
-fn chunk_delta(a: i32, b: i32) -> i32 {
+pub fn chunk_delta(a: i32, b: i32) -> i32 {
     let d = (b - a).rem_euclid(CHUNKS_PER_AXIS);
     if d > CHUNKS_PER_AXIS / 2 {
         d - CHUNKS_PER_AXIS
@@ -224,7 +262,7 @@ fn chunk_delta(a: i32, b: i32) -> i32 {
     }
 }
 
-fn to_bevy_mesh(m: MeshData) -> Mesh {
+pub fn to_bevy_mesh(m: MeshData) -> Mesh {
     Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
@@ -235,11 +273,12 @@ fn to_bevy_mesh(m: MeshData) -> Mesh {
     .with_inserted_indices(Indices::U32(m.indices))
 }
 
-/// Receives finished columns, requests missing ones, drops far ones.
+/// Receives finished columns and requests missing ones, nearest first.
 #[allow(clippy::too_many_arguments)]
 pub fn stream_chunks(
     mut commands: Commands,
     mut streamer: ResMut<Streamer>,
+    workers: Res<Workers>,
     terrain: Res<SharedTerrain>,
     settings: Res<FlySettings>,
     cam: Res<FlyCam>,
@@ -250,22 +289,24 @@ pub fn stream_chunks(
     let s = &mut *streamer;
     s.set_radius((settings.view_distance_m / CHUNK_SIZE as f32).ceil() as i32);
     let cam_block = cam.pos.block();
-    let (ccx, ccz) = (
+    let center = (
         cam_block.x.div_euclid(CHUNK_SIZE),
         cam_block.z.div_euclid(CHUNK_SIZE),
     );
+    if center != s.center {
+        s.center = center;
+        s.version += 1;
+    }
     let keep = s.radius + 2;
-    let in_range = |key: (i32, i32), r: i32| {
-        let (dx, dz) = (chunk_delta(ccx, key.0), chunk_delta(ccz, key.1));
-        dx * dx + dz * dz <= r * r
-    };
 
-    // 1. Finished columns.
+    // 1. Finished columns (spawned hidden: the horizon decides when they appear).
     let results: Vec<ColumnResult> = s.rx.lock().expect("channel").try_iter().collect();
     for r in results {
         s.in_flight -= 1;
-        if !matches!(s.slots.get(&r.key), Some(Slot::Pending)) || !in_range(r.key, keep) {
-            s.slots.remove(&r.key);
+        if !matches!(s.slots.get(&r.key), Some(Slot::Pending)) || !s.within(r.key, keep) {
+            if matches!(s.slots.get(&r.key), Some(Slot::Pending)) {
+                s.slots.remove(&r.key);
+            }
             continue;
         }
         let mut entities = Vec::new();
@@ -278,64 +319,59 @@ pub fn stream_chunks(
             };
             let t = Transform::from_translation(origin.translation(anchor.x, anchor.y, anchor.z));
             quads += m.opaque.quad_count() + m.water.quad_count();
-            if !m.opaque.is_empty() {
-                let h = meshes.add(to_bevy_mesh(m.opaque));
+            for (data, material) in [(m.opaque, &materials.opaque), (m.water, &materials.water)] {
+                if data.is_empty() {
+                    continue;
+                }
+                let h = meshes.add(to_bevy_mesh(data));
                 entities.push(
                     commands
                         .spawn((
                             Mesh3d(h),
-                            MeshMaterial3d(materials.opaque.clone()),
+                            MeshMaterial3d(material.clone()),
                             t,
                             anchor,
-                        ))
-                        .id(),
-                );
-            }
-            if !m.water.is_empty() {
-                let h = meshes.add(to_bevy_mesh(m.water));
-                entities.push(
-                    commands
-                        .spawn((
-                            Mesh3d(h),
-                            MeshMaterial3d(materials.water.clone()),
-                            t,
-                            anchor,
+                            Visibility::Hidden,
                         ))
                         .id(),
                 );
             }
         }
         s.quads += quads;
-        s.slots.insert(r.key, Slot::Ready { entities, quads });
+        s.version += 1;
+        s.slots.insert(
+            r.key,
+            Slot::Ready {
+                entities,
+                quads,
+                shown: false,
+            },
+        );
     }
 
-    // 2. Drop columns out of range.
-    let far: Vec<(i32, i32)> = s
-        .slots
-        .keys()
-        .copied()
-        .filter(|&k| !in_range(k, keep))
-        .collect();
-    for k in far {
-        if let Some(Slot::Ready { entities, quads }) = s.slots.remove(&k) {
-            s.quads -= quads;
-            for e in entities {
-                commands.entity(e).despawn();
-            }
+    // 2. Forget pending columns that left the range (their results will be discarded).
+    let center_now = s.center;
+    s.slots.retain(|&k, slot| {
+        if !matches!(slot, Slot::Pending) {
+            return true;
         }
-        // A pending column is simply forgotten: its result will be discarded.
-    }
+        let (dx, dz) = (
+            chunk_delta(center_now.0, k.0),
+            chunk_delta(center_now.1, k.1),
+        );
+        dx * dx + dz * dz <= keep * keep
+    });
 
     // 3. Request missing columns, nearest first.
-    let max_in_flight = s.threads * 2;
+    let max_in_flight = workers.threads * 2;
     let underground = terrain.0.config().underground_chunks;
     let mut missing = 0;
     let mut ready = 0;
     for i in 0..s.offsets.len() {
         let (dx, dz) = s.offsets[i];
         let key = (
-            (ccx + dx).rem_euclid(CHUNKS_PER_AXIS),
-            (ccz + dz).rem_euclid(CHUNKS_PER_AXIS),
+            (center.0 + dx).rem_euclid(CHUNKS_PER_AXIS),
+            (center.1 + dz).rem_euclid(CHUNKS_PER_AXIS),
         );
         match s.slots.get(&key) {
             Some(Slot::Ready { .. }) => ready += 1,
@@ -347,7 +383,7 @@ pub fn stream_chunks(
                     s.slots.insert(key, Slot::Pending);
                     let terrain = terrain.0.clone();
                     let tx = s.tx.clone();
-                    s.pool.spawn(move || {
+                    workers.pool.spawn(move || {
                         let col = ColumnSet::new(&terrain, key.0, key.1);
                         let meshes = col
                             .chunk_range(underground)
@@ -362,6 +398,65 @@ pub fn stream_chunks(
     }
     s.missing = missing;
     s.ready_columns = ready;
+}
+
+/// Shows the columns the horizon has a hole for (or, without horizon, those in range) and
+/// despawns far columns once the horizon covers them.
+pub fn column_visibility(
+    mut commands: Commands,
+    mut streamer: ResMut<Streamer>,
+    settings: Res<FlySettings>,
+    horizon: Res<crate::horizon::Horizon>,
+    mut vis: Query<&mut Visibility, With<Anchor>>,
+) {
+    let s = &mut *streamer;
+    let use_horizon = settings.horizon && horizon.is_displayed();
+    let (radius, keep, center) = (s.radius, s.radius + 2, s.center);
+    let within = |k: (i32, i32), r: i32| {
+        let (dx, dz) = (chunk_delta(center.0, k.0), chunk_delta(center.1, k.1));
+        dx * dx + dz * dz <= r * r
+    };
+    let mut removed = 0;
+    s.slots.retain(|&key, slot| {
+        let Slot::Ready {
+            entities,
+            quads,
+            shown,
+        } = slot
+        else {
+            return true;
+        };
+        let holed = use_horizon && horizon.has_hole(key);
+        let want = if use_horizon {
+            holed
+        } else {
+            within(key, radius)
+        };
+        if !within(key, keep) && !holed {
+            removed += *quads;
+            for &e in entities.iter() {
+                commands.entity(e).despawn();
+            }
+            return false;
+        }
+        if want != *shown {
+            *shown = want;
+            for &e in entities.iter() {
+                if let Ok(mut v) = vis.get_mut(e) {
+                    *v = if want {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    };
+                }
+            }
+        }
+        true
+    });
+    if removed > 0 {
+        s.quads -= removed;
+        s.version += 1;
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -533,6 +628,7 @@ pub fn hud(
     mut hud: ResMut<HudState>,
     mut capture: ResMut<UiCapture>,
     streamer: Res<Streamer>,
+    workers: Res<Workers>,
     horizon: Option<Res<crate::horizon::HorizonStats>>,
     stats: Res<FrameStats>,
     terrain: Res<SharedTerrain>,
@@ -577,7 +673,7 @@ pub fn hud(
                 streamer.ready_columns,
                 streamer.missing,
                 streamer.quads / 1_000,
-                streamer.threads()
+                workers.threads
             ));
             if let Some(h) = &horizon {
                 ui.monospace(format!(
@@ -628,4 +724,13 @@ pub fn hud(
         });
     capture.0 = ctx.egui_wants_pointer_input() || ctx.is_pointer_over_egui();
     Ok(())
+}
+
+/// Entering the 3D mode: every column is re-evaluated by [`column_visibility`].
+pub fn reset_visibility(mut streamer: ResMut<Streamer>) {
+    for slot in streamer.slots.values_mut() {
+        if let Slot::Ready { shown, .. } = slot {
+            *shown = false;
+        }
+    }
 }

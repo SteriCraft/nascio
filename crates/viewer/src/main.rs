@@ -108,7 +108,8 @@ fn run(args: Args) -> anyhow::Result<()> {
         Some([x, y, z]) => (*x, *z, Some(*y)),
         _ => (WORLD_SIZE_F64 / 2.0, WORLD_SIZE_F64 / 2.0, None),
     };
-    let y = y.unwrap_or_else(|| terrain.height(x, z).max(0.0) + 60.0);
+    let ground = terrain.height(x, z).max(0.0);
+    let y = y.unwrap_or(ground + 60.0).max(ground + 2.0);
     let cam = FlyCam {
         pos: WorldPos::new(x, y, z),
         yaw: args.yaw.to_radians(),
@@ -121,6 +122,9 @@ fn run(args: Args) -> anyhow::Result<()> {
         fixed_hour: args.hour,
         horizon: !args.no_horizon,
     };
+
+    let horizon_cfg = horizon::HorizonConfig::default();
+    horizon::check_layout(&horizon_cfg);
 
     let mut map = map::MapState::new(world, args.world.clone());
     map.center = (cam.pos.x, cam.pos.z);
@@ -152,7 +156,9 @@ fn run(args: Args) -> anyhow::Result<()> {
     .insert_resource(settings)
     .insert_resource(info)
     .insert_resource(fly::SharedTerrain(terrain))
+    .insert_resource(fly::Workers::new())
     .insert_resource(fly::Streamer::new())
+    .insert_resource(horizon::Horizon::new(horizon_cfg))
     .insert_resource(RenderOrigin(BlockPos::new(0, 0, 0)))
     .insert_resource(ClearColor(Color::srgb(0.45, 0.64, 0.9)))
     .init_resource::<fly::UiCapture>()
@@ -173,6 +179,8 @@ fn run(args: Args) -> anyhow::Result<()> {
             (
                 fly::fly_input,
                 fly::stream_chunks,
+                horizon::update_horizon,
+                fly::column_visibility,
                 fly::place_camera,
                 fly::update_sun,
                 update_fog,
@@ -182,8 +190,8 @@ fn run(args: Args) -> anyhow::Result<()> {
         )
             .chain(),
     )
-    .add_systems(OnEnter(Mode::Fly), show_scene::<true>)
-    .add_systems(OnEnter(Mode::Map), show_scene::<false>);
+    .add_systems(OnEnter(Mode::Fly), fly::reset_visibility)
+    .add_systems(OnEnter(Mode::Map), hide_scene);
     if args.fly {
         app.insert_state(Mode::Fly);
     }
@@ -241,6 +249,15 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
         ..default()
     });
     commands.insert_resource(fly::TerrainMaterials { opaque, water });
+    let horizon = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.95,
+        reflectance: 0.15,
+        double_sided: true,
+        cull_mode: None,
+        ..default()
+    });
+    commands.insert_resource(horizon::HorizonMaterial(horizon));
 }
 
 /// Fog hides the chunk edge (or, with the horizon, the far end of the world).
@@ -250,26 +267,23 @@ fn update_fog(
     mut fog: Query<&mut DistanceFog>,
 ) {
     let end = if settings.horizon && stats.extent_m > 0.0 {
-        stats.extent_m as f32
+        stats.extent_m as f32 * 0.95
     } else {
         settings.view_distance_m
     };
     if let Ok(mut f) = fog.single_mut() {
         f.falloff = FogFalloff::Linear {
-            start: end * 0.55,
+            start: end * 0.35,
             end,
         };
     }
 }
 
-/// Map and 3D share one camera; the 3D scene is hidden behind the map.
-fn show_scene<const VISIBLE: bool>(mut q: Query<&mut Visibility, With<fly::Anchor>>) {
+/// Map and 3D share one camera: the 3D scene is hidden behind the map. Entering the 3D mode,
+/// chunk and horizon visibility are restored by their own systems.
+fn hide_scene(mut q: Query<&mut Visibility, With<fly::Anchor>>) {
     for mut v in &mut q {
-        *v = if VISIBLE {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
+        *v = Visibility::Hidden;
     }
 }
 
