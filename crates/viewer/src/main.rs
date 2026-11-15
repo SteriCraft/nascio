@@ -1,383 +1,341 @@
-//! Nascio development viewer: map mode (M1).
+//! Nascio development viewer: map mode (M1) and free-flight 3D mode (M2).
 //!
-//! `cargo run -p nascio-viewer --release -- out/world-42`
-//!
-//! The map is drawn with egui: the selected layer is an egui texture with nearest filtering
-//! and `Repeat` wrapping, painted on one quad whose UVs run past `[0, 1]`, so the torus repeats
-//! endlessly (spec §7, "UV en fract"). The view centre stays wrapped in `[0, WORLD_SIZE)`.
+//! ```text
+//! cargo run -p nascio-viewer --release -- out/m2/world-42
+//! cargo run -p nascio-viewer --release -- out/m2/world-42 --fly --pos 21000,1500
+//! ```
+
+mod fly;
+mod horizon;
+mod map;
+mod perf;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
-use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
+use bevy::window::PresentMode;
+use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
+use clap::Parser;
 use nascio_core::consts::WORLD_SIZE_F64;
-use nascio_core::geo::{latitude, longitude, seam_distance};
-use nascio_core::torus::wrap_f64;
-use nascio_worldgen::preview;
-use nascio_worldgen::tectonics::flags;
+use nascio_core::coords::{BlockPos, WorldPos};
+use nascio_voxel::{Terrain, VoxelConfig};
 use nascio_worldgen::world_io::World;
 
-/// Graticule spacing, degrees (15° of longitude = one hour of solar time).
-const GRATICULE_STEP_DEG: f64 = 15.0;
+use fly::{FlyCam, FlySettings, RenderOrigin};
 
-#[derive(Resource)]
-struct MapState {
-    world: World,
-    dir: PathBuf,
-    layer: usize,
-    textures: Vec<Option<egui::TextureHandle>>,
-    /// View centre, world metres.
-    center: (f64, f64),
-    /// Metres per screen point; 0 until the first frame fits the world to the view.
-    mpp: f64,
-    graticule: bool,
+#[derive(Parser, Debug)]
+#[command(about = "Nascio world viewer")]
+struct Args {
+    /// World directory (from `nascio-worldgen generate`).
+    #[arg(default_value = "out/world-42")]
+    world: PathBuf,
+    /// Start in the 3D mode.
+    #[arg(long)]
+    fly: bool,
+    /// Camera position `x,z` (height: 60 m above ground) or `x,y,z`.
+    #[arg(long, value_delimiter = ',')]
+    pos: Option<Vec<f64>>,
+    /// Heading from north towards east, degrees.
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    yaw: f64,
+    /// Pitch, degrees (negative looks down).
+    #[arg(long, default_value_t = -15.0, allow_hyphen_values = true)]
+    pitch: f64,
+    /// Camera speed, m/s.
+    #[arg(long, default_value_t = 40.0)]
+    speed: f64,
+    /// Chunk view distance, m.
+    #[arg(long, default_value_t = 512.0)]
+    view_distance: f32,
+    /// Fixed local solar hour for lighting (default: real time).
+    #[arg(long)]
+    hour: Option<f64>,
+    /// Disable the horizon.
+    #[arg(long)]
+    no_horizon: bool,
+    /// Capture the window once the scene is loaded, then quit.
+    #[arg(long)]
+    screenshot: Option<PathBuf>,
+    /// TOML file with a `[voxel]` section overriding chunk generation parameters.
+    #[arg(long)]
+    voxel_config: Option<PathBuf>,
+    /// Borderless fullscreen.
+    #[arg(long)]
+    fullscreen: bool,
+    /// Disable vsync (measure the real frame cost).
+    #[arg(long)]
+    no_vsync: bool,
 }
 
-/// `--screenshot <file>`: capture the window after a few frames, then quit (visual checks).
+#[derive(States, Default, Clone, Copy, Eq, PartialEq, Hash, Debug)]
+enum Mode {
+    #[default]
+    Map,
+    Fly,
+}
+
+fn main() {
+    let args = Args::parse();
+    if let Err(e) = run(args) {
+        eprintln!("error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run(args: Args) -> anyhow::Result<()> {
+    let world = World::load(&args.world).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot load world from {}: {e:#}\ngenerate one first: cargo run -p nascio-worldgen --release -- generate --seed 42 --scale 1",
+            args.world.display()
+        )
+    })?;
+    let voxel_cfg = match &args.voxel_config {
+        Some(p) => VoxelConfig::from_toml(&std::fs::read_to_string(p)?)?,
+        None => VoxelConfig::default(),
+    };
+    let terrain = Arc::new(Terrain::from_world(&world, voxel_cfg)?);
+    let info = fly::WorldInfo {
+        astro: world.config.astro,
+        clock: world.config.clock,
+        seed: world.config.seed,
+    };
+
+    let (x, z, y) = match args.pos.as_deref() {
+        Some([x, z]) => (*x, *z, None),
+        Some([x, y, z]) => (*x, *z, Some(*y)),
+        _ => (WORLD_SIZE_F64 / 2.0, WORLD_SIZE_F64 / 2.0, None),
+    };
+    let y = y.unwrap_or_else(|| terrain.height(x, z).max(0.0) + 60.0);
+    let cam = FlyCam {
+        pos: WorldPos::new(x, y, z),
+        yaw: args.yaw.to_radians(),
+        pitch: args.pitch.to_radians(),
+        speed: args.speed.clamp(fly::SPEED_MIN, fly::SPEED_MAX),
+        scripted: false,
+    };
+    let settings = FlySettings {
+        view_distance_m: args.view_distance.clamp(fly::VIEW_MIN, fly::VIEW_MAX),
+        fixed_hour: args.hour,
+        horizon: !args.no_horizon,
+    };
+
+    let mut map = map::MapState::new(world, args.world.clone());
+    map.center = (cam.pos.x, cam.pos.z);
+
+    let mut window = Window {
+        title: format!("Nascio viewer — {}", args.world.display()),
+        present_mode: if args.no_vsync {
+            PresentMode::AutoNoVsync
+        } else {
+            PresentMode::AutoVsync
+        },
+        ..default()
+    };
+    if args.fullscreen {
+        window.mode =
+            bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Primary);
+    }
+
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(window),
+        ..default()
+    }))
+    .add_plugins(EguiPlugin::default())
+    .add_plugins(perf::PerfPlugin)
+    .init_state::<Mode>()
+    .insert_resource(map)
+    .insert_resource(cam)
+    .insert_resource(settings)
+    .insert_resource(info)
+    .insert_resource(fly::SharedTerrain(terrain))
+    .insert_resource(fly::Streamer::new())
+    .insert_resource(RenderOrigin(BlockPos::new(0, 0, 0)))
+    .insert_resource(ClearColor(Color::srgb(0.45, 0.64, 0.9)))
+    .init_resource::<fly::UiCapture>()
+    .init_resource::<fly::HudState>()
+    .init_resource::<horizon::HorizonStats>()
+    .add_systems(Startup, setup)
+    .add_systems(
+        EguiPrimaryContextPass,
+        (
+            map::ui.run_if(in_state(Mode::Map)),
+            fly::hud.run_if(in_state(Mode::Fly)),
+        ),
+    )
+    .add_systems(
+        Update,
+        (
+            switch_mode,
+            (
+                fly::fly_input,
+                fly::stream_chunks,
+                fly::place_camera,
+                fly::update_sun,
+                update_fog,
+            )
+                .chain()
+                .run_if(in_state(Mode::Fly)),
+        )
+            .chain(),
+    )
+    .add_systems(OnEnter(Mode::Fly), show_scene::<true>)
+    .add_systems(OnEnter(Mode::Map), show_scene::<false>);
+    if args.fly {
+        app.insert_state(Mode::Fly);
+    }
+    if let Some(path) = args.screenshot {
+        app.insert_resource(AutoScreenshot {
+            path,
+            frame: 0,
+            settled: 0,
+            shot_at: None,
+        })
+        .add_systems(Last, auto_screenshot);
+    }
+    app.run();
+    Ok(())
+}
+
+fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
+    commands.spawn((
+        Camera3d::default(),
+        Projection::from(PerspectiveProjection {
+            fov: 70f32.to_radians(),
+            near: 0.1,
+            far: 60_000.0,
+            ..default()
+        }),
+        DistanceFog {
+            color: Color::srgb(0.45, 0.64, 0.9),
+            falloff: FogFalloff::Linear {
+                start: 400.0,
+                end: 520.0,
+            },
+            ..default()
+        },
+        fly::FlyCamera,
+    ));
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 10_000.0,
+            ..default()
+        },
+        Transform::default(),
+        fly::Sun,
+    ));
+    let opaque = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.95,
+        reflectance: 0.15,
+        ..default()
+    });
+    let water = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.15,
+        reflectance: 0.4,
+        alpha_mode: AlphaMode::Blend,
+        ..default()
+    });
+    commands.insert_resource(fly::TerrainMaterials { opaque, water });
+}
+
+/// Fog hides the chunk edge (or, with the horizon, the far end of the world).
+fn update_fog(
+    settings: Res<FlySettings>,
+    stats: Res<horizon::HorizonStats>,
+    mut fog: Query<&mut DistanceFog>,
+) {
+    let end = if settings.horizon && stats.extent_m > 0.0 {
+        stats.extent_m as f32
+    } else {
+        settings.view_distance_m
+    };
+    if let Ok(mut f) = fog.single_mut() {
+        f.falloff = FogFalloff::Linear {
+            start: end * 0.55,
+            end,
+        };
+    }
+}
+
+/// Map and 3D share one camera; the 3D scene is hidden behind the map.
+fn show_scene<const VISIBLE: bool>(mut q: Query<&mut Visibility, With<fly::Anchor>>) {
+    for mut v in &mut q {
+        *v = if VISIBLE {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
+fn switch_mode(
+    state: Res<State<Mode>>,
+    mut next: ResMut<NextState<Mode>>,
+    mut map: ResMut<map::MapState>,
+    mut hud: ResMut<fly::HudState>,
+    mut cam: ResMut<FlyCam>,
+    terrain: Res<fly::SharedTerrain>,
+) {
+    match state.get() {
+        Mode::Map if map.fly_request => {
+            map.fly_request = false;
+            let (x, z) = map.center;
+            cam.pos = WorldPos::new(x, terrain.0.height(x, z).max(0.0) + 60.0, z);
+            next.set(Mode::Fly);
+        }
+        Mode::Fly if hud.map_request => {
+            hud.map_request = false;
+            map.center = (cam.pos.x, cam.pos.z);
+            next.set(Mode::Map);
+        }
+        _ => {}
+    }
+}
+
+/// `--screenshot <file>`: capture once the scene has settled (everything in range loaded),
+/// then quit.
 #[derive(Resource)]
 struct AutoScreenshot {
     path: PathBuf,
     frame: u32,
+    settled: u32,
+    shot_at: Option<u32>,
 }
 
-const SCREENSHOT_FRAME: u32 = 30;
+/// Frames the scene must stay fully loaded before the capture.
+const SETTLE_FRAMES: u32 = 20;
+/// Capture anyway after this many frames.
+const MAX_SCREENSHOT_FRAMES: u32 = 3_000;
 
 fn auto_screenshot(
     mut commands: Commands,
     mut shot: ResMut<AutoScreenshot>,
+    state: Res<State<Mode>>,
+    streamer: Res<fly::Streamer>,
+    horizon: Res<horizon::HorizonStats>,
     mut exit: MessageWriter<AppExit>,
 ) {
     shot.frame += 1;
-    if shot.frame == SCREENSHOT_FRAME {
-        commands
-            .spawn(Screenshot::primary_window())
-            .observe(save_to_disk(shot.path.clone()));
-    } else if shot.frame == SCREENSHOT_FRAME * 2 {
-        exit.write(AppExit::Success);
-    }
-}
-
-fn main() {
-    let mut args = std::env::args().skip(1);
-    let mut dir = PathBuf::from("out/world-42");
-    let mut screenshot = None;
-    while let Some(a) = args.next() {
-        if a == "--screenshot" {
-            screenshot = args.next().map(PathBuf::from);
-        } else {
-            dir = PathBuf::from(a);
-        }
-    }
-    let world = match World::load(&dir) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("cannot load world from {}: {e:#}", dir.display());
-            eprintln!(
-                "generate one first: cargo run -p nascio-worldgen --release -- generate --seed 42"
-            );
-            std::process::exit(1);
-        }
+    let loaded = match state.get() {
+        Mode::Map => true,
+        Mode::Fly => streamer.missing == 0 && horizon.pending == 0,
     };
-    let layer = world
-        .layers
-        .iter()
-        .position(|l| l.name == "elevation_tectonic")
-        .unwrap_or(0);
-    let textures = vec![None; world.layers.len()];
-    let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: format!("Nascio viewer — {}", dir.display()),
-            ..default()
-        }),
-        ..default()
-    }))
-    .add_plugins(EguiPlugin::default())
-    .insert_resource(MapState {
-        world,
-        dir,
-        layer,
-        textures,
-        center: (WORLD_SIZE_F64 / 2.0, WORLD_SIZE_F64 / 2.0),
-        mpp: 0.0,
-        graticule: true,
-    })
-    .add_systems(Startup, setup)
-    .add_systems(EguiPrimaryContextPass, ui);
-    if let Some(path) = screenshot {
-        app.insert_resource(AutoScreenshot { path, frame: 0 })
-            .add_systems(Update, auto_screenshot);
-    }
-    app.run();
-}
-
-fn setup(mut commands: Commands) {
-    commands.spawn(Camera2d);
-}
-
-fn ui(mut contexts: EguiContexts, mut state: ResMut<MapState>) -> Result {
-    let ctx = contexts.ctx_mut()?;
-    let state = &mut *state;
-    let mut root = egui::Ui::new(
-        ctx.clone(),
-        "viewport".into(),
-        egui::UiBuilder::new()
-            .layer_id(egui::LayerId::background())
-            .max_rect(ctx.viewport_rect()),
-    );
-    egui::Panel::left("controls")
-        .resizable(false)
-        .min_size(220.0)
-        .show(&mut root, |ui| side_panel(ui, state));
-    egui::CentralPanel::default()
-        .frame(egui::Frame::NONE)
-        .show(&mut root, |ui| map(ui, state));
-    Ok(())
-}
-
-fn side_panel(ui: &mut egui::Ui, s: &mut MapState) {
-    ui.heading("Nascio — map");
-    let c = &s.world.config;
-    ui.label(format!(
-        "{}\nseed {} · scale 1/{} · generator v{}",
-        s.dir.display(),
-        c.seed,
-        c.scale.divisor(),
-        c.generator_version
-    ));
-    ui.separator();
-    ui.strong("Layer");
-    for (k, l) in s.world.layers.iter().enumerate() {
-        ui.radio_value(&mut s.layer, k, &l.name);
-    }
-    ui.separator();
-    ui.strong("Legend");
-    for (color, label) in preview::legend(&s.world.layers[s.layer].name) {
-        ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, 10.0), egui::Sense::hover());
-            ui.painter().rect_filled(
-                r,
-                0.0,
-                egui::Color32::from_rgb(color[0], color[1], color[2]),
-            );
-            ui.label(label);
-        });
-    }
-    ui.separator();
-    ui.checkbox(&mut s.graticule, "Graticule (15°)");
-    if s.mpp > 0.0 {
-        ui.label(format!(
-            "Scale: {:.1} km per 100 px",
-            s.mpp * 100.0 / 1_000.0
-        ));
-    }
-    if ui.button("Reset view").clicked() {
-        s.center = (WORLD_SIZE_F64 / 2.0, WORLD_SIZE_F64 / 2.0);
-        s.mpp = 0.0;
-    }
-    ui.separator();
-    ui.small("Drag to pan, wheel to zoom. The map repeats: the world is a torus.");
-}
-
-/// Texture of the selected layer, created on first use.
-fn texture(ctx: &egui::Context, s: &mut MapState) -> Option<egui::TextureId> {
-    let k = s.layer;
-    if s.textures[k].is_none() {
-        let l = &s.world.layers[k];
-        let colors = preview::colorize(&s.world, &l.name)?;
-        let pixels = colors
-            .iter()
-            .map(|c| egui::Color32::from_rgb(c[0], c[1], c[2]))
-            .collect();
-        let image = egui::ColorImage::new([l.width, l.height], pixels);
-        s.textures[k] =
-            Some(ctx.load_texture(l.name.clone(), image, egui::TextureOptions::NEAREST_REPEAT));
-    }
-    s.textures[k].as_ref().map(|t| t.id())
-}
-
-fn map(ui: &mut egui::Ui, s: &mut MapState) {
-    let (rect, response) =
-        ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-    if s.mpp <= 0.0 {
-        s.mpp = WORLD_SIZE_F64 / f64::from(rect.width().min(rect.height()).max(1.0));
-    }
-
-    // Pan and zoom (the point under the cursor stays put while zooming).
-    if response.dragged() {
-        let d = response.drag_delta();
-        s.center.0 = wrap_f64(s.center.0 - f64::from(d.x) * s.mpp);
-        s.center.1 = wrap_f64(s.center.1 - f64::from(d.y) * s.mpp);
-    }
-    if let Some(pos) = response.hover_pos() {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-        if scroll != 0.0 {
-            let before = screen_to_world(s, rect, pos);
-            let cell = s.world.layers[s.layer].cell_m;
-            let max_mpp = 4.0 * WORLD_SIZE_F64 / f64::from(rect.width().max(1.0));
-            s.mpp = (s.mpp * (-f64::from(scroll) * 0.002).exp()).clamp(cell / 32.0, max_mpp);
-            let off = pos - rect.center();
-            s.center = (
-                wrap_f64(before.0 - f64::from(off.x) * s.mpp),
-                wrap_f64(before.1 - f64::from(off.y) * s.mpp),
-            );
+    shot.settled = if loaded { shot.settled + 1 } else { 0 };
+    match shot.shot_at {
+        None if shot.settled >= SETTLE_FRAMES || shot.frame >= MAX_SCREENSHOT_FRAMES => {
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(shot.path.clone()));
+            shot.shot_at = Some(shot.frame);
         }
-    }
-
-    let painter = ui.painter_at(rect);
-    if let Some(tex) = texture(ui.ctx(), s) {
-        let half = (
-            f64::from(rect.width()) * 0.5 * s.mpp,
-            f64::from(rect.height()) * 0.5 * s.mpp,
-        );
-        let uv = egui::Rect::from_min_max(
-            egui::pos2(
-                ((s.center.0 - half.0) / WORLD_SIZE_F64) as f32,
-                ((s.center.1 - half.1) / WORLD_SIZE_F64) as f32,
-            ),
-            egui::pos2(
-                ((s.center.0 + half.0) / WORLD_SIZE_F64) as f32,
-                ((s.center.1 + half.1) / WORLD_SIZE_F64) as f32,
-            ),
-        );
-        painter.image(tex, rect, uv, egui::Color32::WHITE);
-    }
-    if s.graticule {
-        draw_graticule(&painter, rect, s);
-    }
-
-    if let Some(pos) = response.hover_pos() {
-        let (x, z) = screen_to_world(s, rect, pos);
-        response.on_hover_ui_at_pointer(|ui| tooltip(ui, s, x, z));
-    }
-}
-
-fn screen_to_world(s: &MapState, rect: egui::Rect, pos: egui::Pos2) -> (f64, f64) {
-    let off = pos - rect.center();
-    (
-        wrap_f64(s.center.0 + f64::from(off.x) * s.mpp),
-        wrap_f64(s.center.1 + f64::from(off.y) * s.mpp),
-    )
-}
-
-/// Screen positions of every repetition of world coordinate `v` along one axis.
-fn repeats(v: f64, center: f64, mpp: f64, screen_center: f32, half_extent: f32) -> Vec<f32> {
-    let half_m = f64::from(half_extent) * mpp;
-    let first = ((center - half_m - v) / WORLD_SIZE_F64).ceil() as i64;
-    let last = ((center + half_m - v) / WORLD_SIZE_F64).floor() as i64;
-    (first..=last)
-        .map(|k| screen_center + ((v + k as f64 * WORLD_SIZE_F64 - center) / mpp) as f32)
-        .collect()
-}
-
-fn draw_graticule(painter: &egui::Painter, rect: egui::Rect, s: &MapState) {
-    let thin = egui::Stroke::new(
-        1.0,
-        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 90),
-    );
-    let strong = egui::Stroke::new(
-        1.5,
-        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 190),
-    );
-    let text = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220);
-    let font = egui::FontId::proportional(11.0);
-    let c = rect.center();
-    let steps = (180.0 / GRATICULE_STEP_DEG) as i32;
-    // Parallels: z = 50 000 · (1 − sin φ), so their spacing follows sin φ (equal-area).
-    for k in 0..=steps {
-        let phi = -90.0 + GRATICULE_STEP_DEG * f64::from(k);
-        if phi == -90.0 {
-            continue; // same line as +90° (the seam)
+        Some(f) if shot.frame >= f + 10 => {
+            exit.write(AppExit::Success);
         }
-        let z = WORLD_SIZE_F64 / 2.0 * (1.0 - phi.to_radians().sin());
-        let stroke = if phi == 0.0 || phi == 90.0 {
-            strong
-        } else {
-            thin
-        };
-        let label = match phi {
-            0.0 => "equator".to_string(),
-            90.0 => "seam ±90°".to_string(),
-            p if p > 0.0 => format!("{p:.0}°N"),
-            p => format!("{:.0}°S", -p),
-        };
-        for y in repeats(z, s.center.1, s.mpp, c.y, rect.height() * 0.5) {
-            painter.hline(rect.x_range(), y, stroke);
-            painter.text(
-                egui::pos2(rect.left() + 4.0, y - 2.0),
-                egui::Align2::LEFT_BOTTOM,
-                &label,
-                font.clone(),
-                text,
-            );
-        }
-    }
-    // Meridians every 15° (one hour of solar time).
-    for k in 0..(360.0 / GRATICULE_STEP_DEG) as i32 {
-        let lambda = GRATICULE_STEP_DEG * f64::from(k);
-        let x = WORLD_SIZE_F64 * lambda / 360.0;
-        let stroke = if k == 0 { strong } else { thin };
-        for px in repeats(x, s.center.0, s.mpp, c.x, rect.width() * 0.5) {
-            painter.vline(px, rect.y_range(), stroke);
-            painter.text(
-                egui::pos2(px + 3.0, rect.top() + 2.0),
-                egui::Align2::LEFT_TOP,
-                format!("{lambda:.0}°"),
-                font.clone(),
-                text,
-            );
-        }
-    }
-}
-
-fn tooltip(ui: &mut egui::Ui, s: &MapState, x: f64, z: f64) {
-    ui.label(format!("x = {x:.0} m   z = {z:.0} m"));
-    ui.label(format!(
-        "φ = {:+.2}°   λ = {:.2}°   s = {:.0} m",
-        latitude(z).to_degrees(),
-        longitude(x).to_degrees(),
-        seam_distance(z)
-    ));
-    ui.separator();
-    for l in &s.world.layers {
-        let i = ((x / l.cell_m) as usize).min(l.width - 1);
-        let j = ((z / l.cell_m) as usize).min(l.height - 1);
-        let v = l.value(i, j);
-        let shown = match l.name.as_str() {
-            "crust_type" => if v as u8 == 1 {
-                "continental"
-            } else {
-                "oceanic"
-            }
-            .to_string(),
-            "history_flags" => flag_names(v as u8),
-            "hotspot_track" if v < 0.0 => "—".to_string(),
-            "plate_id" => format!("{v:.0}"),
-            _ => format!("{v:.0} {}", l.unit),
-        };
-        ui.label(format!("{}: {shown}", l.name));
-    }
-}
-
-fn flag_names(f: u8) -> String {
-    let names = [
-        (flags::OROGENY, "orogeny"),
-        (flags::ARC, "arc"),
-        (flags::RIFT, "rift"),
-        (flags::HOTSPOT, "hotspot"),
-        (flags::OPHIOLITE, "ophiolite"),
-        (flags::TRENCH, "trench"),
-        (flags::RIDGE, "ridge"),
-    ];
-    let v: Vec<&str> = names
-        .iter()
-        .filter(|(b, _)| f & b != 0)
-        .map(|(_, n)| *n)
-        .collect();
-    if v.is_empty() {
-        "—".into()
-    } else {
-        v.join(", ")
+        _ => {}
     }
 }
