@@ -171,7 +171,7 @@ fn make_hotspots(cfg: &WorldConfig) -> Vec<Hotspot> {
                 rng.random::<f64>() * WORLD_SIZE_F64,
                 rng.random::<f64>() * WORLD_SIZE_F64,
             ),
-            phase_ma: rng.random::<f64>() * t.hotspot_pulse_ma,
+            travel_m: rng.random::<f64>() * t.hotspot_island_spacing_m,
         })
         .collect()
 }

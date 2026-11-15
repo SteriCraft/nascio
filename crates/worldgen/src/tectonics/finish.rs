@@ -191,13 +191,10 @@ impl Tectonics {
             let mut f = c.flags & (flags::RIFT | flags::OPHIOLITE);
             let g_trench = gauss(f64::from(d_trench[idx]) / trench_w);
             let g_arc = gauss((f64::from(d_arc[idx]) - arc_d) / arc_w);
-            let edifice = if c.hotspot > 0.0 && c.hotspot_age >= 0.0 {
+            let edifice = self.edifice_height(c);
+            if edifice > 0.0 {
                 f |= flags::HOTSPOT;
-                let decay = (1.0 - f64::from(c.hotspot_age) / t.hotspot_decay_ma).max(0.15);
-                f64::from(c.hotspot) * decay
-            } else {
-                0.0
-            };
+            }
             let e = if c.crust == OCEANIC {
                 let base = self.ocean_depth(f64::from(c.age));
                 if f64::from(c.age) < ridge_age {

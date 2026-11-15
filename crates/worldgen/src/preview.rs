@@ -385,7 +385,7 @@ pub fn write_previews(out: &TectonicOutput, dir: &Path) -> anyhow::Result<Vec<Pa
     let (young, old) = (hex(SERIES[3]), hex(SERIES[6]));
     let img = image_from(&out.hotspot_track, |i| {
         if track[i] >= 0.0 {
-            lerp_color(young, old, f64::from(track[i]) / 60.0)
+            lerp_color(young, old, f64::from(track[i]) / 120.0)
         } else {
             faded_elevation(f64::from(elev[i]))
         }
@@ -396,8 +396,8 @@ pub fn write_previews(out: &TectonicOutput, dir: &Path) -> anyhow::Result<Vec<Pa
             img,
             &[
                 (young, "0 Ma"),
-                (lerp_color(young, old, 0.5), "30"),
-                (old, "60+ Ma"),
+                (lerp_color(young, old, 0.5), "60"),
+                (old, "120+ Ma"),
             ],
         ),
     )?;

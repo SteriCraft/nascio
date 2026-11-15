@@ -8,6 +8,7 @@
 //! independent per cell (hence parallel and deterministic).
 
 mod finish;
+mod hotspot;
 mod init;
 mod step;
 
@@ -61,8 +62,8 @@ pub struct Plate {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hotspot {
     pub pos: (f64, f64),
-    /// Phase of the activity pulses, in Ma.
-    pub phase_ma: f64,
+    /// Distance travelled by the plates passing over it, in metres (sets island spacing).
+    pub travel_m: f64,
 }
 
 /// Event counters, for the report.

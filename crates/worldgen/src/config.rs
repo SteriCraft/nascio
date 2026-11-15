@@ -133,9 +133,9 @@ pub struct TectonicsConfig {
     pub island_arc_ridge_m: f64,
     /// Summit elevation of the islands of an intra-oceanic arc.
     pub island_arc_peak_m: f64,
-    /// Hotspot activity period: pulses give separate islands instead of a continuous ridge.
-    pub hotspot_pulse_ma: f64,
-    /// Active share of each hotspot pulse, in `(0, 1]`.
+    /// Distance of plate travel between two islands of a hotspot chain.
+    pub hotspot_island_spacing_m: f64,
+    /// Share of each spacing during which the hotspot builds, in `(0, 1]`.
     pub hotspot_duty: f64,
     /// Age over which a hotspot edifice loses most of its height (subsidence, erosion).
     pub hotspot_decay_ma: f64,
@@ -180,9 +180,9 @@ impl Default for TectonicsConfig {
             orogeny_event_uplift_m: 3_000.0,
             island_arc_ridge_m: -800.0,
             island_arc_peak_m: 400.0,
-            hotspot_pulse_ma: 6.0,
-            hotspot_duty: 0.5,
-            hotspot_decay_ma: 40.0,
+            hotspot_island_spacing_m: 5_000.0,
+            hotspot_duty: 0.35,
+            hotspot_decay_ma: 80.0,
             hotspot_plateau_m: 500.0,
             boundary_threshold: 0.15,
         }
@@ -214,8 +214,12 @@ impl TectonicsConfig {
         {
             return Err("depths must satisfy trench < abyssal < ridge < 0".into());
         }
-        if !(self.hotspot_duty > 0.0 && self.hotspot_duty <= 1.0) || self.hotspot_pulse_ma <= 0.0 {
-            return Err("hotspot_duty must lie in (0, 1] and hotspot_pulse_ma be > 0".into());
+        if !(self.hotspot_duty > 0.0 && self.hotspot_duty <= 1.0)
+            || self.hotspot_island_spacing_m <= 0.0
+        {
+            return Err(
+                "hotspot_duty must lie in (0, 1] and hotspot_island_spacing_m be > 0".into(),
+            );
         }
         if self.total_displacement_m <= 0.0 || self.duration_ma <= 0.0 {
             return Err("total_displacement_m and duration_ma must be > 0".into());

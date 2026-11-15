@@ -110,6 +110,7 @@ impl Tectonics {
             cells.push(c);
         }
         self.grid.data_mut().copy_from_slice(&cells);
+        self.apply_hotspots();
         self.weld_colliding_plates(&touching);
         self.step_index += 1;
     }
