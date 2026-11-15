@@ -27,13 +27,17 @@ impl Tectonics {
         let spacing = t.hotspot_island_spacing_m.max(3.0 * r);
         let (duty, height) = (t.hotspot_duty, t.hotspot_edifice_height_m);
         let reach = (r / self.cell_m).ceil() as i64;
+        let max_speed = self.max_speed();
         for h in 0..self.hotspots.len() {
             let pos = self.hotspots[h].pos;
             let (ci, cj) = self.grid.cell_of(pos.0, pos.1);
             let plate = self.grid.get(ci as i64, cj as i64).plate as usize;
             let v = self.plates[plate].velocity;
-            self.hotspots[h].travel_m += v.0.hypot(v.1);
-            if self.hotspots[h].travel_m.rem_euclid(spacing) >= duty * spacing {
+            let speed = v.0.hypot(v.1);
+            self.hotspots[h].travel_m += speed;
+            // A (nearly) still plate keeps building one big volcano.
+            let still = speed < 0.05 * max_speed;
+            if !still && self.hotspots[h].travel_m.rem_euclid(spacing) >= duty * spacing {
                 continue;
             }
             for dj in -reach..=reach {

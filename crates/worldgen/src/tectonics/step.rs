@@ -18,8 +18,7 @@ enum Event {
     Rift,
     OceanContinent,
     OceanOcean,
-    /// Continental collision with the given other plate.
-    Collision(u8),
+    Collision,
 }
 
 /// Up to 9 distinct plate ids of a 3×3 neighbourhood, sorted.
@@ -73,7 +72,13 @@ impl Tectonics {
 
     /// Advances the simulation by one step.
     pub fn step(&mut self) {
-        let shifts = self.shifts();
+        // Continental contacts of this step, detected before moving so that a collision can
+        // weld the plates instead of destroying a whole row of continent.
+        let mut shifts = self.shifts();
+        let touching = self.continental_contacts(&shifts);
+        if self.weld_colliding_plates(&touching) {
+            shifts = self.shifts();
+        }
         let ctx = StepCtx {
             prev: &self.grid,
             shifts: &shifts,
@@ -87,8 +92,6 @@ impl Tectonics {
             .map(|idx| resolve(&ctx, idx))
             .collect();
 
-        let np = self.plates.len();
-        let mut touching = vec![false; np * np];
         let mut cells = Vec::with_capacity(n);
         for (mut c, e) in resolved {
             match e {
@@ -97,11 +100,7 @@ impl Tectonics {
                 Event::Rift => self.events.rift_cells += 1,
                 Event::OceanContinent => self.events.ocean_continent_subductions += 1,
                 Event::OceanOcean => self.events.ocean_ocean_subductions += 1,
-                Event::Collision(other) => {
-                    self.events.collisions += 1;
-                    let (a, b) = (c.plate.min(other) as usize, c.plate.max(other) as usize);
-                    touching[a * np + b] = true;
-                }
+                Event::Collision => self.events.collisions += 1,
             }
             c.age += ctx.dt;
             if c.hotspot_age >= 0.0 {
@@ -111,15 +110,40 @@ impl Tectonics {
         }
         self.grid.data_mut().copy_from_slice(&cells);
         self.apply_hotspots();
-        self.weld_colliding_plates(&touching);
         self.step_index += 1;
+    }
+
+    /// Plate pairs (`a * n + b`, `a < b`) whose continental crust lands on each other this step.
+    fn continental_contacts(&self, shifts: &[(i64, i64)]) -> Vec<bool> {
+        let g = &self.grid;
+        let np = self.plates.len();
+        let hits: Vec<Option<(u8, u8)>> = (0..g.data().len())
+            .into_par_iter()
+            .map(|idx| {
+                let (i, j) = g.coords(idx);
+                let c = g.data()[idx];
+                if c.crust != CONTINENTAL {
+                    return None;
+                }
+                let s = shifts[c.plate as usize];
+                let d = g.get(i as i64 + s.0, j as i64 + s.1);
+                (d.crust == CONTINENTAL && d.plate != c.plate && shifts[d.plate as usize] != s)
+                    .then(|| (c.plate.min(d.plate), c.plate.max(d.plate)))
+            })
+            .collect();
+        let mut touching = vec![false; np * np];
+        for (a, b) in hits.into_iter().flatten() {
+            touching[a as usize * np + b as usize] = true;
+        }
+        touching
     }
 
     /// Continental collisions brake plates: each pair in continental contact accumulates its
     /// relative displacement, and once it exceeds `collision_shortening_m` the two plate groups
     /// are welded and move together (cell-weighted mean velocity). Pairs are processed in a
     /// fixed order.
-    fn weld_colliding_plates(&mut self, touching: &[bool]) {
+    /// Returns whether any velocity changed.
+    fn weld_colliding_plates(&mut self, touching: &[bool]) -> bool {
         let np = self.plates.len();
         let limit = self.cfg.tectonics.collision_shortening_m;
         let mut changed = false;
@@ -128,10 +152,16 @@ impl Tectonics {
                 if !touching[a * np + b] {
                     continue;
                 }
-                let (va, vb) = (self.plates[a].velocity, self.plates[b].velocity);
-                self.contact[a * np + b] += (va.0 - vb.0).hypot(va.1 - vb.1);
                 let (ra, rb) = (self.group_of(a), self.group_of(b));
-                if ra != rb && self.contact[a * np + b] >= limit {
+                if ra == rb {
+                    continue;
+                }
+                let (va, vb) = (self.plates[a].velocity, self.plates[b].velocity);
+                let closing = (va.0 - vb.0).hypot(va.1 - vb.1);
+                // Weld before this step's move would exceed the allowed shortening.
+                if self.contact[a * np + b] + closing <= limit {
+                    self.contact[a * np + b] += closing;
+                } else {
                     // Union by lowest id keeps the result independent of processing details.
                     let (lo, hi) = (ra.min(rb), ra.max(rb));
                     self.group[hi] = lo as u8;
@@ -141,7 +171,7 @@ impl Tectonics {
             }
         }
         if !changed {
-            return;
+            return false;
         }
         let mut count = vec![0f64; np];
         for c in self.grid.data() {
@@ -164,6 +194,7 @@ impl Tectonics {
                 self.plates[p].velocity = v;
             }
         }
+        true
     }
 
     /// Root of a plate's weld group.
@@ -245,16 +276,15 @@ fn resolve(ctx: &StepCtx, idx: usize) -> (Cell, Event) {
             let mut winner = *cands.iter().min_by_key(|c| key(c)).expect("count ≥ 2");
             let other_continental = cands
                 .iter()
-                .find(|c| c.plate != winner.plate && c.crust == CONTINENTAL)
-                .map(|c| c.plate);
-            let event = if let (CONTINENTAL, Some(other)) = (winner.crust, other_continental) {
+                .any(|c| c.plate != winner.plate && c.crust == CONTINENTAL);
+            let event = if winner.crust == CONTINENTAL && other_continental {
                 winner.orogeny += ctx.uplift;
                 winner.flags |= flags::OROGENY;
                 // A closing ocean next to the suture leaves ophiolites.
                 if neighbourhood_has(prev, i, j, OCEANIC) {
                     winner.flags |= flags::OPHIOLITE;
                 }
-                Event::Collision(other)
+                Event::Collision
             } else if winner.crust == CONTINENTAL {
                 Event::OceanContinent
             } else {
