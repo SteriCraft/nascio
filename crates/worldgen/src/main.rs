@@ -1,9 +1,13 @@
 //! `nascio-worldgen` command-line interface.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use nascio_core::astro::AstroConfig;
+use nascio_worldgen::config::{GENERATOR_VERSION, Scale, WorldConfig};
+use nascio_worldgen::generate::generate;
+use nascio_worldgen::preview::write_previews;
 use nascio_worldgen::sun_curves::{self, Hemisphere};
 
 #[derive(Parser)]
@@ -40,6 +44,21 @@ enum Command {
         #[arg(long, default_value = "out/sun-curves.png")]
         out: PathBuf,
     },
+    /// Generate a world: world.toml, layers/*.bin and previews/*.png.
+    Generate {
+        /// World seed (below 2^63).
+        #[arg(long)]
+        seed: u64,
+        /// Resolution divisor: 1 (full), 5 or 25.
+        #[arg(long, default_value_t = 5)]
+        scale: u32,
+        /// Output directory (default: out/world-<seed>).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Optional TOML file overriding parameters (its seed and scale are replaced by the CLI).
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -70,6 +89,42 @@ fn main() -> anyhow::Result<()> {
                 .collect();
             sun_curves::render(&panels, hemisphere, &out)?;
             println!("wrote {}", out.display());
+        }
+        Command::Generate {
+            seed,
+            scale,
+            out,
+            config,
+        } => {
+            let scale = Scale::try_from(scale).map_err(anyhow::Error::msg)?;
+            let mut cfg = match config {
+                Some(p) => {
+                    let mut c = WorldConfig::from_toml(&std::fs::read_to_string(&p)?)?;
+                    c.seed = seed;
+                    c.scale = scale;
+                    c
+                }
+                None => WorldConfig::new(seed, scale),
+            };
+            cfg.generator_version = GENERATOR_VERSION;
+            let out = out.unwrap_or_else(|| PathBuf::from(format!("out/world-{seed}")));
+            let start = Instant::now();
+            let (world, tect) = generate(&cfg)?;
+            let elapsed = start.elapsed();
+            world.save(&out)?;
+            let previews = write_previews(&tect, &out.join("previews"))?;
+            println!("{}", tect.report);
+            println!("generated in {:.2} s", elapsed.as_secs_f64());
+            println!("hash: {}", world.hash());
+            println!(
+                "wrote {} ({} layers, {} previews)",
+                out.display(),
+                world.layers.len(),
+                previews.len()
+            );
+            if !tect.report.continental_fraction_ok {
+                eprintln!("warning: final continental fraction is out of tolerance");
+            }
         }
     }
     Ok(())

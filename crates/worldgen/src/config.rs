@@ -84,8 +84,6 @@ pub struct TectonicsConfig {
     pub total_displacement_m: f64,
     /// Plate speeds as a fraction of the fastest, inclusive range.
     pub plate_speed_fraction: [f64; 2],
-    /// Maximum total rotation of a plate over the run, in degrees.
-    pub max_rotation_deg: f64,
     /// Duration of the run, used to express ages in Ma.
     pub duration_ma: f64,
     /// Oceanic ridge depth.
@@ -125,6 +123,24 @@ pub struct TectonicsConfig {
     /// Narrow features (trenches, arcs, hotspots) never get narrower than this many cells,
     /// so they survive coarse resolutions.
     pub min_feature_cells: f64,
+    /// Uplift potential deposited by each continental collision event; after smoothing over the
+    /// orogen width it scales like `uplift × shortening / width`, independently of resolution.
+    pub orogeny_event_uplift_m: f64,
+    /// Crest depth of an intra-oceanic island arc between its islands.
+    pub island_arc_ridge_m: f64,
+    /// Summit elevation of the islands of an intra-oceanic arc.
+    pub island_arc_peak_m: f64,
+    /// Hotspot activity period: pulses give separate islands instead of a continuous ridge.
+    pub hotspot_pulse_ma: f64,
+    /// Active share of each hotspot pulse, in `(0, 1]`.
+    pub hotspot_duty: f64,
+    /// Age over which a hotspot edifice loses most of its height (subsidence, erosion).
+    pub hotspot_decay_ma: f64,
+    /// Uplift of a continental plateau (trapps) above a hotspot.
+    pub hotspot_plateau_m: f64,
+    /// Relative normal speed, as a fraction of the fastest plate, separating convergent and
+    /// divergent boundaries from transform ones.
+    pub boundary_threshold: f64,
 }
 
 impl Default for TectonicsConfig {
@@ -138,7 +154,6 @@ impl Default for TectonicsConfig {
             continent_noise_period_m: 50_000.0,
             total_displacement_m: 40_000.0,
             plate_speed_fraction: [0.25, 1.0],
-            max_rotation_deg: 15.0,
             duration_ma: 150.0,
             ridge_depth_m: -1_500.0,
             abyssal_depth_m: -3_000.0,
@@ -158,6 +173,14 @@ impl Default for TectonicsConfig {
             hotspot_radius_m: 1_500.0,
             hotspot_edifice_height_m: 4_500.0,
             min_feature_cells: 1.5,
+            orogeny_event_uplift_m: 3_000.0,
+            island_arc_ridge_m: -800.0,
+            island_arc_peak_m: 400.0,
+            hotspot_pulse_ma: 6.0,
+            hotspot_duty: 0.5,
+            hotspot_decay_ma: 40.0,
+            hotspot_plateau_m: 500.0,
+            boundary_threshold: 0.15,
         }
     }
 }
@@ -186,6 +209,9 @@ impl TectonicsConfig {
             && self.ridge_depth_m < 0.0)
         {
             return Err("depths must satisfy trench < abyssal < ridge < 0".into());
+        }
+        if !(self.hotspot_duty > 0.0 && self.hotspot_duty <= 1.0) || self.hotspot_pulse_ma <= 0.0 {
+            return Err("hotspot_duty must lie in (0, 1] and hotspot_pulse_ma be > 0".into());
         }
         if self.total_displacement_m <= 0.0 || self.duration_ma <= 0.0 {
             return Err("total_displacement_m and duration_ma must be > 0".into());
