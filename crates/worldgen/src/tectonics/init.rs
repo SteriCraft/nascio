@@ -16,6 +16,12 @@ use crate::rng::{stage_rng, stage_u64};
 impl Tectonics {
     /// Builds the initial state from a validated config.
     pub fn new(cfg: &WorldConfig) -> Self {
+        Self::with_initial_fraction(cfg, cfg.tectonics.continental_fraction)
+    }
+
+    /// Initial state with a given initial continental share (see [`crate::generate`], which
+    /// calibrates it so that the *final* share hits the target).
+    pub fn with_initial_fraction(cfg: &WorldConfig, fraction: f64) -> Self {
         let t = &cfg.tectonics;
         let seed = cfg.seed;
         let res = cfg.scale.tectonic_res();
@@ -79,13 +85,13 @@ impl Tectonics {
         // Exact continental share: threshold at the quantile of the continent noise.
         let mut sorted: Vec<f64> = fields.iter().map(|f| f.1).collect();
         sorted.sort_by(f64::total_cmp);
-        let k = ((1.0 - t.continental_fraction) * n as f64).round() as usize;
+        let k = ((1.0 - fraction) * n as f64).round() as usize;
         let threshold = sorted[k.min(n - 1)];
 
         let cells: Vec<Cell> = fields
             .iter()
             .map(|&(plate, c, a)| {
-                let continental = c >= threshold && t.continental_fraction > 0.0;
+                let continental = c >= threshold && fraction > 0.0;
                 Cell {
                     plate,
                     crust: if continental { CONTINENTAL } else { OCEANIC },

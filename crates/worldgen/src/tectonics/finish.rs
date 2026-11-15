@@ -26,6 +26,8 @@ pub struct Report {
     pub final_continental_fraction: f64,
     /// Final continental share is within `continental_fraction ± tolerance`.
     pub continental_fraction_ok: bool,
+    /// Tectonic runs used to calibrate the initial continental share.
+    pub calibration_runs: u32,
     pub events: EventCounts,
 }
 
@@ -38,14 +40,15 @@ impl std::fmt::Display for Report {
         )?;
         writeln!(
             f,
-            "continental fraction: {:.3} -> {:.3} ({})",
+            "continental fraction: {:.3} -> {:.3} ({}, {} calibration runs)",
             self.initial_continental_fraction,
             self.final_continental_fraction,
             if self.continental_fraction_ok {
                 "ok"
             } else {
                 "OUT OF TOLERANCE"
-            }
+            },
+            self.calibration_runs
         )?;
         let e = &self.events;
         write!(
@@ -256,6 +259,7 @@ impl Tectonics {
             final_continental_fraction: final_cf,
             continental_fraction_ok: (final_cf - t.continental_fraction).abs()
                 <= t.continental_fraction_tolerance,
+            calibration_runs: 1,
             events: self.events,
         };
         let cm = self.cell_m;

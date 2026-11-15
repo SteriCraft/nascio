@@ -74,7 +74,8 @@ pub struct TectonicsConfig {
     pub plate_warp_amplitude_m: f64,
     /// Base wavelength of that warp.
     pub plate_warp_period_m: f64,
-    /// Target share of continental crust, at start and checked at the end.
+    /// Target share of continental crust at the end of the run (the initial share is
+    /// calibrated to reach it).
     pub continental_fraction: f64,
     /// Allowed deviation of the final continental share from the target.
     pub continental_fraction_tolerance: f64,
@@ -153,7 +154,7 @@ impl Default for TectonicsConfig {
             plate_warp_amplitude_m: 6_000.0,
             plate_warp_period_m: 20_000.0,
             continental_fraction: 0.30,
-            continental_fraction_tolerance: 0.08,
+            continental_fraction_tolerance: 0.02,
             continent_noise_period_m: 50_000.0,
             total_displacement_m: 40_000.0,
             plate_speed_fraction: [0.25, 1.0],
