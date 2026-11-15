@@ -15,6 +15,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::NoAutoAabb;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::DistanceFog;
@@ -30,6 +31,7 @@ use nascio_core::torus::delta;
 use nascio_voxel::mesh::MeshData;
 use nascio_voxel::{ChunkMesh, ColumnSet, Terrain, mesh_chunk};
 
+use crate::curvature::{self, CurvedMaterial};
 use crate::perf::FrameStats;
 
 /// Distance from the render origin beyond which it is moved to the camera.
@@ -50,6 +52,8 @@ pub struct FlySettings {
     /// Local solar hour forced for lighting; `None` follows real time (spec §2.3).
     pub fixed_hour: Option<f64>,
     pub horizon: bool,
+    /// Display curvature radius `R_vis`, m (`None`: flat). Render only.
+    pub curvature_radius_m: Option<f64>,
 }
 
 impl Default for FlySettings {
@@ -58,6 +62,7 @@ impl Default for FlySettings {
             view_distance_m: 512.0,
             fixed_hour: None,
             horizon: true,
+            curvature_radius_m: crate::curvature::RenderConfig::default().radius(),
         }
     }
 }
@@ -126,8 +131,8 @@ pub struct WorldInfo {
 /// Materials shared by every chunk.
 #[derive(Resource)]
 pub struct TerrainMaterials {
-    pub opaque: Handle<StandardMaterial>,
-    pub water: Handle<StandardMaterial>,
+    pub opaque: Handle<CurvedMaterial>,
+    pub water: Handle<CurvedMaterial>,
 }
 
 #[derive(Component)]
@@ -323,7 +328,10 @@ pub fn stream_chunks(
                 if data.is_empty() {
                     continue;
                 }
-                let h = meshes.add(to_bevy_mesh(data));
+                let mesh = to_bevy_mesh(data);
+                // Bounds deep enough for the display curvature (no recomputation by Bevy).
+                let aabb = curvature::chunk_aabb(&mesh).unwrap_or_default();
+                let h = meshes.add(mesh);
                 entities.push(
                     commands
                         .spawn((
@@ -331,6 +339,8 @@ pub fn stream_chunks(
                             MeshMaterial3d(material.clone()),
                             t,
                             anchor,
+                            aabb,
+                            NoAutoAabb,
                             Visibility::Hidden,
                         ))
                         .id(),
@@ -678,9 +688,11 @@ pub fn hud(
             ));
             if let Some(h) = &horizon {
                 ui.monospace(format!(
-                    "horizon {} levels, {} k triangles, {:.0} km",
+                    "horizon {}/{} levels, {} k triangles, {:.1} / {:.0} km",
+                    h.shown_levels,
                     h.levels,
                     h.triangles / 1_000,
+                    h.range_m / 1_000.0,
                     h.extent_m / 1_000.0
                 ));
             }
@@ -691,6 +703,35 @@ pub fn hud(
                     .step_by(32.0),
             );
             ui.checkbox(&mut settings.horizon, "horizon");
+            ui.horizontal(|ui| {
+                let mut curved = settings.curvature_radius_m.is_some();
+                ui.checkbox(&mut curved, "curvature");
+                let mut km = settings
+                    .curvature_radius_m
+                    .unwrap_or(curvature::REAL_RADIUS_M)
+                    / 1_000.0;
+                if curved {
+                    ui.add(
+                        egui::Slider::new(
+                            &mut km,
+                            curvature::RADIUS_MIN_M / 1_000.0..=curvature::RADIUS_MAX_M / 1_000.0,
+                        )
+                        .logarithmic(true)
+                        .text("R (km)"),
+                    );
+                    if ui
+                        .small_button("real")
+                        .on_hover_text("15.9 km: same circumference as the torus")
+                        .clicked()
+                    {
+                        km = curvature::REAL_RADIUS_M / 1_000.0;
+                    }
+                }
+                let radius = curved.then_some(km * 1_000.0);
+                if settings.curvature_radius_m != radius {
+                    settings.curvature_radius_m = radius;
+                }
+            });
             let mut fixed = settings.fixed_hour.is_some();
             ui.horizontal(|ui| {
                 ui.checkbox(&mut fixed, "fixed solar hour");

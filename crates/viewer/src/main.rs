@@ -6,6 +6,7 @@
 //! ```
 
 mod bench;
+mod curvature;
 mod fly;
 mod horizon;
 mod map;
@@ -63,6 +64,12 @@ struct Args {
     /// TOML file with a `[voxel]` section overriding chunk generation parameters.
     #[arg(long)]
     voxel_config: Option<PathBuf>,
+    /// TOML file with a `[render]` section (display curvature radius…).
+    #[arg(long)]
+    render_config: Option<PathBuf>,
+    /// Display curvature radius `R_vis`, m (render only; 0: flat). Overrides `--render-config`.
+    #[arg(long)]
+    curvature_radius: Option<f64>,
     /// Borderless fullscreen.
     #[arg(long)]
     fullscreen: bool,
@@ -105,6 +112,9 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         args.no_horizon = false;
         args.view_distance = b.view_distance_m.unwrap_or(fly::VIEW_MAX);
         args.hour = Some(b.hour.unwrap_or(10.0));
+        if b.curvature_radius_m.is_some() {
+            args.curvature_radius = b.curvature_radius_m;
+        }
         let w = &b.waypoint[0];
         args.pos = Some(vec![w.x, w.z]);
     }
@@ -118,6 +128,13 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         Some(p) => VoxelConfig::from_toml(&std::fs::read_to_string(p)?)?,
         None => VoxelConfig::default(),
     };
+    let mut render_cfg = match &args.render_config {
+        Some(p) => curvature::RenderConfig::from_toml(&std::fs::read_to_string(p)?)?,
+        None => curvature::RenderConfig::default(),
+    };
+    if let Some(r) = args.curvature_radius {
+        render_cfg.curvature_radius_m = r;
+    }
     let terrain = Arc::new(Terrain::from_world(&world, voxel_cfg)?);
     let info = fly::WorldInfo {
         astro: world.config.astro,
@@ -143,6 +160,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         view_distance_m: args.view_distance.clamp(fly::VIEW_MIN, fly::VIEW_MAX),
         fixed_hour: args.hour,
         horizon: !args.no_horizon,
+        curvature_radius_m: render_cfg.radius(),
     };
 
     let horizon_cfg = horizon::HorizonConfig::default();
@@ -176,6 +194,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         ..default()
     }))
     .add_plugins(EguiPlugin::default())
+    .add_plugins(curvature::CurvaturePlugin)
     .add_plugins(perf::PerfPlugin)
     .init_state::<Mode>()
     .insert_resource(map)
@@ -245,7 +264,12 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
+fn setup(
+    mut commands: Commands,
+    settings: Res<FlySettings>,
+    mut materials: ResMut<Assets<curvature::CurvedMaterial>>,
+) {
+    let radius = settings.curvature_radius_m;
     commands.spawn((
         Camera3d::default(),
         Projection::from(PerspectiveProjection {
@@ -272,28 +296,37 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
         Transform::default(),
         fly::Sun,
     ));
-    let opaque = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        perceptual_roughness: 0.95,
-        reflectance: 0.15,
-        ..default()
-    });
-    let water = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        perceptual_roughness: 0.15,
-        reflectance: 0.4,
-        alpha_mode: AlphaMode::Blend,
-        ..default()
-    });
+    let opaque = materials.add(curvature::material(
+        StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.95,
+            reflectance: 0.15,
+            ..default()
+        },
+        radius,
+    ));
+    let water = materials.add(curvature::material(
+        StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.15,
+            reflectance: 0.4,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        },
+        radius,
+    ));
     commands.insert_resource(fly::TerrainMaterials { opaque, water });
-    let horizon = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        perceptual_roughness: 0.95,
-        reflectance: 0.15,
-        double_sided: true,
-        cull_mode: None,
-        ..default()
-    });
+    let horizon = materials.add(curvature::material(
+        StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.95,
+            reflectance: 0.15,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        },
+        radius,
+    ));
     commands.insert_resource(horizon::HorizonMaterial(horizon));
 }
 

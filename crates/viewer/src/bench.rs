@@ -34,6 +34,8 @@ pub struct BenchFile {
     pub view_distance_m: Option<f32>,
     /// Fixed local solar hour (default 10).
     pub hour: Option<f64>,
+    /// Display curvature radius, m (0: flat; default: the render configuration).
+    pub curvature_radius_m: Option<f64>,
     /// Frames everything must stay loaded before the run starts.
     #[serde(default = "default_settle")]
     pub settle_frames: u32,

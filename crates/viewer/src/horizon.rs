@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
+use bevy::camera::visibility::NoFrustumCulling;
 use bevy::prelude::*;
 use nascio_core::consts::{CHUNK_SIZE, CHUNKS_PER_AXIS, WORLD_SIZE_F64};
 use nascio_core::math::smoothstep;
@@ -23,6 +24,7 @@ use nascio_voxel::Terrain;
 use nascio_voxel::block::{WATER, linear_color};
 use nascio_voxel::mesh::MeshData;
 
+use crate::curvature::{CurvedMaterial, visible_range};
 use crate::fly::{Anchor, FlyCam, FlySettings, SharedTerrain, Streamer, Workers, to_bevy_mesh};
 
 /// Horizon layout.
@@ -79,6 +81,10 @@ pub struct HorizonStats {
     pub levels: usize,
     pub triangles: usize,
     pub extent_m: f64,
+    /// Levels drawn (the others lie beyond the curvature's visible range).
+    pub shown_levels: usize,
+    /// Visible range with the display curvature, capped by the extent, m.
+    pub range_m: f64,
     /// Rebuilds waiting (0 when the displayed horizon is up to date).
     pub pending: usize,
 }
@@ -87,6 +93,8 @@ pub struct HorizonStats {
 struct Heights {
     side: usize,
     data: Vec<f32>,
+    /// Highest vertex, m.
+    max: f32,
 }
 
 impl Heights {
@@ -117,6 +125,8 @@ pub struct Horizon {
     rx: Mutex<Receiver<LevelResult>>,
     entities: Vec<Option<Entity>>,
     triangles: Vec<usize>,
+    /// Highest point of each displayed level, m.
+    level_max: Vec<f32>,
     /// Displayed centre and level-0 hole.
     center: Option<(i32, i32)>,
     hole: Arc<HashSet<(i32, i32)>>,
@@ -140,6 +150,7 @@ impl Horizon {
             rx: Mutex::new(rx),
             entities: vec![None; levels],
             triangles: vec![0; levels],
+            level_max: vec![0.0; levels],
             center: None,
             hole: Arc::default(),
             target: None,
@@ -240,7 +251,8 @@ fn level_heights(
             data.push((terrain.height_lod(x, z, 0.5 * s) + 0.5) as f32);
         }
     }
-    Heights { side, data }
+    let max = data.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    Heights { side, data, max }
 }
 
 /// Mesh of one level, vertices relative to the shared centre.
@@ -348,7 +360,7 @@ fn build_level(
 
 /// Material of the horizon: double-sided so skirts show from either side.
 #[derive(Resource)]
-pub struct HorizonMaterial(pub Handle<StandardMaterial>);
+pub struct HorizonMaterial(pub Handle<CurvedMaterial>);
 
 /// Requests rebuilds, applies finished levels, publishes stats.
 #[allow(clippy::too_many_arguments)]
@@ -398,6 +410,7 @@ pub fn update_horizon(
             h.l0_heights = Some((r.center, r.heights.clone()));
         }
         h.triangles[r.level] = r.mesh.indices.len() / 3;
+        h.level_max[r.level] = r.heights.max;
         let anchor = Anchor {
             x: r.center.0,
             y: 0,
@@ -418,6 +431,9 @@ pub fn update_horizon(
                         bundle,
                         MeshMaterial3d(material.0.clone()),
                         Visibility::Inherited,
+                        // Lowered by the display curvature: the flat bounds are wrong, and the
+                        // levels surround the camera anyway.
+                        NoFrustumCulling,
                     ))
                     .id();
                 h.entities[r.level] = Some(e);
@@ -425,17 +441,36 @@ pub fn update_horizon(
         }
     }
 
-    // 2. Visibility.
-    let target_vis = if settings.horizon {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
+    // 2. Visibility: with the display curvature, a level whose nearest point lies beyond the
+    // visible range of the highest displayed point is entirely below the horizon.
+    let range = match settings.curvature_radius_m {
+        Some(r) => {
+            let top = h.level_max.iter().copied().fold(0.0, f32::max);
+            visible_range(r, cam.pos.y, f64::from(top))
+        }
+        None => f64::INFINITY,
     };
-    for e in h.entities.iter().flatten() {
-        if let Ok(mut v) = vis.get_mut(*e)
-            && *v != target_vis
-        {
-            *v = target_vis;
+    let mut shown_levels = 0;
+    for (level, e) in h.entities.iter().enumerate() {
+        let near = if level == 0 {
+            0.0
+        } else {
+            // The camera is at most half a snap step from the centre (per axis).
+            h.cfg.half_extent(level - 1) - h.cfg.snap()
+        };
+        let show = settings.horizon && near <= range;
+        let target_vis = if show {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if let Some(e) = e {
+            shown_levels += usize::from(show);
+            if let Ok(mut v) = vis.get_mut(*e)
+                && *v != target_vis
+            {
+                *v = target_vis;
+            }
         }
     }
 
@@ -493,6 +528,8 @@ pub fn update_horizon(
     } else {
         0.0
     };
+    stats.shown_levels = if h.center.is_some() { shown_levels } else { 0 };
+    stats.range_m = range.min(stats.extent_m);
     stats.pending = usize::from(h.target.is_some())
         + usize::from(h.mask_in_flight)
         + usize::from(settings.horizon && streamer.version != h.mask_version);

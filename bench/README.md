@@ -20,7 +20,8 @@ Le mode benchmark impose :
 - pas de synchronisation verticale ;
 - l'horizon actif ;
 - la distance de vue du fichier (1 024 m par défaut, le maximum) ;
-- une heure solaire fixe.
+- une heure solaire fixe ;
+- la courbure d'affichage de la configuration de rendu (rayon réel par défaut), sauf si le fichier fixe `curvature_radius_m` (0 : monde plat) ou si `--curvature-radius` est passé.
 
 `--fullscreen` passe en plein écran sans bordure : sur un écran 1080p, c'est exactement du 1920×1080. **Rien ne doit recouvrir la fenêtre** pendant la mesure. Une fenêtre masquée ou sans le focus peut être bridée à 60 i/s par le compositeur, ce qui fausse le résultat.
 
