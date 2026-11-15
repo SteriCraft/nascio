@@ -8,8 +8,8 @@
 //! horizon covers it again. Skirts hide the cracks between levels and along the chunk boundary.
 //!
 //! Heights come from the same [`Terrain`] as the chunks, keeping only the noise octaves that the
-//! level's spacing can represent. Below sea level the mesh is flattened to `y = 0` and coloured
-//! by depth (opaque distant water).
+//! level's spacing can represent. Under water (sea or lake) the mesh is flattened to the water
+//! surface and coloured by depth (opaque distant water).
 
 use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -93,6 +93,8 @@ pub struct HorizonStats {
 struct Heights {
     side: usize,
     data: Vec<f32>,
+    /// Water surface per vertex (sea level or a lake's surface).
+    water: Vec<f32>,
     /// Highest vertex, m.
     max: f32,
 }
@@ -101,6 +103,17 @@ impl Heights {
     #[inline]
     fn at(&self, i: i64, j: i64) -> f32 {
         self.data[(i + 1) as usize + self.side * (j + 1) as usize]
+    }
+
+    #[inline]
+    fn water(&self, i: i64, j: i64) -> f32 {
+        self.water[(i + 1) as usize + self.side * (j + 1) as usize]
+    }
+
+    /// Drawn surface: the ground, or the water above it.
+    #[inline]
+    fn surf(&self, i: i64, j: i64) -> f32 {
+        self.at(i, j).max(self.water(i, j))
     }
 }
 
@@ -243,16 +256,27 @@ fn level_heights(
     let half = cfg.half_extent(level);
     let side = cfg.cells + 3;
     let mut data = Vec::with_capacity(side * side);
+    let mut water = Vec::with_capacity(side * side);
     for j in -1..=n + 1 {
         for i in -1..=n + 1 {
             let x = f64::from(center.0) - half + i as f64 * s;
             let z = f64::from(center.1) - half + j as f64 * s;
             // Block tops sit on average half a metre above the continuous surface.
             data.push((terrain.height_lod(x, z, 0.5 * s) + 0.5) as f32);
+            water.push(terrain.water_top(x, z) as f32);
         }
     }
-    let max = data.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    Heights { side, data, max }
+    let max = data
+        .iter()
+        .zip(&water)
+        .map(|(d, w)| d.max(*w))
+        .fold(f32::NEG_INFINITY, f32::max);
+    Heights {
+        side,
+        data,
+        water,
+        max,
+    }
 }
 
 /// Mesh of one level, vertices relative to the shared centre.
@@ -288,7 +312,6 @@ fn build_level(
         true
     };
 
-    let surf = |v: f32| v.max(0.0);
     let water = linear_color(WATER);
     let mut m = MeshData::default();
     let side = (n + 1) as usize;
@@ -296,12 +319,13 @@ fn build_level(
     for j in 0..=n {
         for i in 0..=n {
             let raw = h.at(i, j);
-            let dx = f64::from(surf(h.at(i + 1, j)) - surf(h.at(i - 1, j))) / (2.0 * s);
-            let dz = f64::from(surf(h.at(i, j + 1)) - surf(h.at(i, j - 1))) / (2.0 * s);
+            let dx = f64::from(h.surf(i + 1, j) - h.surf(i - 1, j)) / (2.0 * s);
+            let dz = f64::from(h.surf(i, j + 1) - h.surf(i, j - 1)) / (2.0 * s);
             let len = (dx * dx + 1.0 + dz * dz).sqrt();
             let normal = [(-dx / len) as f32, (1.0 / len) as f32, (-dz / len) as f32];
-            let color = if raw < 0.0 {
-                let k = 1.15 - 0.75 * smoothstep(0.0, 400.0, f64::from(-raw)) as f32;
+            let wl = h.water(i, j);
+            let color = if raw < wl {
+                let k = 1.15 - 0.75 * smoothstep(0.0, 400.0, f64::from(wl - raw)) as f32;
                 [water[0] * k, water[1] * k, water[2] * k, 1.0]
             } else {
                 let rdx = f64::from(h.at(i + 1, j) - h.at(i - 1, j)) / (2.0 * s);
@@ -314,7 +338,7 @@ fn build_level(
             };
             m.positions.push([
                 (-half + i as f64 * s) as f32,
-                surf(raw),
+                h.surf(i, j),
                 (-half + j as f64 * s) as f32,
             ]);
             m.normals.push(normal);

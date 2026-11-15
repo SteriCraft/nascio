@@ -1,47 +1,26 @@
 //! Surface height function shared by the chunks and the horizon (spec §5).
 //!
-//! `height = bicubic(elevation_tectonic) + amplitude · detail`, where `detail` is a periodic
-//! fractal noise and `amplitude` depends on the context: a few metres on plains and near the
-//! coast, hundreds of metres in mountains (orogens, steep tectonic slopes), tens of metres on
-//! the sea floor. The tectonic grid (160 m) is provisional until the 32 m grid of M3.
+//! `height = bicubic(elevation) + detail`. `elevation` is the eroded 32 m grid of M3 (one cell
+//! per chunk at full resolution). The detail noise is the one of `nascio-worldgen`
+//! ([`Detail`]): the fine grid already contains the octaves at least two cells wide, the chunks
+//! add only the finer ones, with the amplitude of the context (ruggedness, coast, sea floor).
+//! Worlds made before M3 have only `elevation_tectonic`: it is used instead, with every octave.
+//!
+//! Water: the sea fills every column up to `y = 0`; a lake fills the columns of its cells up
+//! to its surface.
 
 use anyhow::Context;
-use nascio_core::math::smoothstep;
+use nascio_worldgen::erosion::ErosionConfig;
+use nascio_worldgen::erosion::upsample::{Detail, baked_min_spacing, ruggedness};
 use nascio_worldgen::grid::PeriodicGrid;
-use nascio_worldgen::noise::{PeriodicNoise, divisor_at_most};
-use nascio_worldgen::rng::{mix64, stage_u64};
-use nascio_worldgen::tectonics::flags;
 use nascio_worldgen::world_io::{Layer, World};
 use serde::{Deserialize, Serialize};
 
-/// Tunable parameters of chunk generation (`[voxel]` in TOML).
+/// Tunable parameters of chunk generation (`[voxel]` in TOML). The relief itself (detail noise
+/// amplitudes) is configured by `[erosion]` in `world.toml`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct VoxelConfig {
-    /// Spacing of the coarsest detail octave (snapped down to a divisor of 100 000).
-    pub detail_base_spacing_m: f64,
-    /// Finest detail octave spacing.
-    pub detail_min_spacing_m: f64,
-    /// Amplitude ratio between consecutive octaves.
-    pub detail_gain: f64,
-    /// Detail amplitude on lowland plains.
-    pub plain_amplitude_m: f64,
-    /// Detail amplitude in the most rugged mountains.
-    pub mountain_amplitude_m: f64,
-    /// Detail amplitude on the sea floor.
-    pub seabed_amplitude_m: f64,
-    /// Tectonic elevation at which land counts as fully mountainous.
-    pub mountain_elevation_m: f64,
-    /// Tectonic slope (m/m) at which land counts as fully mountainous.
-    pub mountain_slope: f64,
-    /// Ruggedness given to orogens whatever their elevation.
-    pub orogeny_ruggedness: f64,
-    /// Share of ridged noise at full ruggedness (sharp crests).
-    pub ridged_share: f64,
-    /// Within this height of sea level, detail is damped to keep coasts clean.
-    pub coast_band_m: f64,
-    /// Detail amplitude factor right at sea level.
-    pub coast_damping: f64,
     /// Above this elevation the surface is bare stone.
     pub grass_max_elevation_m: f64,
     /// Above this slope (m/m) the surface is bare stone.
@@ -55,28 +34,11 @@ pub struct VoxelConfig {
     pub sand_depth_m: i32,
     /// Chunks generated below the lowest surface of a column.
     pub underground_chunks: i32,
-    /// Maximum grade (m/m) of the base elevation after talus relaxation; 0 disables it.
-    /// Provisional: the tectonic grid has cell-to-cell cliffs until erosion (M3).
-    pub talus_grade: f64,
-    /// Relaxation sweeps.
-    pub talus_iterations: u32,
 }
 
 impl Default for VoxelConfig {
     fn default() -> Self {
         Self {
-            detail_base_spacing_m: 1_000.0,
-            detail_min_spacing_m: 16.0,
-            detail_gain: 0.5,
-            plain_amplitude_m: 8.0,
-            mountain_amplitude_m: 320.0,
-            seabed_amplitude_m: 25.0,
-            mountain_elevation_m: 1_800.0,
-            mountain_slope: 0.15,
-            orogeny_ruggedness: 0.6,
-            ridged_share: 0.6,
-            coast_band_m: 40.0,
-            coast_damping: 0.4,
             grass_max_elevation_m: 2_200.0,
             rock_slope: 1.2,
             dirt_depth_m: 3,
@@ -84,8 +46,6 @@ impl Default for VoxelConfig {
             beach_high_m: 0,
             sand_depth_m: 3,
             underground_chunks: 2,
-            talus_grade: 0.7,
-            talus_iterations: 400,
         }
     }
 }
@@ -106,11 +66,13 @@ impl VoxelConfig {
 pub struct Terrain {
     cfg: VoxelConfig,
     elevation: PeriodicGrid<f32>,
-    /// 0 (flat) to 1 (most rugged), smoothed, per tectonic cell.
+    /// Lake surface per elevation cell, `-∞` where there is no lake.
+    lake_level: Option<PeriodicGrid<f32>>,
+    /// 0 (flat) to 1 (most rugged), per tectonic cell.
     ruggedness: PeriodicGrid<f32>,
-    /// `(noise, amplitude)` from the coarsest octave.
-    octaves: Vec<(PeriodicNoise, f64)>,
-    norm: f64,
+    detail: Detail,
+    /// Octaves at least this wide are already in `elevation`.
+    baked_spacing: f64,
 }
 
 fn grid_f32(layer: &Layer) -> PeriodicGrid<f32> {
@@ -123,7 +85,7 @@ fn grid_f32(layer: &Layer) -> PeriodicGrid<f32> {
 impl Terrain {
     /// Builds the terrain of a generated world.
     pub fn from_world(world: &World, cfg: VoxelConfig) -> anyhow::Result<Self> {
-        let elevation = grid_f32(
+        let tectonic = grid_f32(
             world
                 .layer("elevation_tectonic")
                 .context("world has no elevation_tectonic layer")?,
@@ -131,40 +93,62 @@ impl Terrain {
         let flags = world
             .layer("history_flags")
             .map(grid_f32)
-            .unwrap_or_else(|| elevation.map(|_| 0.0));
-        Ok(Self::new(world.config.seed, elevation, &flags, cfg))
+            .unwrap_or_else(|| tectonic.map(|_| 0.0));
+        let (elevation, lakes) = match world.layer("elevation") {
+            Some(fine) => (
+                Some(grid_f32(fine)),
+                world.layer("lake_depth").map(grid_f32),
+            ),
+            None => (None, None),
+        };
+        Ok(Self::new(
+            world.config.seed,
+            &world.config.erosion,
+            &tectonic,
+            &flags,
+            elevation,
+            lakes,
+            cfg,
+        ))
     }
 
-    /// Builds a terrain from an elevation grid and a `history_flags` grid of the same shape.
+    /// Builds a terrain. `tectonic` and `history_flags` share the tectonic grid (they set the
+    /// ruggedness); `elevation` is the eroded fine grid with its `lake_depth`, or `None` to
+    /// use the tectonic elevation itself (worlds made before M3).
     pub fn new(
         seed: u64,
-        elevation: PeriodicGrid<f32>,
+        erosion: &ErosionConfig,
+        tectonic: &PeriodicGrid<f32>,
         history_flags: &PeriodicGrid<f32>,
+        elevation: Option<PeriodicGrid<f32>>,
+        lake_depth: Option<PeriodicGrid<f32>>,
         cfg: VoxelConfig,
     ) -> Self {
-        let elevation = relax_talus(elevation, cfg.talus_grade, cfg.talus_iterations);
-        let ruggedness = ruggedness(&elevation, history_flags, &cfg);
-        let base = stage_u64(seed, "voxel-detail");
-        let mut octaves = Vec::new();
-        let mut spacing = divisor_at_most(cfg.detail_base_spacing_m);
-        let mut amp = 1.0;
-        while f64::from(spacing) >= cfg.detail_min_spacing_m {
-            let k = octaves.len() as u64;
-            octaves.push((PeriodicNoise::new(mix64(base ^ k), spacing), amp));
-            let next = divisor_at_most(f64::from(spacing) / 2.0);
-            if next == spacing {
-                break;
+        let ruggedness = ruggedness(tectonic, |i, j| *history_flags.get(i, j) as u8, erosion);
+        let (elevation, baked_spacing) = match elevation {
+            Some(e) => {
+                let b = baked_min_spacing(e.cell_size());
+                (e, b)
             }
-            spacing = next;
-            amp *= cfg.detail_gain;
-        }
-        let norm = octaves.iter().map(|(_, a)| a).sum::<f64>().max(1e-9);
+            None => (tectonic.clone(), f64::INFINITY),
+        };
+        let lake_level = lake_depth.map(|d| {
+            PeriodicGrid::from_fn(d.width(), d.height(), d.cell_size(), |i, j| {
+                let depth = *d.get(i as i64, j as i64);
+                if depth > 0.0 {
+                    elevation.get(i as i64, j as i64) + depth
+                } else {
+                    f32::NEG_INFINITY
+                }
+            })
+        });
         Self {
             cfg,
             elevation,
+            lake_level,
             ruggedness,
-            octaves,
-            norm,
+            detail: Detail::new(seed, erosion),
+            baked_spacing,
         }
     }
 
@@ -172,11 +156,13 @@ impl Terrain {
         &self.cfg
     }
 
-    /// Spacing of the finest detail octave.
+    /// Spacing of the finest detail octave added by the chunks.
     pub fn finest_spacing(&self) -> f64 {
-        self.octaves
+        self.detail
+            .spacings()
+            .filter(|&s| s < self.baked_spacing)
             .last()
-            .map_or(f64::INFINITY, |(n, _)| n.spacing())
+            .unwrap_or(f64::INFINITY)
     }
 
     /// Surface height at a world position, full detail.
@@ -185,7 +171,7 @@ impl Terrain {
         self.height_lod(x, z, 0.0)
     }
 
-    /// Tectonic (base) elevation, without detail.
+    /// Macro elevation (eroded grid), without the chunk detail.
     #[inline]
     pub fn base_height(&self, x: f64, z: f64) -> f64 {
         self.elevation.sample_bicubic(x, z)
@@ -194,27 +180,39 @@ impl Terrain {
     /// Surface height keeping only the octaves at least twice as wide as `sample_spacing`
     /// (for coarse horizon meshes, which would alias finer detail).
     pub fn height_lod(&self, x: f64, z: f64, sample_spacing: f64) -> f64 {
-        let c = &self.cfg;
         let e = self.elevation.sample_bicubic(x, z);
-        let r = self.ruggedness.sample_bilinear(x, z).clamp(0.0, 1.0);
-        let land = c.plain_amplitude_m + (c.mountain_amplitude_m - c.plain_amplitude_m) * r;
-        let w = smoothstep(-c.coast_band_m, c.coast_band_m, e);
-        let damp =
-            c.coast_damping + (1.0 - c.coast_damping) * smoothstep(0.0, c.coast_band_m, e.abs());
-        let amplitude = (c.seabed_amplitude_m + (land - c.seabed_amplitude_m) * w) * damp;
-
-        let min_spacing = 2.0 * sample_spacing;
-        let (mut smooth, mut ridged) = (0.0, 0.0);
-        for (n, a) in &self.octaves {
-            if n.spacing() < min_spacing {
-                break;
-            }
-            let v = n.sample(x, z);
-            smooth += a * v;
-            ridged += a * (1.0 - 2.0 * v.abs());
+        let min = 2.0 * sample_spacing;
+        if min >= self.baked_spacing {
+            return e;
         }
-        let k = c.ridged_share * r * w;
-        e + amplitude * ((1.0 - k) * smooth + k * ridged) / self.norm
+        let r = self.ruggedness.sample_bilinear(x, z);
+        e + self.detail.value(x, z, e, r, min, self.baked_spacing)
+    }
+
+    /// Water surface at a world position: the surface of a lake whose cells surround the point
+    /// (any of the four nearest cell centres), otherwise sea level.
+    pub fn water_level(&self, x: f64, z: f64) -> f64 {
+        let Some(l) = &self.lake_level else {
+            return 0.0;
+        };
+        let c = l.cell_size();
+        let gx = (nascio_core::torus::wrap_f64(x) / c - 0.5).floor() as i64;
+        let gz = (nascio_core::torus::wrap_f64(z) / c - 0.5).floor() as i64;
+        let mut level = f32::NEG_INFINITY;
+        for (di, dj) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            level = level.max(*l.get(gx + di, gz + dj));
+        }
+        if level.is_finite() {
+            f64::from(level)
+        } else {
+            0.0
+        }
+    }
+
+    /// Highest water block + 1 of a column: water fills `top < y < water_top`.
+    #[inline]
+    pub fn water_top(&self, x: f64, z: f64) -> i32 {
+        self.water_level(x, z).round() as i32
     }
 
     /// Block of the surface (top solid block) for a column whose top block is at `top`.
@@ -243,98 +241,14 @@ impl Terrain {
     }
 }
 
-/// Mass-conserving thermal relaxation: between neighbours whose difference exceeds
-/// `grade · cell`, a fifth of the excess moves downhill at each sweep. Each cell gathers its own
-/// change from its four neighbours (symmetric exchange), so the parallel sweep is deterministic.
-pub fn relax_talus(grid: PeriodicGrid<f32>, grade: f64, iterations: u32) -> PeriodicGrid<f32> {
-    use rayon::prelude::*;
-    if grade <= 0.0 || iterations == 0 {
-        return grid;
-    }
-    let (w, h, cell) = (grid.width(), grid.height(), grid.cell_size());
-    let max = (grade * cell) as f32;
-    let mut cur: Vec<f32> = grid.data().to_vec();
-    let mut next = cur.clone();
-    for _ in 0..iterations {
-        next.par_chunks_mut(w).enumerate().for_each(|(j, row)| {
-            let up = ((j + h - 1) % h) * w;
-            let down = ((j + 1) % h) * w;
-            let here = j * w;
-            for (i, out) in row.iter_mut().enumerate() {
-                let v = cur[here + i];
-                let flow = |n: f32| {
-                    let d = n - v;
-                    let excess = d.abs() - max;
-                    if excess > 0.0 {
-                        0.2 * excess * d.signum()
-                    } else {
-                        0.0
-                    }
-                };
-                *out = v
-                    + flow(cur[here + (i + w - 1) % w])
-                    + flow(cur[here + (i + 1) % w])
-                    + flow(cur[up + i])
-                    + flow(cur[down + i]);
-            }
-        });
-        std::mem::swap(&mut cur, &mut next);
-    }
-    PeriodicGrid::from_vec(w, h, cell, cur)
-}
-
-/// Ruggedness per tectonic cell: elevation, slope and orogeny, then smoothed.
-fn ruggedness(
-    elevation: &PeriodicGrid<f32>,
-    history_flags: &PeriodicGrid<f32>,
-    c: &VoxelConfig,
-) -> PeriodicGrid<f32> {
-    let (w, h) = (elevation.width(), elevation.height());
-    let cell = elevation.cell_size();
-    let raw = PeriodicGrid::from_fn(w, h, cell, |i, j| {
-        let (i, j) = (i as i64, j as i64);
-        let e = f64::from(*elevation.get(i, j));
-        if e <= 0.0 {
-            return 0.0f32;
-        }
-        let mut grade = 0.0f64;
-        for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-            grade = grade.max((f64::from(*elevation.get(i + di, j + dj)) - e).abs() / cell);
-        }
-        let mut r = smoothstep(150.0, c.mountain_elevation_m, e).max(smoothstep(
-            0.0,
-            c.mountain_slope,
-            grade,
-        ));
-        let f = *history_flags.get(i, j) as u8;
-        if f & flags::OROGENY != 0 {
-            r = r.max(c.orogeny_ruggedness);
-        }
-        r as f32
-    });
-    box_blur(&box_blur(&raw))
-}
-
-fn box_blur(g: &PeriodicGrid<f32>) -> PeriodicGrid<f32> {
-    PeriodicGrid::from_fn(g.width(), g.height(), g.cell_size(), |i, j| {
-        let (i, j) = (i as i64, j as i64);
-        let mut s = 0.0;
-        for dj in -1..=1 {
-            for di in -1..=1 {
-                s += g.get(i + di, j + dj);
-            }
-        }
-        s / 9.0
-    })
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use nascio_core::consts::WORLD_SIZE_F64;
     use proptest::prelude::*;
 
-    /// A small synthetic world: a mountain ridge crossing both seams, and an ocean.
+    /// A small synthetic world: a mountain ridge crossing both seams, an ocean, and a lake
+    /// straddling the x seam.
     pub fn test_terrain() -> Terrain {
         static T: std::sync::OnceLock<Terrain> = std::sync::OnceLock::new();
         T.get_or_init(build_test_terrain).clone()
@@ -343,13 +257,31 @@ pub(crate) mod tests {
     fn build_test_terrain() -> Terrain {
         let n = 125;
         let cell = WORLD_SIZE_F64 / n as f64;
-        let elevation = PeriodicGrid::from_fn(n, n, cell, |i, j| {
+        let wave = |i: usize, j: usize, n: usize| {
             let a = std::f64::consts::TAU * i as f64 / n as f64;
             let b = std::f64::consts::TAU * j as f64 / n as f64;
             (1_200.0 * a.cos() + 900.0 * b.sin() + 300.0 * (a + b).cos()) as f32
-        });
+        };
+        let tectonic = PeriodicGrid::from_fn(n, n, cell, |i, j| wave(i, j, n));
         let flags = PeriodicGrid::from_fn(n, n, cell, |i, _| if i < 5 { 1.0 } else { 0.0 });
-        Terrain::new(42, elevation, &flags, VoxelConfig::default())
+        let m = 5 * n;
+        let fine = PeriodicGrid::from_fn(m, m, cell / 5.0, |i, j| wave(i, j, m));
+        let lakes = PeriodicGrid::from_fn(m, m, cell / 5.0, |i, j| {
+            if (i < 3 || i > m - 4) && (300..306).contains(&j) {
+                5.0
+            } else {
+                0.0
+            }
+        });
+        Terrain::new(
+            42,
+            &ErosionConfig::default(),
+            &tectonic,
+            &flags,
+            Some(fine),
+            Some(lakes),
+            VoxelConfig::default(),
+        )
     }
 
     #[test]
@@ -376,9 +308,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn lod_zero_is_full_detail_and_coarse_is_smoother() {
+    fn chunks_add_only_unbaked_octaves() {
         let t = test_terrain();
-        assert!(t.finest_spacing() >= 16.0);
+        // Fine grid of 160 m: octaves of 320 m and more are baked.
+        assert!(t.finest_spacing() >= 16.0 && t.finest_spacing() < 320.0);
         let (mut fine, mut coarse) = (0.0, 0.0);
         for k in 0..2_000 {
             let x = f64::from(k) * 4.0;
@@ -387,28 +320,20 @@ pub(crate) mod tests {
             let d = t.height_lod(x + 4.0, 500.0, 512.0) - t.height_lod(x, 500.0, 512.0);
             coarse += d * d;
             assert_eq!(t.height(x, 500.0), t.height_lod(x, 500.0, 8.0));
+            // Coarse LOD = the grid itself.
+            assert_eq!(t.height_lod(x, 500.0, 512.0), t.base_height(x, 500.0));
         }
         assert!(coarse < fine);
     }
 
     #[test]
-    fn talus_relaxation_conserves_mass_and_caps_grade() {
-        let n = 64;
-        let cell = WORLD_SIZE_F64 / n as f64;
-        let cliff = PeriodicGrid::from_fn(
-            n,
-            n,
-            cell,
-            |i, _| if i < 32 { 3_000.0f32 } else { -3_000.0 },
-        );
-        let sum = |g: &PeriodicGrid<f32>| g.data().iter().map(|&v| f64::from(v)).sum::<f64>();
-        let relaxed = relax_talus(cliff.clone(), 0.1, 2_000);
-        assert!((sum(&relaxed) - sum(&cliff)).abs() < 1e-3 * n as f64 * n as f64);
-        let max_step = (0..n as i64)
-            .map(|i| (relaxed.get(i + 1, 0) - relaxed.get(i, 0)).abs())
-            .fold(0.0f32, f32::max);
-        assert!(f64::from(max_step) < 0.1 * cell * 1.2, "step {max_step}");
-        assert_eq!(relax_talus(cliff.clone(), 0.0, 10), cliff);
+    fn lake_water_across_the_seam() {
+        let t = test_terrain();
+        let z = 303.0 * 160.0;
+        let level = t.water_level(10.0, z);
+        assert!(level > 0.0);
+        assert_eq!(t.water_level(WORLD_SIZE_F64 - 10.0, z), level);
+        assert_eq!(t.water_level(50_000.0, z), 0.0);
     }
 
     #[test]

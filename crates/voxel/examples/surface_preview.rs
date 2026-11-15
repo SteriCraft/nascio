@@ -13,7 +13,10 @@ fn main() -> anyhow::Result<()> {
     let dir = PathBuf::from(std::env::args().nth(1).unwrap_or("out/m2/world-42".into()));
     let world = World::load(&dir)?;
     let terrain = Terrain::from_world(&world, VoxelConfig::default())?;
-    let elev = world.layer("elevation_tectonic").expect("elevation");
+    let elev = world
+        .layer("elevation")
+        .or_else(|| world.layer("elevation_tectonic"))
+        .expect("elevation");
     let (mut peak, mut coast) = ((0, f64::MIN), (0, f64::MAX));
     for k in 0..elev.width * elev.height {
         let e = elev.data.get_f64(k);
