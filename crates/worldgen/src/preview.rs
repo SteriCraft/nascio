@@ -29,6 +29,7 @@ const CONTINENT_GREY: &str = "#c9c6bd";
 const OCEAN_FILL: &str = "#2f6db0";
 const CONTINENT_FILL: &str = "#c9a66b";
 const SEA_PALE: &str = "#dce8f2";
+const LAKE: &str = "#3987e5";
 const RIVER: &str = "#0d366b";
 /// log10 range of the discharge preview, m³/s.
 const ACCUM_LOG_RANGE: (f64, f64) = (-3.0, 3.0);
@@ -202,7 +203,46 @@ pub fn colorize(world: &World, name: &str) -> Option<Vec<Color>> {
     let v = |i: usize| layer.data.get_f64(i);
     let colors = match name {
         "elevation_tectonic" => (0..n).map(|i| elevation_color(v(i))).collect(),
-        "elevation" => shaded_relief(layer),
+        "elevation" => {
+            let mut c = shaded_relief(layer);
+            if let Some(lake) = world.layer("lake_depth") {
+                for (i, ci) in c.iter_mut().enumerate() {
+                    if lake.data.get_f64(i) > 0.0 {
+                        *ci = hex(LAKE);
+                    }
+                }
+            }
+            c
+        }
+        "lake_depth" => {
+            let base = world.layer("elevation").map(shaded_relief)?;
+            (0..n)
+                .map(|i| {
+                    let d = v(i);
+                    if d > 0.0 {
+                        blues(0.25 + 0.75 * (d / 100.0).min(1.0))
+                    } else {
+                        lerp_color(base[i], hex(SURFACE), 0.55)
+                    }
+                })
+                .collect()
+        }
+        "river_order" => {
+            let base = world.layer("elevation").map(shaded_relief)?;
+            let lake = world.layer("lake_depth");
+            (0..n)
+                .map(|i| {
+                    let o = v(i);
+                    if lake.is_some_and(|l| l.data.get_f64(i) > 0.0) {
+                        hex(LAKE)
+                    } else if o > 0.0 {
+                        blues(0.45 + 0.11 * o)
+                    } else {
+                        lerp_color(base[i], hex(SURFACE), 0.35)
+                    }
+                })
+                .collect()
+        }
         "precipitation" => (0..n)
             .map(|i| {
                 let c = ramp(&PRECIP_STOPS, v(i));
@@ -328,6 +368,13 @@ pub fn legend(name: &str) -> Vec<(Color, &'static str)> {
             (ramp(&PRECIP_STOPS, 1_500.0), "1500"),
             (ramp(&PRECIP_STOPS, 2_500.0), "2500"),
             (ramp(&PRECIP_STOPS, 4_000.0), "4000 (sea: pale)"),
+        ],
+        "lake_depth" => vec![(blues(0.25), "lake, shallow"), (blues(1.0), "100 m deep")],
+        "river_order" => vec![
+            (blues(0.56), "order 1"),
+            (blues(0.78), "3"),
+            (blues(1.0), "5+"),
+            (hex(LAKE), "lake"),
         ],
         "flow_accumulation" => vec![
             (blues(0.0), "0.001 m3/s"),
@@ -515,7 +562,9 @@ pub fn write_previews(world: &World, plates: &[Plate], dir: &Path) -> anyhow::Re
             continue;
         };
         let img = upscale(&colors, layer.width, layer.height);
-        let tiled_source = if world.layer("elevation").is_some() {
+        let tiled_source = if world.layer("river_order").is_some() {
+            "river_order"
+        } else if world.layer("elevation").is_some() {
             "elevation"
         } else {
             "elevation_tectonic"

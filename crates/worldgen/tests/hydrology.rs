@@ -19,6 +19,7 @@ fn check_world(seed: u64, scale: Scale) {
     let (world, _) = generate(&WorldConfig::new(seed, scale)).expect("generation");
     let dir = layer_u(&world, "flow_direction");
     let basin = layer_u(&world, "basin_id");
+    let lake = world.layer("lake_depth").cloned();
     let res = world.layer("flow_direction").expect("dir").width;
     let r = res as i64;
     let rec = |k: usize| -> usize {
@@ -42,7 +43,9 @@ fn check_world(seed: u64, scale: Scale) {
             continue;
         }
         let next = rec(k);
-        if basin[next] != 0 {
+        // A basin ends at the sea or at a lake: only a lake outflow may change basin.
+        let is_lake = lake.as_ref().is_some_and(|l| l.data.get_f64(k) > 0.0);
+        if basin[next] != 0 && !is_lake {
             assert_eq!(
                 basin[k], basin[next],
                 "seed {seed}: basin changes along flow"

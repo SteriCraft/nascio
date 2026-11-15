@@ -49,3 +49,26 @@ fn hotspot_islands_emerge_on_every_seed() {
         );
     }
 }
+
+#[test]
+fn hotspot_islands_survive_erosion() {
+    for seed in [42, 7, 1234, 2026] {
+        let (world, _) = generate(&WorldConfig::new(seed, Scale::Fifth)).expect("generation");
+        let fine = world.layer("elevation").expect("fine elevation");
+        let crust = world.layer("crust_type").expect("crust");
+        let flags = world.layer("history_flags").expect("flags");
+        let ratio = fine.width / crust.width;
+        let islands = (0..fine.width * fine.height)
+            .filter(|&k| {
+                let (i, j) = (k % fine.width, k / fine.width);
+                let t = (j / ratio) * crust.width + i / ratio;
+                crust.data.get_f64(t) == 0.0
+                    && (flags.data.get_f64(t) as u8) & nascio_worldgen::tectonics::flags::HOTSPOT
+                        != 0
+                    && fine.data.get_f64(k) > 0.0
+            })
+            .count();
+        println!("seed {seed}: {islands} emerged hotspot cells after erosion");
+        assert!(islands >= 3, "seed {seed}: only {islands} cells");
+    }
+}

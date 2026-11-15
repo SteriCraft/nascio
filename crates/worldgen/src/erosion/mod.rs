@@ -9,6 +9,7 @@
 //! 4. final hydrography: lakes, flow directions, accumulation, basins, rivers.
 
 pub mod flow;
+pub mod hydro;
 pub mod precip;
 pub mod process;
 pub mod upsample;
@@ -192,8 +193,12 @@ impl ErosionConfig {
 /// Output of the erosion stage.
 #[derive(Clone, Debug)]
 pub struct ErosionOutput {
-    /// Final elevation on the fine grid (lake beds included), m.
+    /// Final elevation on the fine grid (lake beds included, small depressions filled), m.
     pub elevation: PeriodicGrid<f32>,
+    /// Lake water depth, m (0 = no lake).
+    pub lake_depth: PeriodicGrid<f32>,
+    /// Strahler order of rivers (discharge ≥ `river_threshold_m3s`), 0 elsewhere.
+    pub river_order: PeriodicGrid<u8>,
     /// Provisional precipitation on the tectonic grid, mm/yr.
     pub precipitation: PeriodicGrid<f32>,
     /// D8 direction code (index in [`flow::D8`]), [`flow::NO_DIR`] on the sea.
@@ -213,6 +218,8 @@ pub struct ErosionReport {
     pub stats: process::ErosionStats,
     /// Mean lowering of the land, m.
     pub mean_land_lowering_m: f64,
+    pub lakes: usize,
+    pub lake_area_km2: f64,
 }
 
 impl std::fmt::Display for ErosionReport {
@@ -229,6 +236,7 @@ impl std::fmt::Display for ErosionReport {
             s.lost_m3 / 1e9,
             self.mean_land_lowering_m
         )?;
+        writeln!(f, "lakes: {} ({:.1} km2)", self.lakes, self.lake_area_km2)?;
         write!(f, "erosion timings:")?;
         for (name, t) in &self.timings {
             write!(f, " {name} {t:.2} s,")?;
@@ -254,20 +262,14 @@ impl ErosionOutput {
             Layer::from_u8("flow_direction", "D8 code, 255=none", &self.flow_direction),
             Layer::from_f32("flow_accumulation", "m3/s", &self.flow_accumulation),
             Layer::from_u32("basin_id", "id, 0=sea", &self.basin_id),
+            Layer::from_f32("lake_depth", "m", &self.lake_depth),
+            Layer::from_u8("river_order", "Strahler, 0=none", &self.river_order),
         ]
     }
 }
 
 /// Seconds in a year (Julian), to turn m³/yr into m³/s.
 pub const SECONDS_PER_YEAR: f64 = 31_557_600.0;
-
-/// Final flow routing of a fine elevation grid.
-struct Routing {
-    dir: Vec<u8>,
-    /// Discharge, m³/yr.
-    discharge: Vec<f64>,
-    basin: Vec<u32>,
-}
 
 /// Rain per fine cell (m³/yr) from the precipitation grid (mm/yr).
 fn rain_volume(precip: &PeriodicGrid<f32>, shape: flow::Shape) -> Vec<f64> {
@@ -283,40 +285,6 @@ fn rain_volume(precip: &PeriodicGrid<f32>, shape: flow::Shape) -> Vec<f64> {
             }
         });
     v
-}
-
-/// Routes the flow on `h`: sea, epsilon-filled surface, D8, discharge and basins.
-fn route(h: &[f64], rain: &[f64], shape: flow::Shape, sea_min_area_m2: f64) -> Routing {
-    let sea = flow::sea_mask(h, shape, sea_min_area_m2);
-    let filled = flow::priority_flood(h, &sea, shape, true);
-    let (rec, dir) = flow::receivers(&filled, &sea, shape);
-    let order = flow::stack(&rec);
-    debug_assert_eq!(order.len(), shape.n(), "every cell drains to the sea");
-    let discharge = flow::accumulate(&order, &rec, rain);
-    let outlet = flow::outlets(&order, &rec);
-    // Basins numbered by outlet index; the sea itself is 0.
-    let mut used = vec![false; shape.n()];
-    for k in 0..shape.n() {
-        if !sea[k] {
-            used[outlet[k] as usize] = true;
-        }
-    }
-    let mut id = vec![0u32; shape.n()];
-    let mut next = 1u32;
-    for (k, u) in used.iter().enumerate() {
-        if *u {
-            id[k] = next;
-            next += 1;
-        }
-    }
-    let basin = (0..shape.n())
-        .map(|k| if sea[k] { 0 } else { id[outlet[k] as usize] })
-        .collect();
-    Routing {
-        dir,
-        discharge,
-        basin,
-    }
 }
 
 /// Runs the erosion stage on a tectonic result.
@@ -340,13 +308,20 @@ pub fn run(cfg: &WorldConfig, tect: &TectonicOutput) -> ErosionOutput {
     let land: Vec<usize> = (0..shape.n()).filter(|&k| !sea[k]).collect();
     report.mean_land_lowering_m =
         land.iter().map(|&k| fine.data()[k] - h[k]).sum::<f64>() / land.len().max(1) as f64;
-    let fine = PeriodicGrid::from_vec(shape.res, shape.res, shape.cell, h);
-    let routing = timed(&mut report, "routing", || {
-        route(fine.data(), &rain, shape, sea_min_area_m2)
+    let hy = timed(&mut report, "hydrography", || {
+        hydro::hydrography(&h, &rain, shape, sea_min_area_m2, &cfg.erosion)
     });
+    report.lakes = hy.lakes;
+    report.lake_area_km2 =
+        hy.lake_depth.iter().filter(|&&d| d > 0.0).count() as f64 * shape.cell * shape.cell / 1e6;
     let (res, cell) = (shape.res, shape.cell);
+    let f32_grid =
+        |v: &[f64]| PeriodicGrid::from_vec(res, res, cell, v.iter().map(|&x| x as f32).collect());
+    let routing = hy;
     ErosionOutput {
-        elevation: fine.map(|&v| v as f32),
+        elevation: f32_grid(&routing.elevation),
+        lake_depth: f32_grid(&routing.lake_depth),
+        river_order: PeriodicGrid::from_vec(res, res, cell, routing.river_order),
         precipitation,
         flow_direction: PeriodicGrid::from_vec(res, res, cell, routing.dir),
         flow_accumulation: PeriodicGrid::from_vec(
