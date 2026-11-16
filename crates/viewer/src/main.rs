@@ -55,6 +55,12 @@ struct Args {
     /// Fixed local solar hour for lighting (default: real time).
     #[arg(long)]
     hour: Option<f64>,
+    /// Day of the year (0..365) for the map date and the 3D sky (default: real time).
+    #[arg(long)]
+    day: Option<f64>,
+    /// Map mode: layer or climate map shown at start (e.g. `temperature`, `biome`).
+    #[arg(long)]
+    map_layer: Option<String>,
     /// Disable the horizon.
     #[arg(long)]
     no_horizon: bool,
@@ -168,6 +174,12 @@ fn run(mut args: Args) -> anyhow::Result<()> {
 
     let mut map = map::MapState::new(world, args.world.clone());
     map.center = (cam.pos.x, cam.pos.z);
+    if let Some(name) = &args.map_layer {
+        map.select(name);
+    }
+    if let Some(day) = args.day {
+        map.set_date(day, args.hour.unwrap_or(12.0));
+    }
 
     let mut window = Window {
         title: format!("Nascio viewer — {}", args.world.display()),

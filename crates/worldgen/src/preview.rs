@@ -116,42 +116,72 @@ pub fn colorize_climate(world: &World, name: &str, n: Option<f64>) -> Option<Vec
     let elev = world.layer("elevation_tectonic");
     let ground = |k: usize| elev.map_or(hex(SURFACE), |l| faded_elevation(l.data.get_f64(k)));
     let is_sea = |k: usize| elev.is_some_and(|l| l.data.get_f64(k) <= 0.0);
-    let v = |q: &str, k: usize| climate_value(world, q, k, n).unwrap_or(0.0);
+    let field = |q: &str| climate_field(world, q, n).unwrap_or_else(|| vec![0.0; size]);
     let colors = match name {
-        "temperature" => (0..size)
-            .map(|k| ramp(&TEMP_STOPS, v("temperature", k)))
+        "temperature" => field("temperature")
+            .iter()
+            .map(|&t| ramp(&TEMP_STOPS, t))
             .collect(),
-        "precipitation" => (0..size)
-            .map(|k| {
-                let c = ramp(&PRECIP_STOPS, v("precipitation", k));
-                if is_sea(k) {
-                    lerp_color(c, hex(SURFACE), 0.6)
-                } else {
-                    c
-                }
-            })
+        "precipitation" => {
+            let p = field("precipitation");
+            (0..size)
+                .map(|k| {
+                    let c = ramp(&PRECIP_STOPS, p[k]);
+                    if is_sea(k) {
+                        lerp_color(c, hex(SURFACE), 0.6)
+                    } else {
+                        c
+                    }
+                })
+                .collect()
+        }
+        "snow_fraction" => {
+            let s = field("snow_fraction");
+            (0..size)
+                .map(|k| lerp_color(ground(k), hex("#256abf"), s[k].clamp(0.0, 1.0)))
+                .collect()
+        }
+        "cloud_cover" => field("cloud_cover")
+            .iter()
+            .map(|&c| lerp_color(hex("#2a78d6"), hex("#f4f2ee"), c.clamp(0.0, 1.0)))
             .collect(),
-        "snow_fraction" => (0..size)
-            .map(|k| {
-                let s = v("snow_fraction", k).clamp(0.0, 1.0);
-                lerp_color(ground(k), hex("#256abf"), s)
-            })
-            .collect(),
-        "cloud_cover" => (0..size)
-            .map(|k| {
-                let c = v("cloud_cover", k).clamp(0.0, 1.0);
-                lerp_color(hex("#2a78d6"), hex("#f4f2ee"), c)
-            })
-            .collect(),
-        "wind" => (0..size)
-            .map(|k| {
-                let s = v("wind_u", k).hypot(v("wind_v", k));
-                lerp_color(ground(k), hex("#e87ba4"), (s / 10.0).min(1.0) * 0.6)
-            })
-            .collect(),
+        "wind" => {
+            let (u, v) = (field("wind_u"), field("wind_v"));
+            (0..size)
+                .map(|k| {
+                    let s = u[k].hypot(v[k]);
+                    lerp_color(ground(k), hex("#e87ba4"), (s / 10.0).min(1.0) * 0.6)
+                })
+                .collect()
+        }
         _ => return None,
     };
     Some(colors)
+}
+
+/// A harmonic quantity over its whole grid at day `n` (annual mean for `None`).
+pub fn climate_field(world: &World, name: &str, n: Option<f64>) -> Option<Vec<f64>> {
+    let get = |suffix: &str| world.layer(&format!("{name}_{suffix}"));
+    let x0 = get("x0")?;
+    let size = x0.width * x0.height;
+    let Some(n) = n else {
+        return Some((0..size).map(|k| x0.data.get_f64(k)).collect());
+    };
+    let (a1, p1, a2, p2) = (get("a1")?, get("p1")?, get("a2")?, get("p2")?);
+    Some(
+        (0..size)
+            .map(|k| {
+                nascio_core::climate::Harmonics {
+                    x0: x0.data.get_f64(k),
+                    a1: a1.data.get_f64(k),
+                    p1: p1.data.get_f64(k),
+                    a2: a2.data.get_f64(k),
+                    p2: p2.data.get_f64(k),
+                }
+                .eval(n)
+            })
+            .collect(),
+    )
 }
 
 /// Legend of a climate map.
