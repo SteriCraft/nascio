@@ -326,7 +326,8 @@ fn build_level(
             let wl = h.water(i, j);
             let color = if raw < wl {
                 let k = 1.15 - 0.75 * smoothstep(0.0, 400.0, f64::from(wl - raw)) as f32;
-                [water[0] * k, water[1] * k, water[2] * k, 1.0]
+                // Alpha < 1 tags water for the shader (the material is opaque).
+                [water[0] * k, water[1] * k, water[2] * k, 0.5]
             } else {
                 let rdx = f64::from(h.at(i + 1, j) - h.at(i - 1, j)) / (2.0 * s);
                 let rdz = f64::from(h.at(i, j + 1) - h.at(i, j - 1)) / (2.0 * s);
@@ -362,7 +363,10 @@ fn build_level(
                 (i, j - 1, a, b),
                 (i, j + 1, c, d),
             ] {
-                if emitted(ni, nj) {
+                // Water is flat: no crack to hide, and a skirt would show through the
+                // translucent chunk water next to the hole.
+                let wet = |e: u32| m.colors[e as usize][3] < 1.0;
+                if emitted(ni, nj) || (wet(e0) && wet(e1)) {
                     continue;
                 }
                 let base = m.positions.len() as u32;
@@ -372,7 +376,7 @@ fn build_level(
                     m.positions.push([p[0], p[1] - skirt, p[2]]);
                     m.normals.push(normals[e as usize]);
                     m.colors
-                        .push([col[0] * 0.7, col[1] * 0.7, col[2] * 0.7, 1.0]);
+                        .push([col[0] * 0.7, col[1] * 0.7, col[2] * 0.7, col[3]]);
                 }
                 m.indices
                     .extend_from_slice(&[e0, e1, base + 1, e0, base + 1, base]);
@@ -458,6 +462,8 @@ pub fn update_horizon(
                         // Lowered by the display curvature: the flat bounds are wrong, and the
                         // levels surround the camera anyway.
                         NoFrustumCulling,
+                        // Far beyond the shadow cascades; the chunks cast the near shadows.
+                        bevy::light::NotShadowCaster,
                     ))
                     .id();
                 h.entities[r.level] = Some(e);

@@ -11,6 +11,8 @@ mod fly;
 mod horizon;
 mod map;
 mod perf;
+mod sky;
+mod stars;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,6 +63,9 @@ struct Args {
     /// Map mode: layer or climate map shown at start (e.g. `temperature`, `biome`).
     #[arg(long)]
     map_layer: Option<String>,
+    /// Disable the sun shadows.
+    #[arg(long)]
+    no_shadows: bool,
     /// Disable the horizon.
     #[arg(long)]
     no_horizon: bool,
@@ -142,6 +147,16 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         render_cfg.curvature_radius_m = r;
     }
     let terrain = Arc::new(Terrain::from_world(&world, voxel_cfg)?);
+    // Cloud and snow harmonics for the 3D mode (the map keeps the world).
+    let climate_world = World {
+        config: world.config.clone(),
+        layers: world
+            .layers
+            .iter()
+            .filter(|l| l.name.starts_with("cloud_cover_") || l.name.starts_with("snow_fraction_"))
+            .cloned()
+            .collect(),
+    };
     let info = fly::WorldInfo {
         astro: world.config.astro,
         clock: world.config.clock,
@@ -165,8 +180,11 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     let settings = FlySettings {
         view_distance_m: args.view_distance.clamp(fly::VIEW_MIN, fly::VIEW_MAX),
         fixed_hour: args.hour,
+        fixed_day: args.day,
         horizon: !args.no_horizon,
         curvature_radius_m: render_cfg.radius(),
+        shadows: !args.no_shadows,
+        ..default()
     };
 
     let horizon_cfg = horizon::HorizonConfig::default();
@@ -207,6 +225,8 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     }))
     .add_plugins(EguiPlugin::default())
     .add_plugins(curvature::CurvaturePlugin)
+    .add_plugins(sky::SkyPlugin)
+    .insert_resource(ClimateSource(climate_world))
     .add_plugins(perf::PerfPlugin)
     .init_state::<Mode>()
     .insert_resource(map)
@@ -222,7 +242,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     .init_resource::<fly::UiCapture>()
     .init_resource::<fly::HudState>()
     .init_resource::<horizon::HorizonStats>()
-    .add_systems(Startup, setup)
+    .add_systems(Startup, (setup, sky::setup_sky))
     .add_systems(
         EguiPrimaryContextPass,
         (
@@ -240,7 +260,10 @@ fn run(mut args: Args) -> anyhow::Result<()> {
                 horizon::update_horizon,
                 fly::column_visibility,
                 fly::place_camera,
-                fly::update_sun,
+                sky::update_sky_state,
+                sky::update_light_and_fog,
+                sky::update_sky,
+                curvature::sync_curved,
                 update_fog,
             )
                 .chain()
@@ -276,12 +299,24 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Climate layers kept for the 3D sky until [`setup`] builds [`sky::ClimateMaps`].
+#[derive(Resource)]
+struct ClimateSource(World);
+
 fn setup(
     mut commands: Commands,
-    settings: Res<FlySettings>,
+    source: Res<ClimateSource>,
+    mut images: ResMut<Assets<Image>>,
+    mut buffers: ResMut<Assets<bevy::render::storage::ShaderBuffer>>,
     mut materials: ResMut<Assets<curvature::CurvedMaterial>>,
 ) {
-    let radius = settings.curvature_radius_m;
+    let maps = sky::ClimateMaps::new(&source.0, &mut images);
+    let climate = maps.texture.clone();
+    let frame = curvature::CurvedFrame::new(&mut buffers);
+    let frame_handle = frame.0.clone();
+    commands.insert_resource(frame);
+    commands.insert_resource(maps);
+    commands.remove_resource::<ClimateSource>();
     commands.spawn((
         Camera3d::default(),
         Projection::from(PerspectiveProjection {
@@ -303,8 +338,17 @@ fn setup(
     commands.spawn((
         DirectionalLight {
             illuminance: 10_000.0,
+            shadow_maps_enabled: true,
             ..default()
         },
+        bevy::light::CascadeShadowConfigBuilder {
+            num_cascades: 3,
+            minimum_distance: 0.1,
+            first_cascade_far_bound: 120.0,
+            maximum_distance: 1_200.0,
+            overlap_proportion: 0.2,
+        }
+        .build(),
         Transform::default(),
         fly::Sun,
     ));
@@ -315,7 +359,8 @@ fn setup(
             reflectance: 0.15,
             ..default()
         },
-        radius,
+        frame_handle.clone(),
+        climate.clone(),
     ));
     let water = materials.add(curvature::material(
         StandardMaterial {
@@ -325,7 +370,8 @@ fn setup(
             alpha_mode: AlphaMode::Blend,
             ..default()
         },
-        radius,
+        frame_handle.clone(),
+        climate.clone(),
     ));
     commands.insert_resource(fly::TerrainMaterials { opaque, water });
     let horizon = materials.add(curvature::material(
@@ -337,7 +383,8 @@ fn setup(
             cull_mode: None,
             ..default()
         },
-        radius,
+        frame_handle.clone(),
+        climate.clone(),
     ));
     commands.insert_resource(horizon::HorizonMaterial(horizon));
 }

@@ -643,7 +643,8 @@ pub fn run(cfg: &WorldConfig, elevation: &PeriodicGrid<f32>, is_sea: &[bool]) ->
                 .collect()
         })
         .collect();
-    let temp: Vec<Vec<f64>> = (0..n)
+    // (surface temperature, temperature of the land surface: no sea-ice floor, for the snow).
+    let temps: Vec<(Vec<f64>, Vec<f64>)> = (0..n)
         .into_par_iter()
         .map(|k| {
             let j = k / res;
@@ -654,16 +655,18 @@ pub fn run(cfg: &WorldConfig, elevation: &PeriodicGrid<f32>, is_sea: &[bool]) ->
             let teq: Vec<f64> = row_teq[j].iter().map(|&t| t + base).collect();
             let m = surf.maritime(k, c.coast_decay_m);
             let tau = tau_land + (tau_sea - tau_land) * m;
-            let mut t = relax(&teq, tau);
+            let land = relax(&teq, tau);
+            let mut t = land.clone();
             let sea = surf.sea[k];
             if sea > 0.0 {
                 for v in &mut t {
                     *v = sea * v.max(c.sea_ice_c) + (1.0 - sea) * *v;
                 }
             }
-            t
+            (t, land)
         })
         .collect();
+    let (temp, temp_land): (Vec<Vec<f64>>, Vec<Vec<f64>>) = temps.into_iter().unzip();
 
     // --- Winds, moisture, precipitation ---
     let mut wind_u = vec![vec![0.0; steps]; n];
@@ -746,8 +749,10 @@ pub fn run(cfg: &WorldConfig, elevation: &PeriodicGrid<f32>, is_sea: &[bool]) ->
                 .iter()
                 .map(|&p| (p / c.cloud_full_mm).clamp(c.cloud_min, 1.0).max(cmin))
                 .collect();
-            // Snowpack balance, repeated until one year matches the previous one.
-            let t = &temp[k];
+            // Snowpack balance, repeated until one year matches the previous one. Computed for
+            // a land surface everywhere, sea cells included: the renderer samples the cover
+            // bilinearly on coastal land and must not see the 160 m cells of the coastline.
+            let t = &temp_land[k];
             let mut swe = 0.0f64;
             let mut cover = vec![0.0; steps];
             for _year in 0..6 {
@@ -759,12 +764,8 @@ pub fn run(cfg: &WorldConfig, elevation: &PeriodicGrid<f32>, is_sea: &[bool]) ->
                     cover[step] = (swe / c.snow_full_mm).min(1.0);
                 }
             }
-            if surf.is_sea(k) {
-                cover.iter_mut().for_each(|v| *v = 0.0);
-            } else {
-                // Permanent snow in the polar band (§4.3).
-                cover.iter_mut().for_each(|v| *v = v.max(cmin));
-            }
+            // Permanent snow in the polar band (§4.3).
+            cover.iter_mut().for_each(|v| *v = v.max(cmin));
             let p_mean = precip[k].iter().sum::<f64>() / steps as f64;
             let land = 1.0 - surf.maritime(k, c.coast_decay_m);
             let humid = (p_mean / 2_000.0).clamp(0.0, 1.0);

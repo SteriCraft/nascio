@@ -298,6 +298,46 @@ fn graben(mask: &PeriodicGrid<bool>, fine_res: usize, cfg: &ErosionConfig) -> Ve
     out
 }
 
+/// Periodic domain warp of the tectonic sampling position (M4): the tectonic elevation is
+/// calibrated cell by cell, so its coastlines and steps follow the 160 m lattice and a plain
+/// bicubic keeps them as stairs. Shifting the sampling point by two periodic noises of about
+/// one cell turns the stairs into natural, wiggly outlines.
+struct Warp {
+    nx: [PeriodicNoise; 2],
+    nz: [PeriodicNoise; 2],
+    amplitude: f64,
+}
+
+impl Warp {
+    fn new(seed: u64, tectonic_cell: f64, cells: f64) -> Self {
+        let base = stage_u64(seed, "erosion/coast-warp");
+        let coarse = divisor_at_most(2.5 * tectonic_cell);
+        let fine = divisor_at_most(1.0 * tectonic_cell);
+        Self {
+            nx: [
+                PeriodicNoise::new(mix64(base), coarse),
+                PeriodicNoise::new(mix64(base ^ 1), fine),
+            ],
+            nz: [
+                PeriodicNoise::new(mix64(base ^ 2), coarse),
+                PeriodicNoise::new(mix64(base ^ 3), fine),
+            ],
+            amplitude: cells * tectonic_cell,
+        }
+    }
+
+    fn apply(&self, x: f64, z: f64) -> (f64, f64) {
+        if self.amplitude <= 0.0 {
+            return (x, z);
+        }
+        let n = |p: &[PeriodicNoise; 2]| p[0].sample(x, z) + 0.5 * p[1].sample(x, z);
+        (
+            x + self.amplitude * n(&self.nx),
+            z + self.amplitude * n(&self.nz),
+        )
+    }
+}
+
 /// Fine-grid elevation before erosion, in metres (f64 for the erosion arithmetic).
 pub fn upsample(cfg: &WorldConfig, tect: &TectonicOutput) -> PeriodicGrid<f64> {
     let e = &cfg.erosion;
@@ -309,12 +349,14 @@ pub fn upsample(cfg: &WorldConfig, tect: &TectonicOutput) -> PeriodicGrid<f64> {
     let graben = graben(&mask, res, e);
     let detail = Detail::new(cfg.seed, e);
     let min_spacing = baked_min_spacing(fc);
+    let warp = Warp::new(cfg.seed, base.cell_size(), e.coast_warp_cells);
     let mut data = vec![0f64; res * res];
     data.par_chunks_mut(res).enumerate().for_each(|(j, row)| {
         let z = (j as f64 + 0.5) * fc;
         for (i, o) in row.iter_mut().enumerate() {
             let x = (i as f64 + 0.5) * fc;
-            let b = base.sample_bicubic(x, z);
+            let (wx, wz) = warp.apply(x, z);
+            let b = base.sample_bicubic(wx, wz);
             let r = rug.sample_bilinear(x, z);
             let d = detail.value(x, z, b, r, min_spacing, f64::INFINITY);
             *o = b + d - f64::from(graben[j * res + i]);

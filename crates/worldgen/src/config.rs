@@ -8,7 +8,7 @@ use nascio_core::time::GameClock;
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a change alters generated output for a given config.
-pub const GENERATOR_VERSION: u32 = 5;
+pub const GENERATOR_VERSION: u32 = 6;
 
 /// Full-resolution cell size of the tectonic grid, in metres (spec §1.4).
 pub const TECTONIC_CELL_M: u32 = 160;

@@ -3,7 +3,10 @@
 //! camera. Physics and generation stay flat.
 //!
 //! - Chunks, water and horizon share one material extension whose vertex shader applies the
-//!   drop ([`Curvature`], `curvature.wesl`).
+//!   drop ([`Curvature`], `curvature.wesl`), measured from the camera position given in the
+//!   uniform; the prepass/shadow vertex shader (`curvature_prepass.wesl`) applies the same drop,
+//!   so shadows fall on the displayed geometry.
+//! - The same extension lights every pixel with its own sun (M4): see `curvature.wesl`.
 //! - Frustum culling still uses the flat bounds: chunk bounds are extended downwards by the
 //!   largest drop they can get ([`CHUNK_AABB_DROP`]), horizon levels are never culled.
 //! - A point at height `H` is visible from height `h` up to `√(2Rh) + √(2RH)` (tangent to the
@@ -11,11 +14,13 @@
 
 use std::f64::consts::TAU;
 
+use bevy::asset::RenderAssetUsages;
 use bevy::asset::embedded_asset;
 use bevy::camera::primitives::{Aabb, MeshAabb};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
+use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 use nascio_core::consts::WORLD_SIZE_F64;
 use serde::Deserialize;
@@ -34,6 +39,9 @@ const CHUNK_REACH_M: f64 = 1_200.0;
 pub const CHUNK_AABB_DROP: f32 = drop_at(RADIUS_MIN_M, CHUNK_REACH_M) as f32;
 
 const SHADER: &str = "embedded://nascio_viewer/curvature.wesl";
+const PREPASS_SHADER: &str = "embedded://nascio_viewer/curvature_prepass.wesl";
+/// Default display radius `R_vis`, m (decided after the author's trial, M4).
+pub const DEFAULT_RADIUS_M: f64 = 200_000.0;
 
 /// Rendering parameters of the viewer (`--render-config`, `[render]` section).
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -45,9 +53,8 @@ pub struct RenderConfig {
 
 impl Default for RenderConfig {
     fn default() -> Self {
-        // Provisional: to be fixed after the author's trial (docs/decisions.md).
         Self {
-            curvature_radius_m: REAL_RADIUS_M,
+            curvature_radius_m: DEFAULT_RADIUS_M,
         }
     }
 }
@@ -87,12 +94,51 @@ fn coefficient(radius: Option<f64>) -> f32 {
 
 pub type CurvedMaterial = ExtendedMaterial<StandardMaterial, Curvature>;
 
-/// Material extension lowering the vertices.
+/// Per-frame data of the curved materials (layout of `Curved` in the shaders). It lives in a
+/// shared storage buffer: rewriting it every frame leaves the materials untouched (changing a
+/// material re-prepares every chunk that uses it, which cost 8 ms per frame).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CurvedUniform {
+    /// x: `1 / (2 R)` (0 when flat); y, z, w: camera position in render space.
+    pub drop: Vec4,
+    /// x, y: camera world x and z (m, wrapped); z: hour angle at the camera; w: δ(N).
+    pub sun: Vec4,
+    /// `s_fade, s_dark, s_light, s_clear`, m.
+    pub seam: Vec4,
+    /// x: shadows on; y: direct light scale; z: sky light scale; w: night floor.
+    pub light: Vec4,
+}
+
+impl CurvedUniform {
+    fn floats(&self) -> Vec<f32> {
+        [self.drop, self.sun, self.seam, self.light]
+            .iter()
+            .flat_map(|v| v.to_array())
+            .collect()
+    }
+}
+
+/// The shared per-frame buffer of the curved materials.
+#[derive(Resource)]
+pub struct CurvedFrame(pub Handle<ShaderBuffer>);
+
+impl CurvedFrame {
+    pub fn new(buffers: &mut Assets<ShaderBuffer>) -> Self {
+        let data = CurvedUniform::default().floats();
+        Self(buffers.add(ShaderBuffer::new(data, RenderAssetUsages::default())))
+    }
+}
+
+/// Material extension: display curvature and per-pixel sun.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 pub struct Curvature {
-    /// x: `1 / (2 R)` (0 when flat).
-    #[uniform(100)]
-    pub params: Vec4,
+    /// [`CurvedUniform`], shared by every curved material.
+    #[storage(100, read_only)]
+    pub frame: Handle<ShaderBuffer>,
+    /// Weather clouds (red) and snow cover (green) over the whole world.
+    #[texture(101)]
+    #[sampler(102)]
+    pub climate: Handle<Image>,
 }
 
 impl MaterialExtension for Curvature {
@@ -100,24 +146,32 @@ impl MaterialExtension for Curvature {
         SHADER.into()
     }
 
-    // The prepass and shadow passes would use the flat default vertex shader: off (neither is
-    // used by the viewer today).
+    fn fragment_shader() -> ShaderRef {
+        SHADER.into()
+    }
+
+    fn prepass_vertex_shader() -> ShaderRef {
+        PREPASS_SHADER.into()
+    }
+
     fn enable_prepass() -> bool {
-        false
+        true
     }
 
     fn enable_shadows() -> bool {
-        false
+        true
     }
 }
 
-/// A curved material for `base`, with the current radius.
-pub fn material(base: StandardMaterial, radius: Option<f64>) -> CurvedMaterial {
+/// A curved material for `base`, reading `frame` and sampling `climate`.
+pub fn material(
+    base: StandardMaterial,
+    frame: Handle<ShaderBuffer>,
+    climate: Handle<Image>,
+) -> CurvedMaterial {
     CurvedMaterial {
         base,
-        extension: Curvature {
-            params: Vec4::new(coefficient(radius), 0.0, 0.0, 0.0),
-        },
+        extension: Curvature { frame, climate },
     }
 }
 
@@ -133,26 +187,54 @@ pub struct CurvaturePlugin;
 impl Plugin for CurvaturePlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "curvature.wesl");
-        app.add_plugins(MaterialPlugin::<CurvedMaterial>::default())
-            .add_systems(Update, sync_curvature);
+        embedded_asset!(app, "curvature_prepass.wesl");
+        app.add_plugins(MaterialPlugin::<CurvedMaterial>::default());
     }
 }
 
-/// Pushes the radius chosen in the UI to every curved material.
-fn sync_curvature(
+/// Pushes the radius, the camera and the sky to the curved materials' buffer, once per frame.
+pub fn sync_curved(
     settings: Res<FlySettings>,
-    mut last: Local<Option<f32>>,
-    mut materials: ResMut<Assets<CurvedMaterial>>,
+    cam: Res<crate::fly::FlyCam>,
+    camera: Query<&Transform, With<crate::fly::FlyCamera>>,
+    sky: Res<crate::sky::SkyState>,
+    info: Res<crate::fly::WorldInfo>,
+    frame: Res<CurvedFrame>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
 ) {
-    let k = coefficient(settings.curvature_radius_m);
-    if *last == Some(k) {
+    let Ok(t) = camera.single() else {
         return;
-    }
-    *last = Some(k);
-    for (_, m) in materials.iter_mut() {
-        if m.extension.params.x != k {
-            m.extension.params.x = k;
-        }
+    };
+    let a = info.astro;
+    let u = CurvedUniform {
+        drop: Vec4::new(
+            coefficient(settings.curvature_radius_m),
+            t.translation.x,
+            t.translation.y,
+            t.translation.z,
+        ),
+        sun: Vec4::new(
+            nascio_core::torus::wrap_f64(cam.pos.x) as f32,
+            nascio_core::torus::wrap_f64(cam.pos.z) as f32,
+            sky.hour_angle as f32,
+            sky.declination as f32,
+        ),
+        seam: Vec4::new(
+            a.s_fade as f32,
+            a.s_dark as f32,
+            a.s_light as f32,
+            a.s_clear as f32,
+        ),
+        light: Vec4::new(
+            if settings.shadows { 1.0 } else { 0.0 },
+            1.0,
+            0.45,
+            // Dev viewer: a night floor keeps the relief readable.
+            if settings.night_floor { 1.0 } else { 0.0 },
+        ),
+    };
+    if let Some(mut b) = buffers.get_mut(&frame.0) {
+        *b = ShaderBuffer::new(u.floats(), RenderAssetUsages::default());
     }
 }
 
@@ -189,6 +271,6 @@ mod tests {
         let c = RenderConfig::from_toml("[render]\ncurvature_radius_m = 0.0\n").unwrap();
         assert_eq!(c.radius(), None);
         let c = RenderConfig::from_toml("").unwrap();
-        assert_eq!(c.radius(), Some(REAL_RADIUS_M));
+        assert_eq!(c.radius(), Some(DEFAULT_RADIUS_M));
     }
 }

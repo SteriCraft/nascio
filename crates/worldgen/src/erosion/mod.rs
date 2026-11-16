@@ -60,6 +60,9 @@ pub struct ErosionConfig {
     /// Rift holes (inland water) up to this distance apart along a plate boundary are joined
     /// by a continuous graben.
     pub rift_link_m: f64,
+    /// Domain warp of the tectonic elevation when upsampling, in tectonic cells (breaks the
+    /// 160 m stairs of the coastlines; 0 disables it).
+    pub coast_warp_cells: f64,
 
     // --- Provisional precipitation (the climate of M4 replaces it) ---
     /// Zonal profile `[|latitude| in degrees, mm/yr]`, ascending latitudes.
@@ -139,6 +142,7 @@ impl Default for ErosionConfig {
             rift_depth_m: 250.0,
             rift_width_m: 1_200.0,
             rift_link_m: 8_000.0,
+            coast_warp_cells: 0.8,
             zonal_precip: vec![
                 [0.0, 2_200.0],
                 [8.0, 2_000.0],

@@ -10,7 +10,7 @@
 //! dedicated rayon pool, nearest first, then turned into Bevy meshes on the main thread.
 
 use std::collections::HashMap;
-use std::f64::consts::{FRAC_PI_2, PI, TAU};
+use std::f64::consts::{FRAC_PI_2, TAU};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
@@ -18,7 +18,6 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoAutoAabb;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
@@ -51,6 +50,12 @@ pub struct FlySettings {
     pub view_distance_m: f32,
     /// Local solar hour forced for lighting; `None` follows real time (spec §2.3).
     pub fixed_hour: Option<f64>,
+    /// Day of the year forced for the sky and the seasons; `None` follows real time.
+    pub fixed_day: Option<f64>,
+    /// Sun shadows near the camera.
+    pub shadows: bool,
+    /// Dim night light so the relief stays readable (dev viewer).
+    pub night_floor: bool,
     pub horizon: bool,
     /// Display curvature radius `R_vis`, m (`None`: flat). Render only.
     pub curvature_radius_m: Option<f64>,
@@ -61,6 +66,9 @@ impl Default for FlySettings {
         Self {
             view_distance_m: 512.0,
             fixed_hour: None,
+            fixed_day: None,
+            shadows: true,
+            night_floor: true,
             horizon: true,
             curvature_radius_m: crate::curvature::RenderConfig::default().radius(),
         }
@@ -324,7 +332,10 @@ pub fn stream_chunks(
             };
             let t = Transform::from_translation(origin.translation(anchor.x, anchor.y, anchor.z));
             quads += m.opaque.quad_count() + m.water.quad_count();
-            for (data, material) in [(m.opaque, &materials.opaque), (m.water, &materials.water)] {
+            for (data, material, water) in [
+                (m.opaque, &materials.opaque, false),
+                (m.water, &materials.water, true),
+            ] {
                 if data.is_empty() {
                     continue;
                 }
@@ -332,19 +343,19 @@ pub fn stream_chunks(
                 // Bounds deep enough for the display curvature (no recomputation by Bevy).
                 let aabb = curvature::chunk_aabb(&mesh).unwrap_or_default();
                 let h = meshes.add(mesh);
-                entities.push(
-                    commands
-                        .spawn((
-                            Mesh3d(h),
-                            MeshMaterial3d(material.clone()),
-                            t,
-                            anchor,
-                            aabb,
-                            NoAutoAabb,
-                            Visibility::Hidden,
-                        ))
-                        .id(),
-                );
+                let mut e = commands.spawn((
+                    Mesh3d(h),
+                    MeshMaterial3d(material.clone()),
+                    t,
+                    anchor,
+                    aabb,
+                    NoAutoAabb,
+                    Visibility::Hidden,
+                ));
+                if water {
+                    e.insert(bevy::light::NotShadowCaster);
+                }
+                entities.push(e.id());
             }
         }
         s.quads += quads;
@@ -580,39 +591,6 @@ pub fn place_camera(
 // ---------------------------------------------------------------------------------------------
 // Lighting
 
-/// Sun direction from the astronomy of §2.4 at the camera, sky and fog colours.
-pub fn update_sun(
-    info: Res<WorldInfo>,
-    settings: Res<FlySettings>,
-    cam: Res<FlyCam>,
-    mut sun: Query<(&mut Transform, &mut DirectionalLight), With<Sun>>,
-    mut fog: Query<&mut DistanceFog>,
-    mut clear: ResMut<ClearColor>,
-    mut ambient: ResMut<GlobalAmbientLight>,
-) {
-    let now = info.clock.now();
-    let n = now.day_of_year();
-    let h = match settings.fixed_hour {
-        Some(hour) => TAU * (hour / 24.0) - PI,
-        None => now.hour_angle(cam.pos.x),
-    };
-    let p = info.astro.sun_at(n, h, cam.pos.z);
-    let d = p.direction();
-    let dir = Vec3::new(d[0] as f32, d[1] as f32, d[2] as f32);
-    let day = (p.visible_elevation.to_degrees() / 6.0 + 0.5).clamp(0.0, 1.0) as f32;
-    if let Ok((mut t, mut light)) = sun.single_mut() {
-        *t = Transform::default().looking_to(-dir, Vec3::Y);
-        light.illuminance = 12_000.0 * day;
-    }
-    // Dev viewer: night keeps a twilight floor so the relief stays readable.
-    let sky = Color::srgb(0.16 + 0.29 * day, 0.22 + 0.42 * day, 0.36 + 0.54 * day);
-    clear.0 = sky;
-    ambient.brightness = 650.0 + 250.0 * day;
-    if let Ok(mut f) = fog.single_mut() {
-        f.color = sky;
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // HUD
 
@@ -644,6 +622,7 @@ pub fn hud(
     stats: Res<FrameStats>,
     terrain: Res<SharedTerrain>,
     info: Res<WorldInfo>,
+    sky: Res<crate::sky::SkyState>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     let p = cam.pos;
@@ -741,6 +720,32 @@ pub fn hud(
                 }
                 settings.fixed_hour = fixed.then_some(hour);
             });
+            let mut fixed_day = settings.fixed_day.is_some();
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut fixed_day, "fixed day");
+                let mut day = settings.fixed_day.unwrap_or(172.0);
+                if fixed_day {
+                    ui.add(egui::Slider::new(&mut day, 0.0..=364.0));
+                }
+                settings.fixed_day = fixed_day.then_some(day);
+            });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut settings.shadows, "shadows");
+                ui.checkbox(&mut settings.night_floor, "night floor");
+            });
+            if let Some(p) = sky.sun {
+                ui.monospace(format!(
+                    "day {:6.2}  sun e {:+5.1}  e_vis {:+5.1} deg",
+                    sky.day,
+                    p.elevation.to_degrees(),
+                    p.visible_elevation.to_degrees()
+                ));
+            }
+            ui.monospace(format!(
+                "clouds {:3.0} %  moon {:3.0} % lit",
+                100.0 * sky.cloud,
+                100.0 * sky.moon_lit
+            ));
             ui.horizontal(|ui| {
                 ui.label("x");
                 ui.add(egui::TextEdit::singleline(&mut hud.teleport.0).desired_width(60.0));

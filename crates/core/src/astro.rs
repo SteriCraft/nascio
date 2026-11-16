@@ -17,8 +17,15 @@ use crate::time::GameTime;
 
 /// Margin by which the sun is kept below the horizon in the seam band: 4°.
 pub const SEAM_SUN_MARGIN_DEG: f64 = 4.0;
-/// Direct light fades in between `e_vis = 0°` and this elevation.
-pub const LIGHT_FADE_DEG: f64 = 3.0;
+/// Direct light fades in between `e_vis = 0°` and this elevation (widened from 3° in M4).
+pub const LIGHT_FADE_DEG: f64 = 10.0;
+/// Diffuse sky light fades in from this visible elevation (end of civil twilight) up to
+/// [`LIGHT_FADE_DEG`].
+pub const SKY_LIGHT_LOW_DEG: f64 = -6.0;
+/// Length of a lunation, game days (§2.8).
+pub const LUNATION_DAYS: f64 = 29.53;
+/// Inclination of the Moon's orbit on the ecliptic (§2.8).
+pub const MOON_INCLINATION_DEG: f64 = 5.14;
 
 /// Obliquity ε in radians.
 #[inline]
@@ -43,6 +50,8 @@ pub struct AstroConfig {
     pub s_aurora: f64,
     /// Outer edge of the aurora ring (§2.7).
     pub s_aurora_out: f64,
+    /// Elongation of the Moon from the sun at `GAME_EPOCH`, degrees (0 = new Moon) (§2.8, λ0).
+    pub moon_phase_at_epoch_deg: f64,
 }
 
 impl Default for AstroConfig {
@@ -54,6 +63,7 @@ impl Default for AstroConfig {
             s_clear: 3_000.0,
             s_aurora: 3_500.0,
             s_aurora_out: 5_000.0,
+            moon_phase_at_epoch_deg: 0.0,
         }
     }
 }
@@ -250,10 +260,71 @@ pub fn direction(elevation: f64, azimuth: f64) -> [f64; 3] {
     [c * azimuth.sin(), elevation.sin(), -c * azimuth.cos()]
 }
 
-/// Directional light intensity: 0 for `e_vis ≤ 0`, smooth fade up to 1 at +3°.
+/// Directional light intensity: 0 for `e_vis ≤ 0` (so none in the seam band, where
+/// `e_vis ≤ −4°`), smooth fade up to 1 at +10°.
 #[inline]
 pub fn light_intensity(visible_elevation: f64) -> f64 {
     smoothstep(0.0, LIGHT_FADE_DEG.to_radians(), visible_elevation)
+}
+
+/// Diffuse sky light in `[0, 1]`: 0 below −6° (night), 1 above +10°, continuous in `e_vis`.
+#[inline]
+pub fn sky_light(visible_elevation: f64) -> f64 {
+    smoothstep(
+        SKY_LIGHT_LOW_DEG.to_radians(),
+        LIGHT_FADE_DEG.to_radians(),
+        visible_elevation,
+    )
+}
+
+/// Ecliptic longitude of the sun `λ_☉ = 2π(N + 10)/365 − π/2` (§2.8): `δ = ε·sin λ_☉`.
+#[inline]
+pub fn sun_ecliptic_longitude(n: f64) -> f64 {
+    TAU * (n + 10.0) / DAYS_PER_YEAR as f64 - FRAC_PI_2
+}
+
+/// Local sidereal angle `H★ = H + λ_☉` (§2.8), with `H` the sun's local hour angle.
+#[inline]
+pub fn sidereal_angle(hour_angle: f64, n: f64) -> f64 {
+    hour_angle + sun_ecliptic_longitude(n)
+}
+
+/// Ecliptic (λ, β) → equatorial (right ascension α, declination δ), radians.
+pub fn ecliptic_to_equatorial(lambda: f64, beta: f64) -> (f64, f64) {
+    let e = obliquity();
+    let dec = (beta.sin() * e.cos() + beta.cos() * e.sin() * lambda.sin())
+        .clamp(-1.0, 1.0)
+        .asin();
+    let ra = (lambda.sin() * e.cos() - beta.tan() * e.sin())
+        .atan2(lambda.cos())
+        .rem_euclid(TAU);
+    (ra, dec)
+}
+
+/// Local direction (world axes) of a sky object at (α, δ), for latitude φ and local sidereal
+/// angle `H★`: its hour angle is `H★ − α`.
+pub fn equatorial_direction(phi: f64, sidereal: f64, ra: f64, dec: f64) -> [f64; 3] {
+    let h = sidereal - ra;
+    direction(elevation(phi, dec, h), azimuth(phi, dec, h))
+}
+
+/// Illuminated fraction of the Moon for an elongation ψ from the sun: `(1 − cos ψ)/2`.
+#[inline]
+pub fn moon_illumination(elongation: f64) -> f64 {
+    0.5 * (1.0 - elongation.cos())
+}
+
+impl AstroConfig {
+    /// Moon in equatorial coordinates (α, δ) at `t_days = day_index + day_frac` (continuous day
+    /// count since the epoch), `n` the day of year (§2.8): `λ_☾ = λ_☉ + 2π·t/29.53 + λ0`,
+    /// `β = 5.14°·sin λ_☾` (fixed nodes).
+    pub fn moon_equatorial(&self, t_days: f64, n: f64) -> (f64, f64) {
+        let lambda = sun_ecliptic_longitude(n)
+            + TAU * t_days / LUNATION_DAYS
+            + self.moon_phase_at_epoch_deg.to_radians();
+        let beta = MOON_INCLINATION_DEG.to_radians() * lambda.sin();
+        ecliptic_to_equatorial(lambda, beta)
+    }
 }
 
 /// Daily mean top-of-atmosphere insolation (W/m²) at latitude φ and declination δ:
@@ -495,7 +566,55 @@ mod tests {
     fn light_intensity_fade() {
         assert_eq!(light_intensity(0.0), 0.0);
         assert_eq!(light_intensity(-0.1), 0.0);
-        assert_eq!(light_intensity(3f64.to_radians()), 1.0);
+        assert_eq!(light_intensity(10f64.to_radians()), 1.0);
+        assert!(light_intensity(3f64.to_radians()) < 0.5);
+        // Sky light: from −6° (end of civil twilight) to +10°, continuous.
+        assert_eq!(sky_light((-6f64).to_radians()), 0.0);
+        assert_eq!(sky_light(10f64.to_radians()), 1.0);
+        assert!(sky_light(0.0) > 0.0 && sky_light(0.0) < 1.0);
+        // In the seam band (e_vis ≤ −4°): no direct light, a faint twilight at most.
+        assert_eq!(light_intensity((-4f64).to_radians()), 0.0);
+        assert!(sky_light((-4f64).to_radians()) < 0.05);
+    }
+
+    #[test]
+    fn sun_through_the_equatorial_frame() {
+        // The sun placed at (α, δ) from its ecliptic longitude matches §2.4 within the neglected
+        // equation of time (≤ 2.5°).
+        let c = cfg();
+        for &(n, h, z) in &[
+            (81.25, 0.3, 30_000.0),
+            (172.5, -1.0, 70_000.0),
+            (300.0, 2.0, 45_000.0),
+        ] {
+            let sun = c.sun_at(n, h, z);
+            let (ra, dec) = ecliptic_to_equatorial(sun_ecliptic_longitude(n), 0.0);
+            // §2.4 uses δ = ε·sin λ_☉, the exact conversion asin(sin ε·sin λ_☉): < 0.3° apart.
+            assert!((dec - declination(n)).abs() < 0.3f64.to_radians());
+            let d = equatorial_direction(latitude(z), sidereal_angle(h, n), ra, dec);
+            let s = direction(sun.elevation, sun.azimuth);
+            let cos = d[0] * s[0] + d[1] * s[1] + d[2] * s[2];
+            assert!(cos.clamp(-1.0, 1.0).acos().to_degrees() < 2.6, "n={n}");
+        }
+    }
+
+    #[test]
+    fn moon_phases() {
+        let c = cfg();
+        let elong = |t: f64| {
+            let n = t.rem_euclid(365.0);
+            let (ra, dec) = c.moon_equatorial(t, n);
+            let (rs, ds) = ecliptic_to_equatorial(sun_ecliptic_longitude(n), 0.0);
+            let a = [dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin()];
+            let b = [ds.cos() * rs.cos(), ds.cos() * rs.sin(), ds.sin()];
+            (a[0] * b[0] + a[1] * b[1] + a[2] * b[2])
+                .clamp(-1.0, 1.0)
+                .acos()
+        };
+        // New Moon at the epoch, full half a lunation later (within the 5.14° inclination).
+        assert!(moon_illumination(elong(0.0)) < 0.01);
+        assert!(moon_illumination(elong(LUNATION_DAYS / 2.0)) > 0.99);
+        assert!(moon_illumination(elong(LUNATION_DAYS)) < 0.01);
     }
 
     #[test]

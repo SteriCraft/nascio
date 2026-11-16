@@ -75,8 +75,9 @@ La **direction** du soleil ne peut pas être continue à travers la couture. Au 
   - pour `s ≥ S_LIGHT`, `e_vis = e` ;
   - `e_vis` est continue en s et en t.
 - Éclairage :
-  - l'intensité de la lumière directionnelle est une fonction continue de `e_vis`, nulle pour `e_vis ≤ 0` (fondu entre 0 et +3°). **Elle est donc nulle dans la bande : aucune ombre** ;
-  - la couleur du ciel et la lumière ambiante sont des fonctions continues de `e_vis` (crépuscule civil, nautique, nuit) ;
+  - l'intensité de la lumière directionnelle est une fonction continue de `e_vis`, nulle pour `e_vis ≤ 0` (fondu entre 0 et +10°). **Elle est donc nulle dans la bande : aucune ombre** ;
+  - la couleur du ciel et la lumière ambiante sont des fonctions continues de `e_vis` (crépuscule civil, nautique, nuit) ; la lumière du ciel monte de −6° à +10° ;
+  - la hauteur du soleil est calculée **par pixel** (position du fragment), et non une fois pour toute la scène à la caméra ;
   - les aurores ne sont plus calculées ici : voir §2.7.
 - Le **climat** utilise `e` et `δ_eff` (insolation physique), pas `e_vis`. Près de la couture, l'insolation tend de toute façon vers 0.
 
@@ -240,7 +241,7 @@ La version du générateur est incrémentée à chaque changement qui modifie le
 - Chargement des chunks autour de la caméra par génération asynchrone, maillage glouton (*greedy meshing*), couleurs par bloc (les textures viendront plus tard). Distance de vue réglable, 512 m par défaut.
 - **Horizon** : au-delà des chunks, un maillage de hauteurs en anneaux emboîtés dont la résolution diminue de moitié à chaque anneau, sur plusieurs dizaines de km. La portée reste sous 50 km, pour ne jamais revoir le même relief par l'autre côté du tore. Les hauteurs viennent de la même fonction de surface que les chunks, avec des jupes entre niveaux. Aucune couture visible, ni avec les chunks ni à la couture du tore.
 - Rendu relatif à la caméra. Traverser la couture ne doit produire aucun artefact.
-- **Courbure d'affichage** (rendu uniquement ; la physique et la génération restent planes) : le shader de sommets des chunks, de l'eau et de l'horizon abaisse chaque sommet de `d² / (2·R_vis)`, où `d` est la distance horizontale à la caméra. `R_vis` *(config `[render] curvature_radius_m`, curseur du panneau 3D ; 0 = plat)* ; le rayon réel, de même circonférence que le tore, vaut `100 km / 2π ≈ 15 915 m`. Les boîtes englobantes des chunks sont prolongées vers le bas de la chute maximale, l'horizon n'est pas soumis au frustum culling. Un point d'altitude `H` est visible depuis l'altitude `h` jusqu'à `√(2·R_vis·h) + √(2·R_vis·H)` : l'horizon ne dessine que les niveaux en deçà, avec `H` le plus haut sommet de l'horizon affiché.
+- **Courbure d'affichage** (rendu uniquement ; la physique et la génération restent planes) : le shader de sommets des chunks, de l'eau et de l'horizon abaisse chaque sommet de `d² / (2·R_vis)`, où `d` est la distance horizontale à la caméra. `R_vis` *(config `[render] curvature_radius_m`, 200 km par défaut, curseur du panneau 3D ; 0 = plat)* ; le rayon réel, de même circonférence que le tore, vaut `100 km / 2π ≈ 15 915 m`. Les boîtes englobantes des chunks sont prolongées vers le bas de la chute maximale, l'horizon n'est pas soumis au frustum culling. Un point d'altitude `H` est visible depuis l'altitude `h` jusqu'à `√(2·R_vis·h) + √(2·R_vis·H)` : l'horizon ne dessine que les niveaux en deçà, avec `H` le plus haut sommet de l'horizon affiché.
 - Soleil, ciel, couvert polaire, aurores, Lune et étoiles selon les §2.5 à §2.8. Le temps est contrôlable : temps réel, accéléré, ou figé sur une date et une heure.
 - Interface affichée : position, φ, λ, s, heure solaire locale, date du jeu, biome, roche sous le curseur.
 - Compteur à l'écran des temps CPU et GPU par image ; mode benchmark (trajet de caméra scripté, sortie en ms par image).
