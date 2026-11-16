@@ -218,7 +218,7 @@ Sorties : `geo_context` (contexte dominant), `sediment_thickness` (m), `weatheri
    - ophiolites : basalte, gabbro et péridotite ;
    - rifts : coulées de basalte sur le socle.
 5. **Croûte inférieure** (dernier tiers environ avant le Moho) : granulite ou gabbro ;
-6. **Moho**, à profondeur variable (§3, tectonique), puis **magme**, infini et mortel.
+6. **Moho**, à profondeur variable (§3, tectonique), puis **magme**, infini et mortel. Les chunks lissent la profondeur du Moho de la grille tectonique (trois flous de 2 cellules, environ 1 km) : le passage d'une cellule océanique à une cellule continentale ne fait ni marche verticale de 3 km ni aiguille de magme sous une enclave océanique isolée.
 
 Les limites entre contextes sont déformées par un bruit périodique : elles ne suivent pas les cellules de 160 m.
 
@@ -260,7 +260,9 @@ Placement : le monde est découpé en **tuiles de 2 km** (2 km divise 100 km). C
 - Les tailles restent à l'échelle du jeu (non divisées par 10).
 - Rareté visée : environ 0,1 % du volume de roche des 500 premiers mètres sous un continent. Les métaux précieux sont environ dix fois plus rares que le fer, le charbon ou le sel.
 
-Sorties : `deposits.bin` (les corps), couches `deposits` (gisement dominant) et `hydrocarbons` (provinces et pièges).
+Sorties : `deposits.bin` (les corps), couches `deposits` (gisement dominant) et `traps` (provinces et pièges des types « carte seulement », pétrole et gaz pour l'instant).
+
+Le contexte dominant (`geo_context`) suit l'ordre ophiolite, point chaud, **orogène, puis arc** (un arc pris dans une collision est un orogène), rift, puis les contextes océaniques ou continentaux. Les abondances du catalogue sont calées sur la mesure : 0,11 % de blocs de minerai dans les 500 premiers mètres sous les continents de la graine 42.
 
 Première liste (à affiner avec le gameplay) :
 
@@ -312,8 +314,8 @@ Pendant la génération, une **fenêtre de progression** (visualiseur, `--genera
 - Graticule de latitude et de longitude : les lignes de latitude sont espacées selon `sin φ`.
 - Curseurs de jour de l'année et d'heure, avec superposition **jour/nuit** calculée par pixel à partir de `e_vis`, et couches climatiques évaluées à cet instant.
 - Infobulle sous le curseur : x, z, φ, λ et les valeurs des couches.
-- **Coupe verticale** : un trait tracé sur la carte (clic droit, glisser) ouvre une coupe 2D du sous-sol le long de ce trait. Elle montre les roches de la colonne, le Moho, les isothermes du sous-sol et les gisements. La CLI exporte la même coupe en PNG (`nascio-worldgen section`).
-- Couches `deposits` (gisement dominant, avec sa légende) et `hydrocarbons`.
+- **Coupe verticale** : un trait tracé sur la carte (clic droit, glisser) ouvre une coupe 2D du sous-sol le long de ce trait. Elle montre les roches de la colonne, le Moho, les isothermes du sous-sol et les gisements. L'outil `geology` du crate voxel exporte la même coupe en PNG (`cargo run -p nascio-voxel --release --bin geology -- section <monde> --from x,z --to x,z --out f.png`) ; il mesure aussi les parts de roches et de minerais (`stats`) et trace les courbes de température du sous-sol (`geotherm`).
+- Couches `geo_context`, `sediment_thickness`, `weathering_depth`, `laterite`, `placer_source`, `deposits` (gisement dominant) et `traps`, avec leurs légendes (celles des gisements viennent du catalogue copié dans le monde).
 - Un clic choisit le **point d'apparition** (cellule surlignée) ; un bouton ou un double clic y passe en 3D.
 
 **Mode 3D (vol libre)**
@@ -323,6 +325,6 @@ Pendant la génération, une **fenêtre de progression** (visualiseur, `--genera
 - Rendu relatif à la caméra. Traverser la couture ne doit produire aucun artefact.
 - **Courbure d'affichage** (rendu uniquement ; la physique et la génération restent planes) : le shader de sommets des chunks, de l'eau et de l'horizon abaisse chaque sommet de `d² / (2·R_vis)`, où `d` est la distance horizontale à la caméra. `R_vis` *(config `[render] curvature_radius_m`, 200 km par défaut, curseur du panneau 3D ; 0 = plat)* ; le rayon réel, de même circonférence que le tore, vaut `100 km / 2π ≈ 15 915 m`. Les boîtes englobantes des chunks sont prolongées vers le bas de la chute maximale, l'horizon n'est pas soumis au frustum culling. Un point d'altitude `H` est visible depuis l'altitude `h` jusqu'à `√(2·R_vis·h) + √(2·R_vis·H)` : l'horizon ne dessine que les niveaux en deçà, avec `H` le plus haut sommet de l'horizon affiché.
 - Soleil, ciel, couvert polaire, aurores, Lune et étoiles selon les §2.5 à §2.8. Le temps est contrôlable : temps réel, accéléré, ou figé sur une date et une heure.
-- Interface affichée : position, φ, λ, s, heure solaire locale, date du jeu, biome, roche sous le curseur. Champ de vision vertical de 42°. **Minimap** en bas à droite (position et cap, monde entier ou 20 km). État de la vsync et case pour la couper (Carte et 3D). Curseur de magnitude limite des étoiles (BSC5 jusqu'à la limite absolue de 6,5, 5 par défaut). Horloge en haut à droite : heure solaire locale et heure de l'origine (λ = 0), puis la température, l'humidité relative et la pression de l'air à la caméra (§4.3).
+- Interface affichée : position, φ, λ, s, heure solaire locale, date du jeu, biome, roche sous le curseur. Champ de vision vertical de 42°. **Minimap** en bas à droite (position et cap, monde entier ou 20 km). État de la vsync et case pour la couper (Carte et 3D). Curseur de magnitude limite des étoiles (BSC5 jusqu'à la limite absolue de 6,5, 5 par défaut). Horloge en haut à droite : heure solaire locale et heure de l'origine (λ = 0), puis la température, l'humidité relative et la pression de l'air à la caméra (§4.3). **Sous terre**, ces trois valeurs sont remplacées par la profondeur, la roche et sa température (§4.6), avec une alerte dans le magma.
 - Compteur à l'écran des temps CPU et GPU par image ; mode benchmark (trajet de caméra scripté, sortie en ms par image).
 - **Cible** : 60 i/s en 1080p, réglages maximum, sur un portable Linux (Ryzen 5 5600H, RTX 3050 Mobile).
