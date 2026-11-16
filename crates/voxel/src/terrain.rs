@@ -15,6 +15,9 @@ use nascio_worldgen::erosion::ErosionConfig;
 use nascio_worldgen::erosion::upsample::{Detail, baked_min_spacing, ruggedness};
 use nascio_worldgen::grid::PeriodicGrid;
 use nascio_worldgen::world_io::{Layer, World};
+
+use crate::block::{BlockId, Blocks};
+use crate::geology::{Class, ColumnGeo, Geology};
 use serde::{Deserialize, Serialize};
 
 /// Tunable parameters of chunk generation (`[voxel]` in TOML). The relief itself (detail noise
@@ -31,8 +34,12 @@ pub struct VoxelConfig {
     /// Surfaces between these heights are beaches (sand).
     pub beach_low_m: i32,
     pub beach_high_m: i32,
-    /// Sand thickness on beaches and the sea floor.
+    /// Sand thickness on beaches, shallow sea floors and hot deserts.
     pub sand_depth_m: i32,
+    /// Sea floors deeper than this have no sand (bare sediment), m.
+    pub shelf_sand_m: i32,
+    /// Gravel thickness on river beds.
+    pub gravel_depth_m: i32,
     /// Chunks generated below the lowest surface of a column.
     pub underground_chunks: i32,
     /// The crust keeps at least this thickness of stone above the magma, m.
@@ -48,6 +55,8 @@ impl Default for VoxelConfig {
             beach_low_m: -4,
             beach_high_m: 0,
             sand_depth_m: 3,
+            shelf_sand_m: -40,
+            gravel_depth_m: 2,
             underground_chunks: 2,
             min_crust_m: 50,
         }
@@ -80,6 +89,44 @@ pub struct Terrain {
     /// Depth of the Moho below sea level (m, positive downwards), per tectonic cell; `None`:
     /// no magma.
     moho: Option<PeriodicGrid<f32>>,
+    /// Block registry of the world.
+    blocks: Blocks,
+    /// Rock column and ore bodies (`None`: worlds made before M5, granite down to the Moho).
+    geology: Option<Geology>,
+}
+
+/// Radius (cells) of the box blur applied three times to the Moho: the tectonic grid changes
+/// crust type from one 160 m cell to the next, which would make vertical steps of up to 3 km
+/// and needles of magma under single oceanic cells.
+const MOHO_SMOOTH_CELLS: usize = 2;
+
+/// Three periodic box blurs of radius `r` (about a Gaussian of σ ≈ 1.4 r cells).
+fn smooth(g: &PeriodicGrid<f32>, r: usize) -> PeriodicGrid<f32> {
+    let (w, h) = (g.width(), g.height());
+    let mut v: Vec<f64> = g.data().iter().map(|&x| f64::from(x)).collect();
+    let norm = 1.0 / (2 * r + 1) as f64;
+    for _ in 0..3 {
+        let mut tmp = vec![0.0; v.len()];
+        for j in 0..h {
+            for i in 0..w {
+                let mut s = 0.0;
+                for d in 0..=2 * r {
+                    s += v[j * w + (i + w + d - r) % w];
+                }
+                tmp[j * w + i] = s * norm;
+            }
+        }
+        for j in 0..h {
+            for i in 0..w {
+                let mut s = 0.0;
+                for d in 0..=2 * r {
+                    s += tmp[((j + h + d - r) % h) * w + i];
+                }
+                v[j * w + i] = s * norm;
+            }
+        }
+    }
+    PeriodicGrid::from_vec(w, h, g.cell_size(), v.iter().map(|&x| x as f32).collect())
 }
 
 fn grid_f32(layer: &Layer) -> PeriodicGrid<f32> {
@@ -108,6 +155,8 @@ impl Terrain {
             ),
             None => (None, None),
         };
+        let blocks = Blocks::new(world.blocks()?)?;
+        let geology = Geology::from_world(world, &blocks)?;
         Ok(Self::new(
             world.config.seed,
             &world.config.erosion,
@@ -117,7 +166,34 @@ impl Terrain {
             lakes,
             cfg,
         )
-        .with_moho(world.layer("moho_depth").map(grid_f32)))
+        .with_moho(
+            world
+                .layer("moho_depth")
+                .map(|l| smooth(&grid_f32(l), MOHO_SMOOTH_CELLS)),
+        )
+        .with_geology(blocks, geology))
+    }
+
+    /// Sets the block registry and the geology.
+    pub fn with_geology(mut self, blocks: Blocks, geology: Option<Geology>) -> Self {
+        self.blocks = blocks;
+        self.geology = geology;
+        self
+    }
+
+    pub fn blocks(&self) -> &Blocks {
+        &self.blocks
+    }
+
+    pub fn geology(&self) -> Option<&Geology> {
+        self.geology.as_ref()
+    }
+
+    /// Geology of the column at `(x, z)` (default without geology).
+    pub fn column_geo(&self, x: f64, z: f64) -> ColumnGeo {
+        self.geology
+            .as_ref()
+            .map_or_else(ColumnGeo::default, |g| g.column(x, z))
     }
 
     /// Sets the Moho depth grid (m below sea level, positive downwards).
@@ -176,6 +252,8 @@ impl Terrain {
             detail: Detail::new(seed, erosion),
             baked_spacing,
             moho: None,
+            blocks: Blocks::builtin(),
+            geology: None,
         }
     }
 
@@ -242,29 +320,80 @@ impl Terrain {
         self.water_level(x, z).round() as i32
     }
 
-    /// Block of the surface (top solid block) for a column whose top block is at `top`.
-    pub fn surface_block(&self, top: i32, slope: f64) -> crate::block::BlockId {
-        use crate::block::{GRASS, SAND, STONE};
+    /// Soil of a column whose top solid block is at `top`: `(block, thickness, class)`;
+    /// thickness 0 for bare rock.
+    fn soil(&self, col: &ColumnGeo, top: i32, slope: f64) -> (BlockId, i32, Class) {
         let c = &self.cfg;
+        let ids = &self.blocks.ids;
         if top <= c.beach_high_m {
-            SAND
+            // Beaches and shallow sea floors: quartz sand; deep sea floors: bare sediment
+            // (sand everywhere for worlds without geology).
+            if top > c.shelf_sand_m || self.geology.is_none() {
+                (ids.sand, c.sand_depth_m, Class::Loose)
+            } else {
+                (ids.sand, 0, Class::Loose)
+            }
+        } else if col.river {
+            (ids.gravel, c.gravel_depth_m, Class::Loose)
+        } else if col.desert {
+            (ids.sand, c.sand_depth_m, Class::Loose)
         } else if slope > c.rock_slope || f64::from(top) > c.grass_max_elevation_m {
-            STONE
+            (ids.granite, 0, Class::Basement)
         } else {
-            GRASS
+            (ids.dirt, c.dirt_depth_m + 1, Class::Soil)
         }
     }
 
-    /// Block at depth `depth ≥ 0` below the top of a column (0 = the top block itself).
-    pub fn column_block(&self, top: i32, slope: f64, depth: i32) -> crate::block::BlockId {
-        use crate::block::{DIRT, GRASS, SAND, STONE};
-        let surface = self.surface_block(top, slope);
-        match surface {
-            SAND if depth < self.cfg.sand_depth_m => SAND,
-            GRASS if depth == 0 => GRASS,
-            GRASS if depth <= self.cfg.dirt_depth_m => DIRT,
-            _ => STONE,
+    /// Block at depth `depth ≥ 0` below the top `top` of column `(x, z)` (world block
+    /// coordinates), whose Moho is at `moho`, without ore. Also returns its class.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rock_block(
+        &self,
+        col: &ColumnGeo,
+        x: i32,
+        z: i32,
+        top: i32,
+        slope: f64,
+        moho: i32,
+        depth: i32,
+    ) -> (BlockId, Class) {
+        let ids = &self.blocks.ids;
+        let (soil, soil_depth, soil_class) = self.soil(col, top, slope);
+        if depth < soil_depth {
+            if soil_class == Class::Soil && depth == 0 {
+                return (ids.grass, Class::Soil);
+            }
+            return (soil, soil_class);
         }
+        let (fx, fz) = (f64::from(x) + 0.5, f64::from(z) + 0.5);
+        let Some(g) = &self.geology else {
+            return (ids.granite, Class::Basement);
+        };
+        let r = f64::from(depth - soil_depth);
+        let weathering = f64::from(col.weathering);
+        if r < weathering.floor() {
+            let b = if col.laterite {
+                ids.laterite
+            } else {
+                ids.regolith
+            };
+            return (b, Class::Weathered);
+        }
+        if r < (weathering + f64::from(col.sediment)).floor() {
+            return (
+                g.sediment_block(ids, col, fx, top - depth, fz),
+                Class::Sediment,
+            );
+        }
+        let crust = f64::from((top - moho).max(1));
+        let u = f64::from(depth) / crust;
+        (g.basement_block(ids, col, fx, fz, u), Class::Basement)
+    }
+
+    /// Top block of column `(x, z)` (world block coordinates) without ore (horizon colours).
+    pub fn top_block(&self, x: i32, z: i32, top: i32, slope: f64) -> BlockId {
+        let col = self.column_geo(f64::from(x) + 0.5, f64::from(z) + 0.5);
+        self.rock_block(&col, x, z, top, slope, i32::MIN / 2, 0).0
     }
 }
 

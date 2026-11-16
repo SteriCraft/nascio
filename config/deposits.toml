@@ -1,0 +1,355 @@
+# Catalogue des gisements de Nascio (spec §4.6).
+#
+# Le code ne connaît que les contextes et les formes ; chaque type est décrit ici. Le fichier est
+# copié dans le monde à la génération (deposits.toml) et son hachage entre dans l'empreinte :
+# le modifier ne change jamais un monde existant.
+#
+# Champs :
+#   name        identifiant unique
+#   label       nom affiché (légende de la carte)
+#   map_color   couleur de la carte des gisements [r, g, b]
+#   blocks      blocs du minerai : { block = nom, color = [r, g, b], share = part, density = kg/m³ }
+#               (aucun bloc : carte seulement, forme "trap")
+#   cap         couche d'un autre bloc au toit d'une couche : { block, color, fraction, density }
+#   contexts    poids par contexte : ocean, ridge, trench, arc, orogen, rift, hotspot, ophiolite,
+#               ultramafic, craton, platform, basin, marine_shelf, humid, arid, laterite,
+#               river_source, coast. Poids d'une cellule = Σ poids × contexte
+#   requires    contextes requis (le poids est multiplié par chacun)
+#   shape       vein (filon), stock (amas porphyrique), lens (lentille), layer (couche),
+#               blanket (manteau d'altération), placer, trap (piège, carte seulement)
+#   host        pour une couche : "sediment" (défaut) ou "basement"
+#   depth_m     profondeur du centre sous la surface rocheuse [min, max]
+#               (couche en socle : sous la couverture sédimentaire)
+#   size_m      longueur ou diamètre [min, max]
+#   thickness_m épaisseur [min, max] (filons, couches, manteaux, placers ; amas et lentilles :
+#               hauteur)
+#   grade       part des blocs minéralisés au cœur du corps (0..1)
+#   abundance   corps par 100 km² de contexte de poids 1 (rareté)
+#   elements    à titre indicatif : éléments obtenus après raffinage (sous-produits compris)
+
+# --- Arcs volcaniques ---
+
+[[deposit]]
+name = "porphyry_copper"
+label = "Porphyry copper"
+map_color = [214, 120, 48]
+blocks = [
+  { block = "chalcopyrite", color = [196, 160, 52], share = 0.85, density = 4200 },
+  { block = "molybdenite", color = [120, 128, 150], share = 0.15, density = 4700 },
+]
+contexts = { arc = 1.0 }
+shape = "stock"
+depth_m = [40, 400]
+size_m = [150, 320]
+thickness_m = [150, 350]
+grade = 0.3
+abundance = 43
+elements = ["Cu", "Mo", "Au"]
+
+[[deposit]]
+name = "gold_vein"
+label = "Vein gold"
+map_color = [250, 210, 40]
+blocks = [{ block = "gold_quartz", color = [236, 220, 160], density = 2800 }]
+contexts = { orogen = 1.0, arc = 0.4 }
+shape = "vein"
+depth_m = [0, 500]
+size_m = [100, 400]
+thickness_m = [1.5, 4]
+grade = 0.5
+abundance = 96
+elements = ["Au", "Ag"]
+
+# --- Cratons ---
+
+[[deposit]]
+name = "banded_iron"
+label = "Banded iron"
+map_color = [150, 60, 52]
+blocks = [
+  { block = "magnetite", color = [44, 44, 50], share = 0.5, density = 5100 },
+  { block = "hematite", color = [128, 44, 40], share = 0.5, density = 5200 },
+]
+contexts = { craton = 1.0 }
+shape = "layer"
+host = "basement"
+depth_m = [10, 300]
+size_m = [400, 1500]
+thickness_m = [3, 12]
+grade = 0.8
+abundance = 38
+elements = ["Fe"]
+
+# --- Orogènes de collision ---
+
+[[deposit]]
+name = "tin_tungsten"
+label = "Tin-tungsten veins"
+map_color = [170, 170, 200]
+blocks = [
+  { block = "cassiterite", color = [92, 64, 52], share = 0.6, density = 6900 },
+  { block = "wolframite", color = [58, 50, 46], share = 0.4, density = 7300 },
+]
+contexts = { orogen = 1.0 }
+shape = "vein"
+depth_m = [20, 500]
+size_m = [60, 300]
+thickness_m = [1, 3]
+grade = 0.6
+abundance = 96
+elements = ["Sn", "W"]
+
+# --- Ophiolites et roches ultrabasiques ---
+
+[[deposit]]
+name = "chromite"
+label = "Chromite"
+map_color = [70, 90, 110]
+blocks = [{ block = "chromite", color = [36, 38, 44], density = 4600 }]
+contexts = { ophiolite = 1.0 }
+shape = "lens"
+depth_m = [0, 300]
+size_m = [20, 80]
+thickness_m = [8, 30]
+grade = 0.8
+abundance = 240
+elements = ["Cr"]
+
+[[deposit]]
+name = "nickel_sulphide"
+label = "Nickel sulphide"
+map_color = [110, 150, 90]
+blocks = [{ block = "pentlandite", color = [178, 160, 92], density = 4900 }]
+contexts = { ultramafic = 1.0 }
+shape = "lens"
+depth_m = [30, 400]
+size_m = [30, 100]
+thickness_m = [10, 30]
+grade = 0.6
+abundance = 144
+elements = ["Ni", "Co", "Cu"]
+
+[[deposit]]
+name = "platinum"
+label = "Platinum group"
+map_color = [210, 214, 222]
+blocks = [{ block = "platinum_ore", color = [170, 172, 168], density = 5500 }]
+contexts = { ophiolite = 1.0 }
+shape = "lens"
+depth_m = [30, 400]
+size_m = [15, 50]
+thickness_m = [3, 10]
+grade = 0.4
+abundance = 72
+elements = ["Pt", "Pd"]
+
+# --- Bassins sédimentaires ---
+
+[[deposit]]
+name = "lead_zinc"
+label = "Lead-zinc"
+map_color = [120, 120, 140]
+blocks = [
+  { block = "galena", color = [104, 108, 118], share = 0.5, density = 7500 },
+  { block = "sphalerite", color = [116, 84, 46], share = 0.5, density = 4000 },
+]
+contexts = { basin = 0.7, platform = 0.3 }
+shape = "layer"
+depth_m = [30, 400]
+size_m = [150, 600]
+thickness_m = [2, 8]
+grade = 0.5
+abundance = 34
+elements = ["Pb", "Zn", "Ag"]
+
+[[deposit]]
+name = "coal"
+label = "Coal"
+map_color = [40, 36, 34]
+blocks = [{ block = "coal", color = [26, 25, 24], density = 1350 }]
+contexts = { basin = 1.0 }
+requires = ["humid"]
+shape = "layer"
+depth_m = [10, 350]
+size_m = [500, 2000]
+thickness_m = [1, 5]
+grade = 0.95
+abundance = 72
+elements = ["C"]
+
+[[deposit]]
+name = "rock_salt"
+label = "Rock salt and potash"
+map_color = [236, 236, 244]
+blocks = [{ block = "rock_salt", color = [232, 226, 226], density = 2170 }]
+cap = { block = "sylvite", color = [222, 168, 160], fraction = 0.25, density = 1990 }
+contexts = { basin = 1.0 }
+requires = ["arid"]
+shape = "layer"
+depth_m = [80, 450]
+size_m = [500, 2000]
+thickness_m = [6, 30]
+grade = 0.95
+abundance = 48
+elements = ["Na", "Cl", "K"]
+
+[[deposit]]
+name = "oil"
+label = "Oil"
+map_color = [30, 30, 30]
+contexts = { basin = 1.0, marine_shelf = 1.0 }
+shape = "trap"
+depth_m = [150, 500]
+size_m = [500, 2500]
+thickness_m = [10, 40]
+grade = 1.0
+abundance = 5
+elements = ["hydrocarbons"]
+
+[[deposit]]
+name = "gas"
+label = "Natural gas"
+map_color = [120, 180, 230]
+contexts = { basin = 1.0, marine_shelf = 0.7 }
+shape = "trap"
+depth_m = [250, 500]
+size_m = [500, 3000]
+thickness_m = [10, 40]
+grade = 1.0
+abundance = 4
+elements = ["CH4"]
+
+# --- Plateaux marins, marges passives ---
+
+[[deposit]]
+name = "manganese"
+label = "Manganese"
+map_color = [120, 80, 130]
+blocks = [{ block = "pyrolusite", color = [56, 50, 58], density = 4800 }]
+contexts = { marine_shelf = 1.0, basin = 0.3 }
+shape = "layer"
+depth_m = [10, 250]
+size_m = [300, 1200]
+thickness_m = [1, 4]
+grade = 0.8
+abundance = 24
+elements = ["Mn"]
+
+[[deposit]]
+name = "phosphate"
+label = "Phosphate"
+map_color = [200, 190, 120]
+blocks = [{ block = "phosphorite", color = [164, 150, 120], density = 2900 }]
+contexts = { marine_shelf = 1.0, basin = 0.2 }
+shape = "layer"
+depth_m = [5, 200]
+size_m = [400, 1500]
+thickness_m = [1, 5]
+grade = 0.8
+abundance = 24
+elements = ["P"]
+
+# --- Latérites tropicales ---
+
+[[deposit]]
+name = "bauxite"
+label = "Bauxite"
+map_color = [200, 110, 70]
+blocks = [{ block = "bauxite", color = [186, 98, 62], density = 2400 }]
+contexts = { laterite = 1.0 }
+shape = "blanket"
+depth_m = [1, 8]
+size_m = [200, 800]
+thickness_m = [2, 8]
+grade = 0.8
+abundance = 96
+elements = ["Al", "Ga"]
+
+[[deposit]]
+name = "laterite_nickel"
+label = "Laterite nickel"
+map_color = [90, 170, 120]
+blocks = [{ block = "garnierite", color = [92, 150, 96], density = 2600 }]
+contexts = { laterite = 1.0 }
+requires = ["ultramafic"]
+shape = "blanket"
+depth_m = [2, 12]
+size_m = [200, 700]
+thickness_m = [2, 8]
+grade = 0.7
+abundance = 96
+elements = ["Ni", "Co"]
+
+# --- Placers ---
+
+[[deposit]]
+name = "gold_placer"
+label = "Placer gold"
+map_color = [240, 190, 60]
+blocks = [{ block = "gold_gravel", color = [168, 150, 104], density = 2100 }]
+contexts = { river_source = 1.0 }
+shape = "placer"
+depth_m = [1, 3]
+size_m = [100, 400]
+thickness_m = [0.5, 2]
+grade = 0.3
+abundance = 144
+elements = ["Au"]
+
+[[deposit]]
+name = "tin_placer"
+label = "Placer tin"
+map_color = [150, 120, 100]
+blocks = [{ block = "tin_gravel", color = [120, 104, 92], density = 2400 }]
+contexts = { river_source = 1.0 }
+shape = "placer"
+depth_m = [1, 3]
+size_m = [100, 400]
+thickness_m = [0.5, 2]
+grade = 0.5
+abundance = 288
+elements = ["Sn"]
+
+[[deposit]]
+name = "ilmenite"
+label = "Coastal ilmenite"
+map_color = [60, 60, 70]
+blocks = [{ block = "ilmenite_sand", color = [70, 66, 66], density = 3200 }]
+contexts = { coast = 1.0 }
+shape = "placer"
+depth_m = [0.5, 2]
+size_m = [150, 600]
+thickness_m = [0.5, 2]
+grade = 0.6
+abundance = 96
+elements = ["Ti", "Fe", "Zr"]
+
+# --- Points chauds, basaltes ---
+
+[[deposit]]
+name = "sulfur"
+label = "Sulfur"
+map_color = [230, 230, 60]
+blocks = [{ block = "sulfur", color = [222, 210, 64], density = 2070 }]
+contexts = { hotspot = 1.0, arc = 0.3 }
+shape = "lens"
+depth_m = [0, 40]
+size_m = [15, 60]
+thickness_m = [4, 15]
+grade = 0.7
+abundance = 72
+elements = ["S"]
+
+[[deposit]]
+name = "obsidian"
+label = "Obsidian"
+map_color = [40, 30, 50]
+blocks = [{ block = "obsidian", color = [24, 20, 30], density = 2400 }]
+contexts = { hotspot = 1.0, arc = 0.5 }
+shape = "lens"
+depth_m = [0, 60]
+size_m = [20, 80]
+thickness_m = [5, 20]
+grade = 0.9
+abundance = 72
+elements = ["volcanic glass"]

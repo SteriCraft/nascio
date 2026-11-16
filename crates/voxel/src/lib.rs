@@ -5,7 +5,9 @@
 pub mod block;
 pub mod chunk;
 pub mod generate;
+pub mod geology;
 pub mod mesh;
+pub mod section;
 pub mod terrain;
 
 pub use chunk::{Chunk, ChunkDeltas, NoDeltas, PaddedChunk};

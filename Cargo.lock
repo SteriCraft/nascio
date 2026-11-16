@@ -4182,6 +4182,7 @@ name = "nascio-voxel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "image",
  "nascio-core",
  "nascio-worldgen",

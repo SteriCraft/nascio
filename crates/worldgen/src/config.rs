@@ -3,13 +3,14 @@
 use crate::biomes::BiomeConfig;
 use crate::climate::ClimateConfig;
 use crate::erosion::ErosionConfig;
+use crate::geology::GeologyConfig;
 use nascio_core::astro::AstroConfig;
 use nascio_core::time::GameClock;
 use nascio_core::{AtmosphereConfig, GeothermConfig};
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a change alters generated output for a given config.
-pub const GENERATOR_VERSION: u32 = 8;
+pub const GENERATOR_VERSION: u32 = 9;
 
 /// Full-resolution cell size of the tectonic grid, in metres (spec §1.4).
 pub const TECTONIC_CELL_M: u32 = 160;
@@ -387,6 +388,8 @@ pub struct WorldConfig {
     pub climate: ClimateConfig,
     #[serde(default)]
     pub biomes: BiomeConfig,
+    #[serde(default)]
+    pub geology: GeologyConfig,
 }
 
 impl WorldConfig {
@@ -404,6 +407,7 @@ impl WorldConfig {
             erosion: ErosionConfig::default(),
             climate: ClimateConfig::default(),
             biomes: BiomeConfig::default(),
+            geology: GeologyConfig::default(),
         }
     }
 
@@ -426,6 +430,9 @@ impl WorldConfig {
         self.climate
             .validate()
             .map_err(|e| anyhow::anyhow!("climate: {e}"))?;
+        self.geology
+            .validate()
+            .map_err(|e| anyhow::anyhow!("geology: {e}"))?;
         Ok(())
     }
 

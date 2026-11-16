@@ -4,7 +4,7 @@
 //! Faces are merged when they share block and corner occlusion (the classic "greedy" pass), and
 //! quads are split along the diagonal that keeps occlusion gradients isotropic.
 
-use crate::block::{AIR, BlockId, Matter, WATER, def, linear_color};
+use crate::block::{AIR, BlockId, Blocks, Matter};
 use crate::chunk::{N, PaddedChunk};
 
 /// Brightness factor per occlusion level (0 = fully occluded corner, 3 = open).
@@ -73,8 +73,8 @@ impl ChunkMesh {
 
 /// Face drawn on `block` when its neighbour across the face is `neighbour`.
 #[inline]
-fn face(block: BlockId, neighbour: BlockId) -> Option<bool> {
-    match (def(block).matter, def(neighbour).matter) {
+fn face(blocks: &Blocks, block: BlockId, neighbour: BlockId) -> Option<bool> {
+    match (blocks.matter(block), blocks.matter(neighbour)) {
         (Matter::Solid, Matter::Empty | Matter::Fluid) => Some(false),
         (Matter::Fluid, Matter::Empty) => Some(true),
         _ => None,
@@ -90,9 +90,9 @@ struct Face {
 }
 
 /// Greedy mesh of the inner 32³ of a padded chunk.
-pub fn mesh_chunk(p: &PaddedChunk) -> ChunkMesh {
+pub fn mesh_chunk(p: &PaddedChunk, blocks: &Blocks) -> ChunkMesh {
     let mut out = ChunkMesh::default();
-    if p.is_uniform(AIR) || p.blocks.iter().all(|&b| def(b).matter == Matter::Solid) {
+    if p.is_uniform(AIR) || p.blocks.iter().all(|&b| blocks.is_solid(b)) {
         return out;
     }
     let n = N as i32;
@@ -114,14 +114,15 @@ pub fn mesh_chunk(p: &PaddedChunk) -> ChunkMesh {
                         let mut nb = c;
                         nb[d] += sign;
                         let neighbour = p.get(nb[0], nb[1], nb[2]);
-                        mask[a as usize + N * b as usize] = face(block, neighbour).map(|water| {
-                            let ao = if water {
-                                [3; 4]
-                            } else {
-                                corner_ao(p, nb, u, v)
-                            };
-                            Face { block, water, ao }
-                        });
+                        mask[a as usize + N * b as usize] =
+                            face(blocks, block, neighbour).map(|water| {
+                                let ao = if water {
+                                    [3; 4]
+                                } else {
+                                    corner_ao(p, blocks, nb, u, v)
+                                };
+                                Face { block, water, ao }
+                            });
                     }
                 }
                 // Greedy merge.
@@ -151,7 +152,18 @@ pub fn mesh_chunk(p: &PaddedChunk) -> ChunkMesh {
                                 mask[aa + N * bb] = None;
                             }
                         }
-                        emit(&mut out, f, d, u, v, sign, plane, normal, [a, b, w, h]);
+                        emit(
+                            &mut out,
+                            blocks.linear(f.block),
+                            f,
+                            d,
+                            u,
+                            v,
+                            sign,
+                            plane,
+                            normal,
+                            [a, b, w, h],
+                        );
                         a += w;
                     }
                 }
@@ -163,12 +175,12 @@ pub fn mesh_chunk(p: &PaddedChunk) -> ChunkMesh {
 
 /// Occlusion of the four corners of a face whose air-side cell is `nb`, in quad corner order
 /// `(-u,-v), (+u,-v), (+u,+v), (-u,+v)`.
-fn corner_ao(p: &PaddedChunk, nb: [i32; 3], u: usize, v: usize) -> [u8; 4] {
+fn corner_ao(p: &PaddedChunk, blocks: &Blocks, nb: [i32; 3], u: usize, v: usize) -> [u8; 4] {
     let solid = |du: i32, dv: i32| {
         let mut c = nb;
         c[u] += du;
         c[v] += dv;
-        u8::from(def(p.get(c[0], c[1], c[2])).matter == Matter::Solid)
+        u8::from(blocks.is_solid(p.get(c[0], c[1], c[2])))
     };
     [(-1, -1), (1, -1), (1, 1), (-1, 1)].map(|(du, dv)| {
         let (s1, s2) = (solid(du, 0), solid(0, dv));
@@ -183,6 +195,7 @@ fn corner_ao(p: &PaddedChunk, nb: [i32; 3], u: usize, v: usize) -> [u8; 4] {
 #[allow(clippy::too_many_arguments)]
 fn emit(
     out: &mut ChunkMesh,
+    rgb: [f32; 3],
     f: Face,
     d: usize,
     u: usize,
@@ -205,8 +218,7 @@ fn emit(
         corner(a + w, b + h),
         corner(a, b + h),
     ];
-    let rgb = linear_color(f.block);
-    let alpha = if f.block == WATER { WATER_ALPHA } else { 1.0 };
+    let alpha = if f.water { WATER_ALPHA } else { 1.0 };
     let mut colors = f.ao.map(|o| {
         let k = AO_CURVE[usize::from(o)];
         [rgb[0] * k, rgb[1] * k, rgb[2] * k, alpha]
@@ -230,10 +242,15 @@ fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::{STONE, WATER};
     use crate::chunk::NP;
     use crate::generate::ColumnSet;
     use crate::terrain::tests::test_terrain;
+
+    fn ids() -> (Blocks, BlockId, BlockId) {
+        let b = Blocks::builtin();
+        let (stone, water) = (b.ids.granite, b.ids.water);
+        (b, stone, water)
+    }
 
     fn padded(f: impl Fn(i32, i32, i32) -> BlockId) -> PaddedChunk {
         let mut blocks = Box::new([AIR; NP * NP * NP]);
@@ -249,8 +266,9 @@ mod tests {
 
     #[test]
     fn flat_ground_is_one_quad() {
-        let p = padded(|_, y, _| if y < 10 { STONE } else { AIR });
-        let m = mesh_chunk(&p);
+        let (b, stone, _) = ids();
+        let p = padded(|_, y, _| if y < 10 { stone } else { AIR });
+        let m = mesh_chunk(&p, &b);
         assert_eq!(m.opaque.quad_count(), 1);
         assert!(m.water.is_empty());
         assert_eq!(m.opaque.normals[0], [0.0, 1.0, 0.0]);
@@ -259,8 +277,9 @@ mod tests {
 
     #[test]
     fn single_block_has_six_faces_facing_out() {
-        let p = padded(|x, y, z| if (x, y, z) == (4, 5, 6) { STONE } else { AIR });
-        let m = mesh_chunk(&p);
+        let (b, stone, _) = ids();
+        let p = padded(|x, y, z| if (x, y, z) == (4, 5, 6) { stone } else { AIR });
+        let m = mesh_chunk(&p, &b);
         assert_eq!(m.opaque.quad_count(), 6);
         // Each triangle's winding must agree with its normal (counter-clockwise front).
         for t in m.opaque.indices.chunks(3) {
@@ -279,12 +298,13 @@ mod tests {
 
     #[test]
     fn water_surface_only_against_air() {
+        let (b, stone, water) = ids();
         let p = padded(|_, y, _| match y {
-            ..3 => STONE,
-            3..20 => WATER,
+            ..3 => stone,
+            3..20 => water,
             _ => AIR,
         });
-        let m = mesh_chunk(&p);
+        let m = mesh_chunk(&p, &b);
         assert_eq!(m.water.quad_count(), 1);
         assert_eq!(m.opaque.quad_count(), 1);
         assert!(m.water.positions.iter().all(|p| p[1] == 20.0));
@@ -292,8 +312,9 @@ mod tests {
 
     #[test]
     fn buried_and_empty_chunks_have_no_mesh() {
-        assert!(mesh_chunk(&padded(|_, _, _| STONE)).is_empty());
-        assert!(mesh_chunk(&padded(|_, _, _| AIR)).is_empty());
+        let (b, stone, _) = ids();
+        assert!(mesh_chunk(&padded(|_, _, _| stone), &b).is_empty());
+        assert!(mesh_chunk(&padded(|_, _, _| AIR), &b).is_empty());
     }
 
     #[test]
@@ -302,7 +323,11 @@ mod tests {
         let col = ColumnSet::new(&t, 7, 7);
         let total: usize = col
             .chunk_range(1)
-            .map(|cy| mesh_chunk(&col.padded_chunk(&t, cy)).opaque.quad_count())
+            .map(|cy| {
+                mesh_chunk(&col.padded_chunk(&t, cy), t.blocks())
+                    .opaque
+                    .quad_count()
+            })
             .sum();
         assert!(total > 0);
     }

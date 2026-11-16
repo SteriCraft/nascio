@@ -214,11 +214,16 @@ impl Layer {
     }
 }
 
-/// A generated world: its config and its layers.
+/// Files stored next to `world.toml` (spec §6), part of the world's hash.
+pub const WORLD_FILES: [&str; 3] = ["deposits.toml", "blocks.toml", "deposits.bin"];
+
+/// A generated world: its config, its layers and its other files ([`WORLD_FILES`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct World {
     pub config: WorldConfig,
     pub layers: Vec<Layer>,
+    /// File name → contents.
+    pub files: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 impl World {
@@ -236,6 +241,9 @@ impl World {
         for l in &self.layers {
             let mut f = fs::File::create(layer_path(dir, &l.name))?;
             f.write_all(&l.to_bytes())?;
+        }
+        for (name, bytes) in &self.files {
+            fs::write(dir.join(name), bytes)?;
         }
         Ok(())
     }
@@ -261,10 +269,45 @@ impl World {
             fs::File::open(&p)?.read_to_end(&mut bytes)?;
             layers.push(Layer::from_bytes(&name, &bytes)?);
         }
-        Ok(Self { config, layers })
+        let mut files = std::collections::BTreeMap::new();
+        for name in WORLD_FILES {
+            let p = dir.join(name);
+            if p.exists() {
+                files.insert(name.to_string(), fs::read(&p)?);
+            }
+        }
+        Ok(Self {
+            config,
+            layers,
+            files,
+        })
     }
 
-    /// blake3 of every layer (name and serialised bytes, in name order), as hex.
+    /// The block registry stored with the world (worlds without one: the column blocks).
+    pub fn blocks(&self) -> anyhow::Result<crate::blocks::BlockRegistry> {
+        match self.files.get("blocks.toml") {
+            Some(b) => crate::blocks::BlockRegistry::from_toml(std::str::from_utf8(b)?),
+            None => Ok(crate::blocks::BlockRegistry::builtin()),
+        }
+    }
+
+    /// The deposit catalogue copied into the world (`None` for older worlds).
+    pub fn catalog(&self) -> anyhow::Result<Option<crate::deposits::Catalog>> {
+        self.files
+            .get("deposits.toml")
+            .map(|b| crate::deposits::Catalog::parse(std::str::from_utf8(b)?))
+            .transpose()
+    }
+
+    /// The deposit bodies (empty for older worlds).
+    pub fn bodies(&self) -> anyhow::Result<Vec<crate::deposits::Body>> {
+        self.files
+            .get("deposits.bin")
+            .map_or(Ok(Vec::new()), |b| crate::deposits::bodies_from_bytes(b))
+    }
+
+    /// blake3 of every layer (name and serialised bytes, in name order), then of every file
+    /// (name and contents, in name order), as hex.
     pub fn hash(&self) -> String {
         let mut sorted: Vec<&Layer> = self.layers.iter().collect();
         sorted.sort_by(|a, b| a.name.cmp(&b.name));
@@ -273,6 +316,12 @@ impl World {
             h.update(l.name.as_bytes());
             h.update(&[0]);
             h.update(&l.to_bytes());
+        }
+        for (name, bytes) in &self.files {
+            h.update(name.as_bytes());
+            h.update(&[0]);
+            h.update(&(bytes.len() as u64).to_le_bytes());
+            h.update(bytes);
         }
         h.finalize().to_hex().to_string()
     }
@@ -324,6 +373,7 @@ mod tests {
         let w = World {
             config: WorldConfig::new(3, Scale::TwentyFifth),
             layers: sample_layers(),
+            files: [("deposits.toml".to_string(), b"# catalogue".to_vec())].into(),
         };
         w.save(&dir).unwrap();
         let back = World::load(&dir).unwrap();
@@ -336,6 +386,13 @@ mod tests {
         if let LayerData::F32(v) = &mut other.layers[2].data {
             v[100] += 1.0;
         }
+        assert_ne!(other.hash(), w.hash());
+        // And with the copied catalogue.
+        assert_eq!(back.files, w.files);
+        let mut other = w.clone();
+        other
+            .files
+            .insert("deposits.toml".into(), b"# edited".to_vec());
         assert_ne!(other.hash(), w.hash());
     }
 }

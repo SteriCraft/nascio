@@ -65,6 +65,13 @@ pub struct MapState {
     days_per_second: f64,
     /// Set by the fly buttons (or a double click): switch to 3D at this point.
     pub fly_request: Option<(f64, f64)>,
+    /// Start of a section line being drawn (right drag), world metres.
+    section_start: Option<(f64, f64)>,
+    /// Section line to show; `section_dirty` asks for a new picture.
+    pub section: Option<((f64, f64), (f64, f64))>,
+    section_dirty: bool,
+    section_tex: Option<(egui::TextureHandle, [usize; 2])>,
+    section_temp: Option<nascio_voxel::section::SurfaceTemperature>,
 }
 
 impl MapState {
@@ -93,6 +100,11 @@ impl MapState {
             real_time: true,
             days_per_second: 0.0,
             fly_request: None,
+            section_start: None,
+            section: None,
+            section_dirty: false,
+            section_tex: None,
+            section_temp: None,
         }
     }
 
@@ -132,6 +144,12 @@ const MINIMAP_RES: usize = 512;
 
 impl MapState {
     /// Shows a layer or climate map by name (`--map-layer`); unknown names are ignored.
+    /// Shows the section along `from → to`.
+    pub fn open_section(&mut self, from: (f64, f64), to: (f64, f64)) {
+        self.section = Some((from, to));
+        self.section_dirty = true;
+    }
+
     pub fn select(&mut self, name: &str) {
         if let Some(c) = preview::CLIMATE_MAPS.iter().find(|&&c| c == name) {
             self.shown = Shown::Climate(c);
@@ -175,6 +193,7 @@ pub fn ui(
     mut contexts: EguiContexts,
     mut state: ResMut<MapState>,
     mut settings: ResMut<crate::fly::FlySettings>,
+    terrain: Res<crate::fly::SharedTerrain>,
     time: Res<Time>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -196,6 +215,7 @@ pub fn ui(
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(&mut root, |ui| map(ui, state));
+    section_window(ctx, state, &terrain.0);
     if state.real_time || state.days_per_second != 0.0 {
         ctx.request_repaint();
     }
@@ -239,8 +259,11 @@ fn side_panel(ui: &mut egui::Ui, s: &mut MapState, settings: &mut crate::fly::Fl
     ui.separator();
     ui.strong("Legend");
     let legend = match s.shown {
-        Shown::Layer(k) => preview::legend(&s.world.layers[k].name),
-        Shown::Climate(name) => preview::climate_legend(name),
+        Shown::Layer(k) => preview::world_legend(&s.world, &s.world.layers[k].name),
+        Shown::Climate(name) => preview::climate_legend(name)
+            .into_iter()
+            .map(|(c, l)| (c, l.to_string()))
+            .collect(),
     };
     for (color, label) in legend {
         ui.horizontal(|ui| {
@@ -441,8 +464,8 @@ fn map(ui: &mut egui::Ui, s: &mut MapState) {
         s.mpp = WORLD_SIZE_F64 / f64::from(rect.width().min(rect.height()).max(1.0));
     }
 
-    // Pan and zoom (the point under the cursor stays put while zooming).
-    if response.dragged() {
+    // Pan (left drag) and zoom (the point under the cursor stays put while zooming).
+    if response.dragged_by(egui::PointerButton::Primary) {
         let d = response.drag_delta();
         s.center.0 = wrap_f64(s.center.0 - f64::from(d.x) * s.mpp);
         s.center.1 = wrap_f64(s.center.1 - f64::from(d.y) * s.mpp);
@@ -502,9 +525,108 @@ fn map(ui: &mut egui::Ui, s: &mut MapState) {
         draw_spawn(&painter, rect, s, x, z);
     }
 
+    // Section line: right drag.
+    if response.drag_started_by(egui::PointerButton::Secondary)
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        s.section_start = Some(screen_to_world(s, rect, pos));
+    }
+    if response.drag_stopped_by(egui::PointerButton::Secondary)
+        && let (Some(a), Some(pos)) = (s.section_start.take(), response.interact_pointer_pos())
+    {
+        let b = screen_to_world(s, rect, pos);
+        if nascio_core::torus::distance_f64(a, b) > 200.0 {
+            s.open_section(a, b);
+        }
+    }
+    let drawing = s.section_start.zip(
+        response
+            .interact_pointer_pos()
+            .map(|p| screen_to_world(s, rect, p)),
+    );
+    if let Some((a, b)) = drawing.or(s.section) {
+        let to_screen = |p: (f64, f64)| {
+            let d = nascio_core::torus::delta2_f64(s.center, p);
+            rect.center() + egui::vec2((d.0 / s.mpp) as f32, (d.1 / s.mpp) as f32)
+        };
+        let pa = to_screen(a);
+        let d = nascio_core::torus::delta2_f64(a, b);
+        let pb = pa + egui::vec2((d.0 / s.mpp) as f32, (d.1 / s.mpp) as f32);
+        let stroke = egui::Stroke::new(2.5, egui::Color32::from_rgb(220, 30, 60));
+        painter.line_segment([pa, pb], stroke);
+        painter.circle_filled(pa, 4.0, egui::Color32::from_rgb(220, 30, 60));
+        painter.text(
+            pa + egui::vec2(6.0, -6.0),
+            egui::Align2::LEFT_BOTTOM,
+            "A",
+            egui::FontId::proportional(14.0),
+            egui::Color32::BLACK,
+        );
+        painter.text(
+            pb + egui::vec2(6.0, -6.0),
+            egui::Align2::LEFT_BOTTOM,
+            "B",
+            egui::FontId::proportional(14.0),
+            egui::Color32::BLACK,
+        );
+    }
+
     if let Some(pos) = response.hover_pos() {
         let (x, z) = screen_to_world(s, rect, pos);
         response.on_hover_ui_at_pointer(|ui| tooltip(ui, s, x, z));
+    }
+}
+
+/// Window with the vertical section along the drawn line (spec §7).
+fn section_window(ctx: &egui::Context, s: &mut MapState, terrain: &nascio_voxel::Terrain) {
+    let Some((a, b)) = s.section else {
+        return;
+    };
+    if s.section_dirty {
+        s.section_dirty = false;
+        let temp = s
+            .section_temp
+            .get_or_insert_with(|| nascio_voxel::section::SurfaceTemperature::from_world(&s.world));
+        let catalog = s.world.catalog().ok().flatten();
+        let spec = nascio_voxel::section::SectionSpec {
+            from: a,
+            to: b,
+            top_m: 2_000.0,
+            bottom_m: -7_000.0,
+            width: 900,
+            height: 450,
+            title: format!(
+                "section A ({:.0}, {:.0}) - B ({:.0}, {:.0})",
+                a.0, a.1, b.0, b.1
+            ),
+        };
+        let cv = nascio_voxel::section::render(terrain, temp, catalog.as_ref(), &spec);
+        let (w, h) = (cv.img.width() as usize, cv.img.height() as usize);
+        let pixels = cv
+            .img
+            .pixels()
+            .map(|p| egui::Color32::from_rgb(p[0], p[1], p[2]))
+            .collect();
+        let image = egui::ColorImage::new([w, h], pixels);
+        s.section_tex = Some((
+            ctx.load_texture("section", image, egui::TextureOptions::NEAREST),
+            [w, h],
+        ));
+    }
+    let mut open = true;
+    egui::Window::new("Section")
+        .open(&mut open)
+        .default_pos([260.0, 40.0])
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.label("Right drag on the map draws a new section.");
+            if let Some((tex, [w, h])) = &s.section_tex {
+                ui.image((tex.id(), egui::vec2(*w as f32, *h as f32)));
+            }
+        });
+    if !open {
+        s.section = None;
+        s.section_tex = None;
     }
 }
 

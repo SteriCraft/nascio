@@ -1,9 +1,12 @@
 //! The generation pipeline: tectonics (M1), erosion (M3), then climate, final hydrology and
 //! biomes (M4).
 
+use crate::blocks::BlockRegistry;
 use crate::climate::{self, ClimateOutput};
 use crate::config::WorldConfig;
+use crate::deposits::{self, Catalog, DepositsOutput};
 use crate::erosion::{self, ErosionOutput};
+use crate::geology::{self, GeologyOutput};
 use crate::progress::{Progress, Stage};
 use crate::tectonics::{TectonicOutput, Tectonics};
 use crate::world_io::World;
@@ -32,19 +35,26 @@ pub struct Generated {
     pub erosion: ErosionOutput,
     pub climate: ClimateOutput,
     pub biome: PeriodicGrid<u8>,
+    pub geology: GeologyOutput,
+    pub deposits: DepositsOutput,
     /// `(stage, seconds)` of the stages after erosion.
     pub timings: Vec<(&'static str, f64)>,
 }
 
 /// [`generate`], also returning every stage's output.
 pub fn generate_full(cfg: &WorldConfig) -> anyhow::Result<Generated> {
-    generate_full_with(cfg, &Progress::new())
+    generate_full_with(cfg, &Catalog::default_catalog(), &Progress::new())
 }
 
 /// [`generate_full`], reporting its progress to `progress` (display only: the result does not
 /// depend on it).
-pub fn generate_full_with(cfg: &WorldConfig, progress: &Progress) -> anyhow::Result<Generated> {
+pub fn generate_full_with(
+    cfg: &WorldConfig,
+    catalog: &Catalog,
+    progress: &Progress,
+) -> anyhow::Result<Generated> {
     cfg.validate()?;
+    let registry = BlockRegistry::with_catalog(catalog)?;
     progress.begin(Stage::Tectonics);
     let target = cfg.tectonics.continental_fraction;
     let mut initial = target;
@@ -89,13 +99,36 @@ pub fn generate_full_with(cfg: &WorldConfig, progress: &Progress) -> anyhow::Res
     let start = std::time::Instant::now();
     let biome = biomes::biomes(cfg, &ero, &clim);
     timed("biomes", start);
+    progress.begin(Stage::Geology);
+    let start = std::time::Instant::now();
+    let geo = geology::run(cfg, &out, &ero, &clim, progress);
+    timed("geology", start);
+    progress.begin(Stage::Deposits);
+    let start = std::time::Instant::now();
+    let dep = deposits::run(cfg.seed, catalog, &geo, &ero, progress);
+    timed("deposits", start);
     let mut layers = out.layers();
     layers.extend(ero.layers());
     layers.extend(clim.layers());
     layers.push(biomes::layer(&biome));
+    layers.extend(geo.layers());
+    layers.extend(dep.layers());
+    let files = [
+        (
+            "deposits.toml".to_string(),
+            catalog.text.clone().into_bytes(),
+        ),
+        ("blocks.toml".to_string(), registry.to_toml()?.into_bytes()),
+        (
+            "deposits.bin".to_string(),
+            deposits::bodies_to_bytes(&dep.bodies),
+        ),
+    ]
+    .into();
     let world = World {
         config: cfg.clone(),
         layers,
+        files,
     };
     Ok(Generated {
         world,
@@ -103,6 +136,8 @@ pub fn generate_full_with(cfg: &WorldConfig, progress: &Progress) -> anyhow::Res
         erosion: ero,
         climate: clim,
         biome,
+        geology: geo,
+        deposits: dep,
         timings,
     })
 }
@@ -111,11 +146,12 @@ pub fn generate_full_with(cfg: &WorldConfig, progress: &Progress) -> anyhow::Res
 /// saving and preview stages too, then [`Progress::finish`] (or [`Progress::fail`]).
 pub fn generate_to_disk(
     cfg: &WorldConfig,
+    catalog: &Catalog,
     dir: &std::path::Path,
     progress: &Progress,
 ) -> anyhow::Result<(Generated, usize)> {
     let run = || -> anyhow::Result<(Generated, usize)> {
-        let g = generate_full_with(cfg, progress)?;
+        let g = generate_full_with(cfg, catalog, progress)?;
         progress.begin(Stage::Saving);
         g.world.save(dir)?;
         progress.begin(Stage::Previews);

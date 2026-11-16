@@ -8,9 +8,11 @@
 use nascio_core::consts::{CHUNK_SIZE, CHUNKS_PER_AXIS};
 use nascio_core::coords::ChunkPos;
 
-use crate::block::{AIR, BlockId, MAGMA, WATER};
+use crate::block::{AIR, BlockId};
 use crate::chunk::{Chunk, ChunkDeltas, NP, PaddedChunk};
+use crate::geology::{ColumnGeo, wrap};
 use crate::terrain::Terrain;
+use nascio_worldgen::deposits::Body;
 
 /// Columns stored around a chunk column: local `-2..=33` (one more than the padded border, for
 /// the slope).
@@ -29,6 +31,10 @@ pub struct ColumnSet {
     water_tops: Vec<i32>,
     /// First magma block (the Moho) of each column, local `-1..=32`.
     mohos: Vec<i32>,
+    /// Geology of each column, local `-1..=32`.
+    geos: Vec<ColumnGeo>,
+    /// Ore bodies that may reach the column.
+    bodies: Vec<Body>,
 }
 
 impl ColumnSet {
@@ -50,6 +56,7 @@ impl ColumnSet {
         let mut slopes = vec![0.0; NP * NP];
         let mut water_tops = vec![0; NP * NP];
         let mut mohos = vec![0; NP * NP];
+        let mut geos = vec![ColumnGeo::default(); NP * NP];
         for lz in 0..NP {
             for lx in 0..NP {
                 let h = |dx: usize, dz: usize| heights[(lx + dx) + NH * (lz + dz)];
@@ -61,8 +68,16 @@ impl ColumnSet {
                 let z = f64::from(oz + lz as i32 - 1) + 0.5;
                 water_tops[lx + NP * lz] = terrain.water_top(x, z);
                 mohos[lx + NP * lz] = terrain.moho_y(x, z, tops[lx + NP * lz]);
+                geos[lx + NP * lz] = terrain.column_geo(x, z);
             }
         }
+        let bodies = terrain.geology().map_or_else(Vec::new, |g| {
+            g.bodies_near(
+                f64::from(ox - 2),
+                f64::from(oz - 2),
+                f64::from(CHUNK_SIZE + 4),
+            )
+        });
         Self {
             cx,
             cz,
@@ -70,6 +85,8 @@ impl ColumnSet {
             slopes,
             water_tops,
             mohos,
+            geos,
+            bodies,
         }
     }
 
@@ -145,17 +162,46 @@ impl ColumnSet {
         !(all_solid || all_fluid_or_air)
     }
 
+    /// Geology of local column `(x, z)`.
+    #[inline]
+    pub fn geo(&self, x: i32, z: i32) -> &ColumnGeo {
+        &self.geos[Self::k(x, z)]
+    }
+
+    /// Ore bodies that may reach this column.
+    pub fn bodies(&self) -> &[Body] {
+        &self.bodies
+    }
+
     /// Block at local column `(x, z)` (in `-1..=32`) and world height `y`.
     #[inline]
     pub fn block(&self, terrain: &Terrain, x: i32, y: i32, z: i32) -> BlockId {
         let top = self.top(x, z);
+        let ids = &terrain.blocks().ids;
         if y > top {
-            if y < self.water_top(x, z) { WATER } else { AIR }
-        } else if y < self.moho(x, z) {
-            MAGMA
-        } else {
-            terrain.column_block(top, self.slope(x, z), top - y)
+            return if y < self.water_top(x, z) {
+                ids.water
+            } else {
+                AIR
+            };
         }
+        let moho = self.moho(x, z);
+        if y < moho {
+            return ids.magma;
+        }
+        let (wx, wz) = (
+            wrap(self.cx * CHUNK_SIZE + x),
+            wrap(self.cz * CHUNK_SIZE + z),
+        );
+        let (b, class) =
+            terrain.rock_block(self.geo(x, z), wx, wz, top, self.slope(x, z), moho, top - y);
+        if !self.bodies.is_empty()
+            && let Some(g) = terrain.geology()
+            && let Some(ore) = g.ore(&self.bodies, class, wx, y, wz, top)
+        {
+            return ore;
+        }
+        b
     }
 
     /// Chunk `cy` of this column with its one-block border.
@@ -190,7 +236,6 @@ pub fn chunk_at(terrain: &Terrain, deltas: &impl ChunkDeltas, pos: ChunkPos) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::{GRASS, SAND, STONE};
     use crate::chunk::NoDeltas;
     use crate::terrain::tests::test_terrain;
     use nascio_core::coords::LocalPos;
@@ -241,18 +286,20 @@ mod tests {
             let col = ColumnSet::new(&t, cx, 2_000);
             for cy in col.chunk_range(3) {
                 if !col.may_have_faces(cy) {
-                    assert!(crate::mesh::mesh_chunk(&col.padded_chunk(&t, cy)).is_empty());
+                    assert!(
+                        crate::mesh::mesh_chunk(&col.padded_chunk(&t, cy), t.blocks()).is_empty()
+                    );
                 }
             }
         }
     }
 
-    /// Chunks go down to the Moho: stone above it, magma below, with no visible face in
+    /// Chunks go down to the Moho: rock above it, magma below, with no visible face in
     /// between (both opaque), and the same Moho on both sides of the seams.
     #[test]
     fn crust_down_to_the_moho_then_magma() {
-        use crate::block::MAGMA;
         let t = test_terrain();
+        let ids = t.blocks().ids;
         let last = CHUNKS_PER_AXIS - 1;
         for (cx, cz) in [(0, 0), (last, 900), (1_500, last), (2_000, 1_200)] {
             let col = ColumnSet::new(&t, cx, cz);
@@ -264,15 +311,20 @@ mod tests {
                     let wy = cy * CHUNK_SIZE + i32::from(y);
                     let b = c.get(LocalPos { x: 7, y, z: 7 });
                     if wy < col.moho(7, 7) {
-                        assert_eq!(b, MAGMA, "({cx},{cz}) y {wy}");
+                        assert_eq!(b, ids.magma, "({cx},{cz}) y {wy}");
                         magma = true;
                     } else if wy <= col.top(7, 7) - 10 {
-                        assert_eq!(b, STONE, "({cx},{cz}) y {wy}");
+                        assert!(
+                            t.blocks().is_solid(b) && b != ids.magma,
+                            "({cx},{cz}) y {wy}"
+                        );
                         stone = true;
                     }
                 }
                 if !col.may_have_faces(cy) {
-                    assert!(crate::mesh::mesh_chunk(&col.padded_chunk(&t, cy)).is_empty());
+                    assert!(
+                        crate::mesh::mesh_chunk(&col.padded_chunk(&t, cy), t.blocks()).is_empty()
+                    );
                 }
             }
             assert!(stone && magma, "({cx},{cz}) range {range:?}");
@@ -288,7 +340,8 @@ mod tests {
     #[test]
     fn simple_column() {
         let t = test_terrain();
-        let mut seen = [false; 6];
+        let ids = t.blocks().ids;
+        let mut seen = vec![false; t.blocks().len()];
         for cx in (0..CHUNKS_PER_AXIS).step_by(97) {
             let col = ColumnSet::new(&t, cx, 1_000);
             for cy in col.chunk_range(1) {
@@ -300,14 +353,22 @@ mod tests {
                     let b = c.get(p);
                     seen[usize::from(b)] = true;
                     if wy > top {
-                        assert_eq!(b, if wy < col.water_top(5, 9) { WATER } else { AIR });
+                        assert_eq!(
+                            b,
+                            if wy < col.water_top(5, 9) {
+                                ids.water
+                            } else {
+                                AIR
+                            }
+                        );
                     } else if wy < top - 10 {
-                        assert_eq!(b, STONE);
+                        assert!(t.blocks().is_solid(b));
                     }
                 }
             }
         }
-        assert!(seen[usize::from(GRASS)] && seen[usize::from(SAND)] && seen[usize::from(WATER)]);
+        assert!(seen[usize::from(ids.grass)] && seen[usize::from(ids.sand)]);
+        assert!(seen[usize::from(ids.water)]);
         let p = ChunkPos::new(5, 0, 5);
         assert!(chunk_at(&t, &NoDeltas, p) == generate_chunk(&t, p));
     }

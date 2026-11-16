@@ -144,6 +144,8 @@ pub struct WorldInfo {
     pub lapse_rate_c_per_m: f64,
     /// Pressure profile and air above the ground (HUD weather).
     pub atmosphere: nascio_core::AtmosphereConfig,
+    /// Underground temperature (HUD below ground).
+    pub geotherm: nascio_core::GeothermConfig,
 }
 
 /// Materials shared by every chunk.
@@ -419,7 +421,12 @@ pub fn stream_chunks(
                         let meshes = col
                             .chunk_range(underground)
                             .filter(|&cy| col.may_have_faces(cy))
-                            .map(|cy| (cy, mesh_chunk(&col.padded_chunk(&terrain, cy))))
+                            .map(|cy| {
+                                (
+                                    cy,
+                                    mesh_chunk(&col.padded_chunk(&terrain, cy), terrain.blocks()),
+                                )
+                            })
                             .filter(|(_, m)| !m.is_empty())
                             .collect();
                         let _ = tx.send(ColumnResult { key, meshes });
@@ -659,6 +666,19 @@ pub fn hud(
                 cam.yaw.to_degrees()
             ));
             ui.monospace(format!("speed {:7.1} m/s (wheel)", cam.speed));
+            let (bx, bz) = (p.x.floor() as i32, p.z.floor() as i32);
+            let top = terrain.0.height(p.x, p.z).floor() as i32;
+            let slope = (terrain.0.height(p.x + 2.0, p.z) - terrain.0.height(p.x - 2.0, p.z))
+                .hypot(terrain.0.height(p.x, p.z + 2.0) - terrain.0.height(p.x, p.z - 2.0))
+                / 4.0;
+            let blocks = terrain.0.blocks();
+            let ground_block = terrain.0.top_block(
+                nascio_core::torus::wrap(bx),
+                nascio_core::torus::wrap(bz),
+                top,
+                slope,
+            );
+            ui.monospace(format!("ground block {}", blocks.def(ground_block).name));
             ui.separator();
             ui.monospace(format!(
                 "frame {:6.2} ms  ({:5.1} i/s)",
@@ -797,7 +817,16 @@ pub fn hud(
         minimap(ctx, tex, &cam, &mut hud);
     }
     let ground = terrain.0.height(p.x, p.z).max(0.0);
-    clock(ctx, &info, &settings, &cam, climate.as_deref(), ground);
+    let under = underground(&terrain.0, &info, climate.as_deref(), p);
+    clock(
+        ctx,
+        &info,
+        &settings,
+        &cam,
+        climate.as_deref(),
+        ground,
+        under,
+    );
     capture.0 = ctx.egui_wants_pointer_input() || ctx.is_pointer_over_egui();
     Ok(())
 }
@@ -840,6 +869,60 @@ fn hhmm(frac: f64) -> String {
 /// Top-right clock: local solar time at the camera and time of the origin meridian (λ = 0,
 /// the game's reference time, spec §2.3), with the game date. Follows the fixed hour and day.
 /// Below the time: air temperature, relative humidity and pressure at the camera (§4.3).
+/// Below the ground: `(depth m, rock temperature °C, block name, in magma)`.
+fn underground(
+    terrain: &Terrain,
+    info: &WorldInfo,
+    climate: Option<&crate::sky::ClimateMaps>,
+    p: WorldPos,
+) -> Option<(f64, f64, String, bool)> {
+    let top = terrain.height(p.x, p.z).floor();
+    if p.y >= top + 1.0 {
+        return None;
+    }
+    let top_i = top as i32;
+    let moho = terrain.moho_y(p.x, p.z, top_i);
+    let depth = top - p.y.floor();
+    let y = p.y.floor() as i32;
+    // Mean annual surface temperature: the four quarter days cancel both harmonics.
+    let air = climate
+        .and_then(|c| {
+            let v: Option<Vec<f64>> = [0.0, 91.25, 182.5, 273.75]
+                .iter()
+                .map(|&d| {
+                    c.surface_at(p.x, p.z, d, top.max(0.0), info.lapse_rate_c_per_m)
+                        .map(|s| s.temperature_c)
+                })
+                .collect();
+            v.map(|v| v.iter().sum::<f64>() / 4.0)
+        })
+        .unwrap_or(10.0);
+    let water = (terrain.water_level(p.x, p.z) - top).max(0.0);
+    let ts = info.geotherm.surface_c(air, water);
+    let magma = y < moho;
+    let t = if magma {
+        info.geotherm.moho_c
+    } else {
+        info.geotherm
+            .temperature(ts, depth, f64::from((top_i - moho).max(1)))
+    };
+    let blocks = terrain.blocks();
+    let (bx, bz) = (
+        nascio_core::torus::wrap(p.x.floor() as i32),
+        nascio_core::torus::wrap(p.z.floor() as i32),
+    );
+    let col = terrain.column_geo(p.x, p.z);
+    let block = if magma {
+        blocks.ids.magma
+    } else {
+        terrain
+            .rock_block(&col, bx, bz, top_i, 0.0, moho, depth as i32)
+            .0
+    };
+    Some((depth, t, blocks.def(block).name.clone(), magma))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn clock(
     ctx: &egui::Context,
     info: &WorldInfo,
@@ -847,6 +930,7 @@ fn clock(
     cam: &FlyCam,
     climate: Option<&crate::sky::ClimateMaps>,
     ground: f64,
+    under: Option<(f64, f64, String, bool)>,
 ) {
     let (day, t_days, h) = crate::sky::instant(info, settings, cam.pos.x);
     let local = (h + std::f64::consts::PI) / TAU;
@@ -868,6 +952,16 @@ fn clock(
                 ui.monospace(format!("origin {}  (λ   0.0°)", hhmm(origin)));
                 ui.monospace(format!("year {year:.0} · day {:.0}", day.floor()));
                 ui.separator();
+                if let Some((depth, t, block, magma)) = &under {
+                    ui.monospace(format!("underground {depth:6.0} m ({block})"));
+                    ui.monospace(format!("rock        {t:6.0} °C"));
+                    if *magma {
+                        ui.colored_label(egui::Color32::from_rgb(255, 90, 40), "MAGMA: DEADLY");
+                    } else if *t > 60.0 {
+                        ui.colored_label(egui::Color32::from_rgb(255, 160, 60), "hot rock");
+                    }
+                    return;
+                }
                 match air {
                     Some(a) => {
                         ui.monospace(format!("temperature {:6.1} °C", a.temperature_c));

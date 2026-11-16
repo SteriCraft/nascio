@@ -1,107 +1,135 @@
-//! Block registry (spec §5). Block ids are `u16`; colours are provisional until textures exist.
+//! Block registry of a world (spec §5). Block ids are `u16`, assigned at generation and stored
+//! with the world (`blocks.toml`, see [`nascio_worldgen::blocks`]); code refers to blocks by
+//! name. Colours are provisional until textures exist.
+
+pub use nascio_worldgen::blocks::{BlockDef, BlockRegistry, Matter};
 
 /// A block id.
 pub type BlockId = u16;
 
+/// Air is always id 0 (validated by the registry): empty chunks are all zeros.
 pub const AIR: BlockId = 0;
-pub const WATER: BlockId = 1;
-pub const STONE: BlockId = 2;
-pub const DIRT: BlockId = 3;
-pub const GRASS: BlockId = 4;
-pub const SAND: BlockId = 5;
-/// Mantle magma under the Moho: infinite and deadly (spec §3). Opaque for now.
-pub const MAGMA: BlockId = 6;
 
-/// How a block takes part in rendering and physics.
+/// Ids of the rock-column blocks the generator places (resolved by name).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Matter {
-    /// Nothing: faces next to it are visible.
-    Empty,
-    /// Opaque solid.
-    Solid,
-    /// Translucent fluid: hides nothing, but its surface is drawn.
-    Fluid,
+pub struct ColumnIds {
+    pub water: BlockId,
+    pub magma: BlockId,
+    pub grass: BlockId,
+    pub dirt: BlockId,
+    pub sand: BlockId,
+    pub gravel: BlockId,
+    pub regolith: BlockId,
+    pub laterite: BlockId,
+    pub sandstone: BlockId,
+    pub clay: BlockId,
+    pub limestone: BlockId,
+    pub gypsum: BlockId,
+    pub granite: BlockId,
+    pub gneiss: BlockId,
+    pub schist: BlockId,
+    pub basalt: BlockId,
+    pub gabbro: BlockId,
+    pub andesite: BlockId,
+    pub granulite: BlockId,
+    pub peridotite: BlockId,
 }
 
-/// Definition of one block type.
-#[derive(Clone, Copy, Debug)]
-pub struct BlockDef {
-    pub name: &'static str,
-    /// Provisional sRGB colour.
-    pub color: [u8; 3],
-    pub matter: Matter,
-    /// Density in kg/m³ (0 for air), for later physics.
-    pub density: f32,
+/// The registry with what meshing needs per id (matter, linear colour).
+#[derive(Clone, Debug)]
+pub struct Blocks {
+    registry: BlockRegistry,
+    matter: Vec<Matter>,
+    linear: Vec<[f32; 3]>,
+    pub ids: ColumnIds,
 }
 
-/// The registry, indexed by [`BlockId`].
-pub const BLOCKS: [BlockDef; 7] = [
-    BlockDef {
-        name: "air",
-        color: [0, 0, 0],
-        matter: Matter::Empty,
-        density: 0.0,
-    },
-    BlockDef {
-        name: "water",
-        color: [38, 92, 150],
-        matter: Matter::Fluid,
-        density: 1_000.0,
-    },
-    BlockDef {
-        name: "stone",
-        color: [122, 118, 112],
-        matter: Matter::Solid,
-        density: 2_700.0,
-    },
-    BlockDef {
-        name: "dirt",
-        color: [118, 85, 58],
-        matter: Matter::Solid,
-        density: 1_500.0,
-    },
-    BlockDef {
-        name: "grass",
-        color: [88, 132, 58],
-        matter: Matter::Solid,
-        density: 1_400.0,
-    },
-    BlockDef {
-        name: "sand",
-        color: [212, 196, 146],
-        matter: Matter::Solid,
-        density: 1_600.0,
-    },
-    BlockDef {
-        name: "magma",
-        color: [255, 96, 24],
-        matter: Matter::Solid,
-        density: 3_000.0,
-    },
-];
+impl Blocks {
+    pub fn new(registry: BlockRegistry) -> anyhow::Result<Self> {
+        registry.validate()?;
+        let id = |name: &str| {
+            registry
+                .id(name)
+                .ok_or_else(|| anyhow::anyhow!("block registry has no {name}"))
+        };
+        let ids = ColumnIds {
+            water: id("water")?,
+            magma: id("magma")?,
+            grass: id("grass")?,
+            dirt: id("dirt")?,
+            sand: id("sand")?,
+            gravel: id("gravel")?,
+            regolith: id("regolith")?,
+            laterite: id("laterite")?,
+            sandstone: id("sandstone")?,
+            clay: id("clay")?,
+            limestone: id("limestone")?,
+            gypsum: id("gypsum")?,
+            granite: id("granite")?,
+            gneiss: id("gneiss")?,
+            schist: id("schist")?,
+            basalt: id("basalt")?,
+            gabbro: id("gabbro")?,
+            andesite: id("andesite")?,
+            granulite: id("granulite")?,
+            peridotite: id("peridotite")?,
+        };
+        let matter = registry.blocks.iter().map(|b| b.matter).collect();
+        let linear = registry
+            .blocks
+            .iter()
+            .map(|b| b.color.map(|c| srgb_to_linear(f32::from(c) / 255.0)))
+            .collect();
+        Ok(Self {
+            registry,
+            matter,
+            linear,
+            ids,
+        })
+    }
 
-/// Definition of a block id. Unknown ids panic: the registry is closed.
-#[inline]
-pub fn def(id: BlockId) -> &'static BlockDef {
-    &BLOCKS[usize::from(id)]
-}
+    /// The rock-column blocks only.
+    pub fn builtin() -> Self {
+        Self::new(BlockRegistry::builtin()).expect("valid built-in registry")
+    }
 
-/// Block id by name.
-pub fn by_name(name: &str) -> Option<BlockId> {
-    BLOCKS
-        .iter()
-        .position(|b| b.name == name)
-        .map(|i| i as BlockId)
-}
+    pub fn registry(&self) -> &BlockRegistry {
+        &self.registry
+    }
 
-#[inline]
-pub fn is_solid(id: BlockId) -> bool {
-    def(id).matter == Matter::Solid
-}
+    pub fn len(&self) -> usize {
+        self.matter.len()
+    }
 
-/// Linear-light RGB of a block colour (for vertex colours).
-pub fn linear_color(id: BlockId) -> [f32; 3] {
-    def(id).color.map(|c| srgb_to_linear(f32::from(c) / 255.0))
+    pub fn is_empty(&self) -> bool {
+        self.matter.is_empty()
+    }
+
+    /// Definition of an id (unknown ids panic: the registry is closed).
+    pub fn def(&self, id: BlockId) -> &BlockDef {
+        &self.registry.blocks[usize::from(id)]
+    }
+
+    /// Id of a block name.
+    pub fn id(&self, name: &str) -> Option<BlockId> {
+        self.registry.id(name)
+    }
+
+    #[inline]
+    pub fn matter(&self, id: BlockId) -> Matter {
+        self.matter[usize::from(id)]
+    }
+
+    #[inline]
+    pub fn is_solid(&self, id: BlockId) -> bool {
+        self.matter(id) == Matter::Solid
+    }
+
+    /// Linear-light RGB of a block colour (for vertex colours).
+    #[inline]
+    pub fn linear(&self, id: BlockId) -> [f32; 3] {
+        self.linear[usize::from(id)]
+    }
 }
 
 /// sRGB transfer function, inverse.
@@ -118,18 +146,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ids_match_registry() {
-        for (name, id) in [
-            ("air", AIR),
-            ("water", WATER),
-            ("stone", STONE),
-            ("dirt", DIRT),
-            ("grass", GRASS),
-            ("sand", SAND),
-            ("magma", MAGMA),
-        ] {
-            assert_eq!(by_name(name), Some(id));
-        }
-        assert!(is_solid(STONE) && !is_solid(WATER) && !is_solid(AIR));
+    fn column_blocks_resolve_by_name() {
+        let b = Blocks::builtin();
+        assert_eq!(b.id("air"), Some(AIR));
+        assert_eq!(b.def(b.ids.granite).name, "granite");
+        assert!(b.is_solid(b.ids.granite) && !b.is_solid(b.ids.water) && !b.is_solid(AIR));
+        assert_eq!(b.matter(b.ids.water), Matter::Fluid);
+        let cat = nascio_worldgen::deposits::Catalog::default_catalog();
+        let full = Blocks::new(BlockRegistry::with_catalog(&cat).unwrap()).unwrap();
+        assert_eq!(full.ids, b.ids);
+        assert!(full.len() > b.len());
     }
 }

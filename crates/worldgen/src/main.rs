@@ -8,6 +8,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 use nascio_core::astro::AstroConfig;
 use nascio_worldgen::config::{GENERATOR_VERSION, Scale, WorldConfig};
+use nascio_worldgen::deposits::Catalog;
 use nascio_worldgen::generate::generate_to_disk;
 use nascio_worldgen::progress::Progress;
 use nascio_worldgen::sun_curves::{self, Hemisphere};
@@ -60,6 +61,9 @@ enum Command {
         /// Optional TOML file overriding parameters (its seed and scale are replaced by the CLI).
         #[arg(long)]
         config: Option<PathBuf>,
+        /// Deposit catalogue (default: config/deposits.toml if present, else the built-in one).
+        #[arg(long)]
+        deposits: Option<PathBuf>,
     },
 }
 
@@ -97,7 +101,9 @@ fn main() -> anyhow::Result<()> {
             scale,
             out,
             config,
+            deposits,
         } => {
+            let catalog = Catalog::load_or_default(deposits.as_deref())?;
             let scale = Scale::try_from(scale).map_err(anyhow::Error::msg)?;
             let mut cfg = match config {
                 Some(p) => {
@@ -122,7 +128,7 @@ fn main() -> anyhow::Result<()> {
                     }
                     let _ = writeln!(err, "\r{:<72}", progress.line());
                 });
-                let r = generate_to_disk(&cfg, &out, &progress);
+                let r = generate_to_disk(&cfg, &catalog, &out, &progress);
                 stop.store(true, Ordering::Relaxed);
                 r
             });
@@ -130,6 +136,8 @@ fn main() -> anyhow::Result<()> {
             let (world, tect, ero) = (&g.world, &g.tectonics, &g.erosion);
             println!("{}", tect.report);
             println!("{}", ero.report);
+            print!("{}", g.deposits.report);
+            println!("deposit catalogue: {}", catalog.hash());
             for (stage, t) in progress.snapshot().done {
                 println!("{}: {t:.2} s", stage.name());
             }

@@ -40,7 +40,7 @@ struct Args {
     /// Start in the 3D mode.
     #[arg(long)]
     fly: bool,
-    /// Camera position `x,z` (height: 60 m above ground) or `x,y,z`.
+    /// Camera position `x,z` (height: 60 m above ground) or `x,y,z` (may be underground).
     #[arg(long, value_delimiter = ',')]
     pos: Option<Vec<f64>>,
     /// Heading from north towards east, degrees.
@@ -98,12 +98,18 @@ struct Args {
     /// Generate world SEED into the world directory with a progress window, then quit.
     #[arg(long, value_name = "SEED")]
     generate: Option<u64>,
+    /// Map mode: open the vertical section `x0,z0,x1,z1` at start.
+    #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+    section: Option<Vec<f64>>,
     /// With `--generate`: resolution divisor (1, 5 or 25).
     #[arg(long, default_value_t = 1)]
     scale: u32,
     /// With `--generate`: TOML file overriding generation parameters.
     #[arg(long)]
     world_config: Option<PathBuf>,
+    /// With `--generate`: deposit catalogue (default: config/deposits.toml, else built in).
+    #[arg(long)]
+    deposits: Option<PathBuf>,
 }
 
 #[derive(States, Default, Clone, Copy, Eq, PartialEq, Hash, Debug)]
@@ -127,6 +133,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             seed,
             args.scale,
             args.world_config.clone(),
+            args.deposits.clone(),
             args.world.clone(),
             args.screenshot.clone(),
         );
@@ -187,6 +194,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             })
             .cloned()
             .collect(),
+        files: Default::default(),
     };
     let info = fly::WorldInfo {
         astro: world.config.astro,
@@ -194,6 +202,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         seed: world.config.seed,
         lapse_rate_c_per_m: world.config.climate.lapse_rate_c_per_m,
         atmosphere: world.config.atmosphere,
+        geotherm: world.config.geotherm,
     };
 
     let (x, z, y) = match args.pos.as_deref() {
@@ -202,7 +211,8 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         _ => (WORLD_SIZE_F64 / 2.0, WORLD_SIZE_F64 / 2.0, None),
     };
     let ground = terrain.height(x, z).max(0.0);
-    let y = y.unwrap_or(ground + 60.0).max(ground + 2.0);
+    // An explicit height may be underground (HUD checks); the default stays above it.
+    let y = y.unwrap_or(ground + 60.0);
     let cam = FlyCam {
         pos: WorldPos::new(x, y, z),
         yaw: args.yaw.to_radians(),
@@ -231,6 +241,10 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     }
     if let Some(day) = args.day {
         map.set_date(day, args.hour.unwrap_or(12.0));
+    }
+    if let Some(v) = &args.section {
+        anyhow::ensure!(v.len() == 4, "--section takes x0,z0,x1,z1");
+        map.open_section((v[0], v[1]), (v[2], v[3]));
     }
 
     let mut window = Window {

@@ -1,10 +1,13 @@
 //! Macro world simulation: tectonics, erosion, climate, hydrology, biomes, geology.
 
 pub mod biomes;
+pub mod blocks;
 pub mod climate;
 pub mod config;
+pub mod deposits;
 pub mod erosion;
 pub mod generate;
+pub mod geology;
 pub mod grid;
 pub mod hypsometry;
 pub mod noise;

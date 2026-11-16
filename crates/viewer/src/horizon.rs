@@ -21,7 +21,6 @@ use nascio_core::consts::{CHUNK_SIZE, CHUNKS_PER_AXIS, WORLD_SIZE_F64};
 use nascio_core::math::smoothstep;
 use nascio_core::torus::wrap_f64;
 use nascio_voxel::Terrain;
-use nascio_voxel::block::{WATER, linear_color};
 use nascio_voxel::mesh::MeshData;
 
 use crate::curvature::{CurvedMaterial, visible_range};
@@ -312,7 +311,8 @@ fn build_level(
         true
     };
 
-    let water = linear_color(WATER);
+    let blocks = terrain.blocks();
+    let water = blocks.linear(blocks.ids.water);
     let mut m = MeshData::default();
     let side = (n + 1) as usize;
     let mut normals = Vec::with_capacity(side * side);
@@ -333,8 +333,15 @@ fn build_level(
                 let rdz = f64::from(h.at(i, j + 1) - h.at(i, j - 1)) / (2.0 * s);
                 // Beaches are too thin to show at horizon scale.
                 let top = (raw.floor() as i32).max(terrain.config().beach_high_m + 1);
-                let block = terrain.surface_block(top, rdx.hypot(rdz));
-                let c = linear_color(block);
+                let wx = (f64::from(center.0) - half + i as f64 * s).floor() as i32;
+                let wz = (f64::from(center.1) - half + j as f64 * s).floor() as i32;
+                let block = terrain.top_block(
+                    nascio_core::torus::wrap(wx),
+                    nascio_core::torus::wrap(wz),
+                    top,
+                    rdx.hypot(rdz),
+                );
+                let c = blocks.linear(block);
                 [c[0], c[1], c[2], 1.0]
             };
             m.positions.push([

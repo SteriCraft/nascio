@@ -601,9 +601,142 @@ pub fn colorize(world: &World, name: &str) -> Option<Vec<Color>> {
                 }
             })
             .collect(),
+        "geo_context" => (0..n)
+            .map(|i| hex(SETTING_COLORS[(v(i) as usize).min(SETTING_COLORS.len() - 1)]))
+            .collect(),
+        "sediment_thickness" => (0..n)
+            .map(|i| {
+                let c = ramp(&SEDIMENT_STOPS, v(i));
+                if elev(i) > 0.0 {
+                    c
+                } else {
+                    lerp_color(c, hex(SEA_PALE), 0.45)
+                }
+            })
+            .collect(),
+        "weathering_depth" => (0..n)
+            .map(|i| {
+                if elev(i) <= 0.0 {
+                    hex(SEA_PALE)
+                } else {
+                    ramp(&WEATHERING_STOPS, v(i))
+                }
+            })
+            .collect(),
+        "laterite" => (0..n)
+            .map(|i| {
+                if elev(i) <= 0.0 {
+                    hex(SEA_PALE)
+                } else {
+                    lerp_color(
+                        faded_elevation(elev(i)),
+                        hex("#b8482a"),
+                        v(i).clamp(0.0, 1.0),
+                    )
+                }
+            })
+            .collect(),
+        "placer_source" => {
+            let fine = world.layer("elevation");
+            (0..n)
+                .map(|i| {
+                    let e = fine.map_or(0.0, |l| l.data.get_f64(i));
+                    if v(i) > 0.02 {
+                        lerp_color(hex("#d9c27a"), hex("#a8320c"), v(i).clamp(0.0, 1.0))
+                    } else if e <= 0.0 {
+                        hex(SEA_PALE)
+                    } else {
+                        faded_elevation(e)
+                    }
+                })
+                .collect()
+        }
+        "deposits" | "traps" => {
+            let cat = world.catalog().ok().flatten();
+            let colors: Vec<[u8; 3]> = cat.as_ref().map_or_else(Vec::new, |c| {
+                c.deposits
+                    .iter()
+                    .filter(|d| name == "deposits" || d.shape == crate::deposits::Shape::Trap)
+                    .map(|d| d.map_color)
+                    .collect()
+            });
+            (0..n)
+                .map(|i| {
+                    let base = if elev(i) > 0.0 {
+                        faded_elevation(elev(i))
+                    } else {
+                        hex(SEA_PALE)
+                    };
+                    let code = v(i) as usize;
+                    if code == 0 {
+                        return base;
+                    }
+                    if name == "deposits" {
+                        return colors.get(code - 1).map_or(base, |c| image::Rgb(*c));
+                    }
+                    let k = (code - 1) / 2;
+                    let trap = code.is_multiple_of(2);
+                    colors.get(k).map_or(base, |c| {
+                        lerp_color(base, image::Rgb(*c), if trap { 1.0 } else { 0.3 })
+                    })
+                })
+                .collect()
+        }
         _ => return None,
     };
     Some(colors)
+}
+
+/// Colours of the geological settings ([`crate::geology::setting`]).
+const SETTING_COLORS: [&str; crate::geology::setting::COUNT] = [
+    "#c9dbea", "#e6a0a0", "#7f9fbf", "#d0703c", "#8c4a8c", "#e0c040", "#c03030", "#3c7a4a",
+    "#8a7a6a", "#c8b89a", "#e8d48a", "#9ccfc0",
+];
+
+const SEDIMENT_STOPS: [(f64, &str); 5] = [
+    (0.0, "#f4efe6"),
+    (50.0, "#e6d3a8"),
+    (150.0, "#d4ae6a"),
+    (300.0, "#a8743a"),
+    (500.0, "#6a4520"),
+];
+
+const WEATHERING_STOPS: [(f64, &str); 4] = [
+    (0.0, "#efefea"),
+    (4.0, "#d8c8a8"),
+    (10.0, "#c88a5a"),
+    (22.0, "#a8401e"),
+];
+
+/// Legend entries of a layer of `world`, including those read from the world itself (the
+/// deposit catalogue).
+pub fn world_legend(world: &World, name: &str) -> Vec<(Color, String)> {
+    match name {
+        "deposits" | "traps" => {
+            let Some(cat) = world.catalog().ok().flatten() else {
+                return Vec::new();
+            };
+            let mut v = Vec::new();
+            for d in &cat.deposits {
+                if name == "deposits" && d.shape != crate::deposits::Shape::Trap {
+                    v.push((image::Rgb(d.map_color), d.label.to_lowercase()));
+                }
+                if name == "traps" && d.shape == crate::deposits::Shape::Trap {
+                    let c = image::Rgb(d.map_color);
+                    v.push((
+                        lerp_color(hex(SURFACE), c, 0.3),
+                        format!("{} province", d.label.to_lowercase()),
+                    ));
+                    v.push((c, format!("{} trap", d.label.to_lowercase())));
+                }
+            }
+            v
+        }
+        _ => legend(name)
+            .into_iter()
+            .map(|(c, s)| (c, s.to_string()))
+            .collect(),
+    }
 }
 
 /// Legend entries of a layer.
@@ -632,6 +765,29 @@ pub fn legend(name: &str) -> Vec<(Color, &'static str)> {
             .zip(BIOME_COLORS)
             .map(|(name, c)| (hex(c), *name))
             .collect(),
+        "geo_context" => crate::geology::setting::NAMES
+            .iter()
+            .zip(SETTING_COLORS)
+            .map(|(name, c)| (hex(c), *name))
+            .collect(),
+        "sediment_thickness" => vec![
+            (ramp(&SEDIMENT_STOPS, 0.0), "0 m"),
+            (ramp(&SEDIMENT_STOPS, 50.0), "50"),
+            (ramp(&SEDIMENT_STOPS, 150.0), "150"),
+            (ramp(&SEDIMENT_STOPS, 300.0), "300"),
+            (ramp(&SEDIMENT_STOPS, 500.0), "500 (sea: paler)"),
+        ],
+        "weathering_depth" => vec![
+            (ramp(&WEATHERING_STOPS, 0.0), "0 m"),
+            (ramp(&WEATHERING_STOPS, 4.0), "4 (regolith)"),
+            (ramp(&WEATHERING_STOPS, 10.0), "10"),
+            (ramp(&WEATHERING_STOPS, 22.0), "22 (laterite)"),
+        ],
+        "laterite" => vec![(hex("#b8482a"), "laterite"), (hex(SEA_PALE), "sea")],
+        "placer_source" => vec![
+            (hex("#d9c27a"), "river, weak source"),
+            (hex("#a8320c"), "river below an orogen or arc"),
+        ],
         "precipitation_erosion" => vec![
             (ramp(&PRECIP_STOPS, 0.0), "0 mm/yr"),
             (ramp(&PRECIP_STOPS, 250.0), "250"),
@@ -871,7 +1027,9 @@ pub fn write_previews(world: &World, plates: &[Plate], dir: &Path) -> anyhow::Re
                 _ => {}
             }
         }
-        let cv = with_legend(cv.img, &legend(&layer.name));
+        let items = world_legend(world, &layer.name);
+        let items: Vec<(Color, &str)> = items.iter().map(|(c, s)| (*c, s.as_str())).collect();
+        let cv = with_legend(cv.img, &items);
         let p = dir.join(format!("{}.png", layer.name));
         cv.save(&p)?;
         written.push(p);

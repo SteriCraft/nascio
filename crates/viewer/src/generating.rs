@@ -31,6 +31,7 @@ pub fn run(
     seed: u64,
     scale: u32,
     config: Option<PathBuf>,
+    catalog: Option<PathBuf>,
     out: PathBuf,
     screenshot: Option<PathBuf>,
 ) -> anyhow::Result<()> {
@@ -45,11 +46,12 @@ pub fn run(
         None => WorldConfig::new(seed, scale),
     };
     cfg.generator_version = GENERATOR_VERSION;
+    let catalog = nascio_worldgen::deposits::Catalog::load_or_default(catalog.as_deref())?;
     let progress = Arc::new(Progress::new());
     {
         let (progress, out) = (progress.clone(), out.clone());
         std::thread::spawn(move || {
-            let _ = generate_to_disk(&cfg, &out, &progress);
+            let _ = generate_to_disk(&cfg, &catalog, &out, &progress);
         });
     }
     let window = Window {
