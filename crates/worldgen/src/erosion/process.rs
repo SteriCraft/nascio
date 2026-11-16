@@ -58,6 +58,7 @@ pub fn erode(
     shape: Shape,
     sea: &[bool],
     cfg: &ErosionConfig,
+    progress: &crate::progress::Progress,
 ) -> ErosionStats {
     let steps = cfg.steps();
     let mut stats = ErosionStats {
@@ -73,7 +74,9 @@ pub fn erode(
     let mut coast: Vec<f64> = sea.iter().map(|&s| if s { -1.0e12 } else { 0.0 }).collect();
     crate::seafloor::limit_slope(&mut coast, shape.res, shape.res, shape.cell, 1.0, sea);
     coast.iter_mut().for_each(|d| *d = -*d);
-    for _ in 0..steps {
+    for step in 0..steps {
+        progress.set_range(0.03, 0.95, step as usize, steps as usize, 0.0);
+        progress.detail(format!("step {}/{steps}", step + 1));
         // Tectonic uplift of the land (the sea keeps its extent).
         for k in 0..shape.n() {
             if !sea[k] && uplift[k] > 0.0 {
@@ -479,7 +482,15 @@ mod tests {
         let h0 = h.clone();
         let sea: Vec<bool> = h.iter().map(|&v| v < 0.0).collect();
         let rain = vec![s.cell * s.cell; s.n()];
-        let stats = erode(&mut h, &rain, &vec![0.0; s.n()], s, &sea, &cfg);
+        let stats = erode(
+            &mut h,
+            &rain,
+            &vec![0.0; s.n()],
+            s,
+            &sea,
+            &cfg,
+            &crate::progress::Progress::new(),
+        );
         assert!(stats.fluvial_m3 > 0.0);
         assert!(h.iter().zip(&sea).all(|(&v, &is_sea)| is_sea || v >= 0.0));
         assert!(h.iter().zip(&h0).all(|(a, b)| a <= b || *b < 0.0));

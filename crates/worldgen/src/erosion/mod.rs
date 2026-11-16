@@ -329,9 +329,14 @@ fn rain_volume(precip: &PeriodicGrid<f32>, shape: flow::Shape) -> Vec<f64> {
 }
 
 /// Runs the erosion stage on a tectonic result.
-pub fn run(cfg: &WorldConfig, tect: &TectonicOutput) -> ErosionOutput {
+pub fn run(
+    cfg: &WorldConfig,
+    tect: &TectonicOutput,
+    progress: &crate::progress::Progress,
+) -> ErosionOutput {
     let mut report = ErosionReport::default();
     let fine = timed(&mut report, "upsample", || upsample::upsample(cfg, tect));
+    progress.set(0.02);
     let precipitation = timed(&mut report, "precipitation", || {
         precip::precipitation(cfg, &fine)
     });
@@ -346,7 +351,15 @@ pub fn run(cfg: &WorldConfig, tect: &TectonicOutput) -> ErosionOutput {
     let sea = flow::sea_mask(fine.data(), shape, sea_min_area_m2);
     let mut h = fine.data().to_vec();
     report.stats = timed(&mut report, "erosion", || {
-        process::erode(&mut h, &rain, &uplift_fine, shape, &sea, &cfg.erosion)
+        process::erode(
+            &mut h,
+            &rain,
+            &uplift_fine,
+            shape,
+            &sea,
+            &cfg.erosion,
+            progress,
+        )
     });
     report.stats.seafloor_m3 = timed(&mut report, "seafloor", || {
         // Fan fronts and plunging coasts: the eroded sea floor keeps the tectonic slope limit.
@@ -373,6 +386,8 @@ pub fn run(cfg: &WorldConfig, tect: &TectonicOutput) -> ErosionOutput {
     let land: Vec<usize> = (0..shape.n()).filter(|&k| !sea[k]).collect();
     report.mean_land_lowering_m =
         land.iter().map(|&k| fine.data()[k] - h[k]).sum::<f64>() / land.len().max(1) as f64;
+    progress.set(0.96);
+    progress.detail("hydrography");
     let hy = timed(&mut report, "hydrography", || {
         hydro::hydrography(&h, &rain, shape, sea_min_area_m2, &cfg.erosion)
     });

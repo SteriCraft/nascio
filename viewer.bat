@@ -20,8 +20,8 @@ if not "%FIRST%"=="" if not "%FIRST:~0,1%"=="-" (
 )
 
 if not exist "%WORLD%\world.toml" (
-    echo World "%WORLD%" not found. Generating seed 42, full resolution, about 90 s...
-    cargo run -p nascio-worldgen --release --target-dir target-viewer -- generate --seed 42 --scale 1 --out "%WORLD%"
+    echo World "%WORLD%" not found. Generating seed 42, full resolution, about 2 min, progress window...
+    cargo run -p nascio-viewer --release --target-dir target-viewer -- "%WORLD%" --generate 42 --scale 1
     if errorlevel 1 goto :fail
 )
 

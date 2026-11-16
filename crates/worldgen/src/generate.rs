@@ -4,6 +4,7 @@
 use crate::climate::{self, ClimateOutput};
 use crate::config::WorldConfig;
 use crate::erosion::{self, ErosionOutput};
+use crate::progress::{Progress, Stage};
 use crate::tectonics::{TectonicOutput, Tectonics};
 use crate::world_io::World;
 use crate::{biomes, grid::PeriodicGrid};
@@ -37,15 +38,25 @@ pub struct Generated {
 
 /// [`generate`], also returning every stage's output.
 pub fn generate_full(cfg: &WorldConfig) -> anyhow::Result<Generated> {
+    generate_full_with(cfg, &Progress::new())
+}
+
+/// [`generate_full`], reporting its progress to `progress` (display only: the result does not
+/// depend on it).
+pub fn generate_full_with(cfg: &WorldConfig, progress: &Progress) -> anyhow::Result<Generated> {
     cfg.validate()?;
+    progress.begin(Stage::Tectonics);
     let target = cfg.tectonics.continental_fraction;
     let mut initial = target;
     let mut best: Option<(f64, Tectonics)> = None;
     let mut runs = 0;
     for _ in 0..MAX_CALIBRATION_RUNS {
         runs += 1;
+        progress.detail(format!("calibration run {runs}"));
         let mut t = Tectonics::with_initial_fraction(cfg, initial);
-        t.run();
+        // Unknown number of runs: each one fills half of what is left of the bar.
+        let done = 1.0 - 0.5f64.powi(runs as i32 - 1);
+        t.run_with(|f| progress.set(done + (1.0 - done) * 0.5 * f));
         let err = t.continental_fraction() - target;
         let better = best.as_ref().is_none_or(|(e, _)| err.abs() < e.abs());
         if better {
@@ -59,18 +70,22 @@ pub fn generate_full(cfg: &WorldConfig) -> anyhow::Result<Generated> {
     let (_, t) = best.expect("at least one run");
     let mut out = t.finish();
     out.report.calibration_runs = runs;
-    let mut ero = erosion::run(cfg, &out);
+    progress.begin(Stage::Erosion);
+    let mut ero = erosion::run(cfg, &out, progress);
     let mut timings = Vec::new();
     let mut timed = |name: &'static str, start: std::time::Instant| {
         timings.push((name, start.elapsed().as_secs_f64()));
     };
+    progress.begin(Stage::Climate);
     let start = std::time::Instant::now();
     let sea: Vec<bool> = ero.basin_id.data().iter().map(|&b| b == 0).collect();
-    let clim = climate::run(cfg, &ero.elevation, &sea);
+    let clim = climate::run(cfg, &ero.elevation, &sea, progress);
     timed("climate", start);
+    progress.begin(Stage::Hydrology);
     let start = std::time::Instant::now();
     erosion::final_hydrology(cfg, &mut ero, &clim.precipitation.x0);
     timed("final hydrology", start);
+    progress.begin(Stage::Biomes);
     let start = std::time::Instant::now();
     let biome = biomes::biomes(cfg, &ero, &clim);
     timed("biomes", start);
@@ -90,4 +105,32 @@ pub fn generate_full(cfg: &WorldConfig) -> anyhow::Result<Generated> {
         biome,
         timings,
     })
+}
+
+/// Generates a world and writes it under `dir` (`world.toml`, layers, previews), reporting the
+/// saving and preview stages too, then [`Progress::finish`] (or [`Progress::fail`]).
+pub fn generate_to_disk(
+    cfg: &WorldConfig,
+    dir: &std::path::Path,
+    progress: &Progress,
+) -> anyhow::Result<(Generated, usize)> {
+    let run = || -> anyhow::Result<(Generated, usize)> {
+        let g = generate_full_with(cfg, progress)?;
+        progress.begin(Stage::Saving);
+        g.world.save(dir)?;
+        progress.begin(Stage::Previews);
+        let previews =
+            crate::preview::write_previews(&g.world, &g.tectonics.plates, &dir.join("previews"))?;
+        Ok((g, previews.len()))
+    };
+    match run() {
+        Ok(r) => {
+            progress.finish();
+            Ok(r)
+        }
+        Err(e) => {
+            progress.fail(format!("{e:#}"));
+            Err(e)
+        }
+    }
 }

@@ -116,8 +116,14 @@ impl Tectonics {
 
     /// Runs every remaining step.
     pub fn run(&mut self) {
+        self.run_with(|_| {});
+    }
+
+    /// Runs every remaining step, calling `on_step` with the share of steps done.
+    pub fn run_with(&mut self, mut on_step: impl FnMut(f64)) {
         while self.step_index < self.steps {
             self.step();
+            on_step(f64::from(self.step_index) / f64::from(self.steps.max(1)));
         }
     }
 

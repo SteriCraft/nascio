@@ -8,6 +8,7 @@
 mod bench;
 mod curvature;
 mod fly;
+mod generating;
 mod horizon;
 mod map;
 mod perf;
@@ -94,6 +95,15 @@ struct Args {
     /// Benchmark output: one CSV line per frame, plus a `.summary.txt` next to it.
     #[arg(long, default_value = "out/bench.csv")]
     bench_out: PathBuf,
+    /// Generate world SEED into the world directory with a progress window, then quit.
+    #[arg(long, value_name = "SEED")]
+    generate: Option<u64>,
+    /// With `--generate`: resolution divisor (1, 5 or 25).
+    #[arg(long, default_value_t = 1)]
+    scale: u32,
+    /// With `--generate`: TOML file overriding generation parameters.
+    #[arg(long)]
+    world_config: Option<PathBuf>,
 }
 
 #[derive(States, Default, Clone, Copy, Eq, PartialEq, Hash, Debug)]
@@ -112,6 +122,15 @@ fn main() {
 }
 
 fn run(mut args: Args) -> anyhow::Result<()> {
+    if let Some(seed) = args.generate {
+        return generating::run(
+            seed,
+            args.scale,
+            args.world_config.clone(),
+            args.world.clone(),
+            args.screenshot.clone(),
+        );
+    }
     let bench_file = args
         .bench
         .as_deref()

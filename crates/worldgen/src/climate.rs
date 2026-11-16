@@ -629,7 +629,12 @@ fn tau_for_lag(lag_days: f64) -> f64 {
 }
 
 /// Runs the climate stage. `elevation` is the fine grid (m), `is_sea` its sea mask.
-pub fn run(cfg: &WorldConfig, elevation: &PeriodicGrid<f32>, is_sea: &[bool]) -> ClimateOutput {
+pub fn run(
+    cfg: &WorldConfig,
+    elevation: &PeriodicGrid<f32>,
+    is_sea: &[bool],
+    progress: &crate::progress::Progress,
+) -> ClimateOutput {
     let c = &cfg.climate;
     let astro: AstroConfig = cfg.astro;
     let res = cfg.scale.tectonic_res();
@@ -721,6 +726,8 @@ pub fn run(cfg: &WorldConfig, elevation: &PeriodicGrid<f32>, is_sea: &[bool]) ->
         .collect();
     let recharge = |dist: f64| 1.0 - (-dist / c.ocean_recharge_m).exp();
     for (step, &day) in days.iter().enumerate() {
+        progress.set_range(0.1, 0.85, step, steps, 0.0);
+        progress.detail(format!("day sample {}/{steps}", step + 1));
         // Per cell: wind, upstream offset, wind speed.
         let per_cell: Vec<(f64, f64, f64, f64, f64)> = (0..n)
             .into_par_iter()

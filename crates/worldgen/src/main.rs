@@ -1,13 +1,15 @@
 //! `nascio-worldgen` command-line interface.
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use nascio_core::astro::AstroConfig;
 use nascio_worldgen::config::{GENERATOR_VERSION, Scale, WorldConfig};
-use nascio_worldgen::generate::generate_full;
-use nascio_worldgen::preview::write_previews;
+use nascio_worldgen::generate::generate_to_disk;
+use nascio_worldgen::progress::Progress;
 use nascio_worldgen::sun_curves::{self, Hemisphere};
 
 #[derive(Parser)]
@@ -108,24 +110,36 @@ fn main() -> anyhow::Result<()> {
             };
             cfg.generator_version = GENERATOR_VERSION;
             let out = out.unwrap_or_else(|| PathBuf::from(format!("out/world-{seed}")));
-            let start = Instant::now();
-            let g = generate_full(&cfg)?;
+            let progress = Progress::new();
+            let stop = AtomicBool::new(false);
+            let result = std::thread::scope(|s| {
+                s.spawn(|| {
+                    let mut err = std::io::stderr();
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = write!(err, "\r{:<72}", progress.line());
+                        let _ = err.flush();
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                    let _ = writeln!(err, "\r{:<72}", progress.line());
+                });
+                let r = generate_to_disk(&cfg, &out, &progress);
+                stop.store(true, Ordering::Relaxed);
+                r
+            });
+            let (g, previews) = result?;
             let (world, tect, ero) = (&g.world, &g.tectonics, &g.erosion);
-            let elapsed = start.elapsed();
-            world.save(&out)?;
-            let previews = write_previews(world, &tect.plates, &out.join("previews"))?;
             println!("{}", tect.report);
             println!("{}", ero.report);
-            for (name, t) in &g.timings {
-                println!("{name}: {t:.2} s");
+            for (stage, t) in progress.snapshot().done {
+                println!("{}: {t:.2} s", stage.name());
             }
-            println!("generated in {:.2} s", elapsed.as_secs_f64());
+            println!("generated in {:.2} s", progress.snapshot().elapsed_s);
             println!("hash: {}", world.hash());
             println!(
                 "wrote {} ({} layers, {} previews)",
                 out.display(),
                 world.layers.len(),
-                previews.len()
+                previews
             );
             if !tect.report.continental_fraction_ok {
                 eprintln!("warning: final continental fraction is out of tolerance");
