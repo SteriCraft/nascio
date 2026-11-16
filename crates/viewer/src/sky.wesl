@@ -164,7 +164,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if cm > cos(r_moon) {
         let off = (d - m * cm) / sin(r_moon);
         let nz = sqrt(max(1.0 - dot(off, off), 0.0));
-        let normal = normalize(off + m * nz);
+        // The visible hemisphere faces the observer (−m).
+        let normal = normalize(off - m * nz);
         let lit = max(dot(normal, sky.sun_geo.xyz), 0.0);
         let edge = smoothstep(cos(r_moon), cos(r_moon * 0.92), cm);
         let moon = vec3<f32>(0.85, 0.85, 0.8) * (0.03 + 1.2 * lit);

@@ -69,6 +69,15 @@ Chaque jalon se termine par une revue avec l'auteur. On ne passe pas au jalon su
 
 **Validation** : des cartes de température et de pluie plausibles en janvier et en juillet, des déserts subtropicaux, des forêts équatoriales, une sécheresse visible à l'abri des montagnes, une bande polaire sombre sans saut du soleil.
 
+**Réalisé (2026-11-16, à valider en revue)** :
+- revue de M3 : soulèvement tectonique pendant l'érosion, tiré des vitesses de convergence (sutures soudées comprises) ;
+- climat sur la grille de 160 m (24 pas par an, harmoniques) : température (profil calé, inertie terre/mer, continentalité, gradient vertical, courants), vents à trois cellules suivant `δ_eff`, humidité advectée et pluies orographiques, ZCIT et ceintures sèches, nuages, neige au sol, bande polaire climatique (pluies fortes, neige permanente) ; amplitude diurne ;
+- hydrologie finale avec les pluies du climat (largeur et profondeur des rivières) ; biomes Köppen sur la grille de 32 m (14 codes) ;
+- chunks jusqu'au Moho (pierre générique), magma dessous ;
+- côtes en escalier de 160 m corrigées (distorsion de domaine) ;
+- visualiseur : cartes climatiques animées selon la date, jour/nuit par pixel ; en 3D, soleil calculé par pixel, ombres dans le shader courbé, dôme du ciel, Lune et ses phases, étoiles réelles, aurores, couvert polaire, neige saisonnière ; `R_vis` = 200 km ;
+- graines 42, 7, 1234 et 2026 : génération complète en 61 à 73 s (climat 7,5 s) ; benchmark : p95 6,22 ms avec les ombres, 4,43 ms sans (M3 : 4,29 ms).
+
 ## M5 — Géologie et sous-sol
 - Colonne géologique (§4.6), Moho variable, température en profondeur, magme mortel, gisements par contexte.
 - Visualiseur : coupe verticale (2D) et couche des « gisements ».
