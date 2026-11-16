@@ -3,12 +3,13 @@
 use crate::biomes::BiomeConfig;
 use crate::climate::ClimateConfig;
 use crate::erosion::ErosionConfig;
+use nascio_core::AtmosphereConfig;
 use nascio_core::astro::AstroConfig;
 use nascio_core::time::GameClock;
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a change alters generated output for a given config.
-pub const GENERATOR_VERSION: u32 = 7;
+pub const GENERATOR_VERSION: u32 = 8;
 
 /// Full-resolution cell size of the tectonic grid, in metres (spec §1.4).
 pub const TECTONIC_CELL_M: u32 = 160;
@@ -375,6 +376,8 @@ pub struct WorldConfig {
     #[serde(default)]
     pub astro: AstroConfig,
     #[serde(default)]
+    pub atmosphere: AtmosphereConfig,
+    #[serde(default)]
     pub tectonics: TectonicsConfig,
     #[serde(default)]
     pub erosion: ErosionConfig,
@@ -393,6 +396,7 @@ impl WorldConfig {
             scale,
             clock: GameClock::default(),
             astro: AstroConfig::default(),
+            atmosphere: AtmosphereConfig::default(),
             tectonics: TectonicsConfig::default(),
             erosion: ErosionConfig::default(),
             climate: ClimateConfig::default(),
@@ -404,6 +408,9 @@ impl WorldConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(self.seed <= i64::MAX as u64, "seed must be below 2^63");
         self.astro.validate()?;
+        self.atmosphere
+            .validate()
+            .map_err(|e| anyhow::anyhow!("atmosphere: {e}"))?;
         self.tectonics
             .validate()
             .map_err(|e| anyhow::anyhow!("tectonics: {e}"))?;

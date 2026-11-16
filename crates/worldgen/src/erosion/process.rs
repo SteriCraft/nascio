@@ -13,7 +13,9 @@
 //!   leaving the land joins the sediment of that sea cell;
 //! - **coastal sediments**: the volume eroded upstream of each river mouth (and shed by the
 //!   coast) builds a fan under the sea, never above `deposit_top_m`, with a slope of
-//!   `deposit_slope` away from the mouth.
+//!   `deposit_slope` away from the mouth, and never above a shelf deepening offshore with
+//!   `deposit_shelf_slope` (distance to the coast): merged fans make a sloping shelf, not a
+//!   flat.
 //!
 //! The sea never changes extent: land is never lowered below sea level and fans stay below it.
 
@@ -67,6 +69,10 @@ pub fn erode(
     let substeps = diffusion_substeps(shape.cell, cfg);
     stats.diffusion_substeps = substeps;
     let mut sediment = vec![0.0f64; shape.n()];
+    // Distance of every sea cell to the land (the sea never changes extent).
+    let mut coast: Vec<f64> = sea.iter().map(|&s| if s { -1.0e12 } else { 0.0 }).collect();
+    crate::seafloor::limit_slope(&mut coast, shape.res, shape.res, shape.cell, 1.0, sea);
+    coast.iter_mut().for_each(|d| *d = -*d);
     for _ in 0..steps {
         // Tectonic uplift of the land (the sea keeps its extent).
         for k in 0..shape.n() {
@@ -121,7 +127,7 @@ pub fn erode(
             stats.coastal_m3 += shed.iter().sum::<f64>();
         }
         let delivered: f64 = sediment.iter().sum();
-        let deposited = deposit(h, sea, shape, cfg, &mut sediment);
+        let deposited = deposit(h, sea, &coast, shape, cfg, &mut sediment);
         stats.deposited_m3 += deposited;
         stats.lost_m3 += delivered - deposited;
     }
@@ -208,17 +214,21 @@ fn diffuse(h: &mut [f64], sea: &[bool], shape: Shape, cfg: &ErosionConfig, dt: f
 
 /// Builds the sediment fans: every sea cell holding sediment (in index order) spreads it over
 /// the sea around it, raising cells up to `deposit_top − deposit_slope · distance`, nearest
-/// first. Sediment the cone cannot hold is then spread flat up to `deposit_top` (a shallow sea
+/// first, and never above the shelf `deposit_top − deposit_shelf_slope · coast` (`coast`: distance
+/// of each sea cell to the land, m). Sediment the cone cannot hold is then spread flat up to `deposit_top` (a shallow sea
 /// silting up). Returns the deposited volume (m³); `sediment` is emptied, and what even a flat
 /// fill cannot hold (a full sea) is lost.
 fn deposit(
     h: &mut [f64],
     sea: &[bool],
+    coast: &[f64],
     shape: Shape,
     cfg: &ErosionConfig,
     sediment: &mut [f64],
 ) -> f64 {
     let mut fans = Fans {
+        coast,
+        shelf_slope: cfg.deposit_shelf_slope,
         stamp: vec![u32::MAX; shape.n()],
         dist: vec![0.0; shape.n()],
         heap: BinaryHeap::new(),
@@ -250,14 +260,16 @@ fn deposit(
 }
 
 /// Scratch space of [`deposit`]: Dijkstra over the sea, reset by stamping.
-struct Fans {
+struct Fans<'a> {
+    coast: &'a [f64],
+    shelf_slope: f64,
     stamp: Vec<u32>,
     dist: Vec<f64>,
     heap: BinaryHeap<Reverse<(u64, u32)>>,
     pass: u32,
 }
 
-impl Fans {
+impl Fans<'_> {
     /// Spreads `volume` from `mouth` under the profile `top − slope · distance`; returns what
     /// is left.
     #[allow(clippy::too_many_arguments)]
@@ -284,7 +296,7 @@ impl Fans {
             if d > self.dist[c] {
                 continue;
             }
-            let target = top - slope * d;
+            let target = (top - slope * d).min(top - self.shelf_slope * self.coast[c]);
             if h[c] < target {
                 let add = (target - h[c]).min(volume / area);
                 h[c] += add;
@@ -386,12 +398,14 @@ mod tests {
             .map(|k| if k % 64 < 10 { 50.0 } else { -40.0 })
             .collect();
         let sea: Vec<bool> = h.iter().map(|&v| v < 0.0).collect();
+        // Flat-shelf case: no offshore deepening.
+        let coast = vec![0.0; s.n()];
         let before: f64 = (0..s.n()).filter(|&k| sea[k]).map(|k| h[k]).sum();
         let mut sed = vec![0.0; s.n()];
         let mouth = 30 * 64 + 10;
         let v = 2.0e9;
         sed[mouth] = v;
-        let got = deposit(&mut h, &sea, s, &cfg, &mut sed);
+        let got = deposit(&mut h, &sea, &coast, s, &cfg, &mut sed);
         assert!((got - v).abs() < 1e-6 * v, "{got} vs {v}");
         assert!(sed.iter().all(|&x| x == 0.0));
         let after: f64 = (0..s.n()).filter(|&k| sea[k]).map(|k| h[k]).sum();
@@ -407,8 +421,39 @@ mod tests {
             .map(|k| if k % 64 < 10 { 50.0 } else { -400.0 })
             .collect();
         sed[mouth] = 1.0e9;
-        assert!((deposit(&mut h2, &sea, s, &cfg, &mut sed) - 1.0e9).abs() < 1.0);
+        assert!((deposit(&mut h2, &sea, &coast, s, &cfg, &mut sed) - 1.0e9).abs() < 1.0);
         assert!(h2[30 * 64 + 12] < h2[mouth] && h2[mouth] == cfg.deposit_top_m);
+    }
+
+    #[test]
+    fn merged_fans_make_a_shelf_deepening_offshore() {
+        let s = shape(64);
+        let cfg = ErosionConfig::default();
+        let mut h: Vec<f64> = (0..s.n())
+            .map(|k| if k % 64 < 10 { 50.0 } else { -400.0 })
+            .collect();
+        let sea: Vec<bool> = h.iter().map(|&v| v < 0.0).collect();
+        // Distance to the land column 9 (coast on the x seam side ignored: far away).
+        let coast: Vec<f64> = (0..s.n())
+            .map(|k| ((k % 64) as f64 - 9.0).max(0.0) * s.cell)
+            .collect();
+        // Every coastal cell is a mouth with plenty of sediment.
+        let mut sed = vec![0.0; s.n()];
+        for j in 0..64 {
+            sed[j * 64 + 10] = 1.0e11;
+        }
+        deposit(&mut h, &sea, &coast, s, &cfg, &mut sed);
+        for i in 10..20 {
+            let want = cfg.deposit_top_m - cfg.deposit_shelf_slope * coast[i];
+            let row: Vec<f64> = (0..64).map(|j| h[j * 64 + i]).collect();
+            assert!(row.iter().all(|&v| v <= want + 1e-9), "column {i}");
+            assert!(
+                (row[32] - want).abs() < 1e-9,
+                "column {i}: {} vs {want}",
+                row[32]
+            );
+        }
+        assert!(h[32 * 64 + 19] < h[32 * 64 + 11]);
     }
 
     #[test]

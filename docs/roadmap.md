@@ -84,6 +84,14 @@ Chaque jalon se termine par une revue avec l'auteur. On ne passe pas au jalon su
 - rendu : neige sur les faces verticales et limite des neiges par l'altitude fine, étoiles du BSC5 jusqu'à la magnitude 6,5 (curseur, 5 par défaut), Lune texturée (NASA SVS), FOV de 42°, minimap, point d'apparition choisi sur la carte, vsync, horloge locale et d'origine, distance des chunks de 1 024 m par défaut ;
 - graines 42, 7 et 1234 : génération en 80 à 93 s ; benchmark sur la graine 42 : moyenne 3,52 ms, p95 4,78 ms (M4 : 3,72 et 6,22 ms).
 
+**Atmosphère et pluies par saturation (2026-11-16)** :
+- pression atmosphérique selon le profil terrestre comprimé ×2, nulle à 50 km (472 hPa à 3 km) ; gradient thermique conservé à −6,5 °C/km ;
+- humidité de l'air (rapport de mélange) advectée et exportée ; pluies par condensation au-delà de la saturation `w_s(T, P)` ;
+- profil thermique réchauffé vers 45–60° : juillet de 14 à 17 °C sur les côtes, mer libre jusqu'à 55° ;
+- plateformes de dépôt en pente depuis la côte : de −1 m au rivage jusqu'à −20 m environ à 1 km ;
+- HUD 3D : température, humidité relative et pression à la caméra, sous l'horloge ;
+- graines 42, 7, 1234 et 2026 : génération en 87 à 136 s (`generator_version` 8) ; benchmark sur la graine 42 : moyenne 3,49 ms, p95 4,77 ms (sans changement).
+
 ## M5 — Géologie et sous-sol
 - Colonne géologique (§4.6), Moho variable, température en profondeur, magme mortel, gisements par contexte.
 - Visualiseur : coupe verticale (2D) et couche des « gisements ».

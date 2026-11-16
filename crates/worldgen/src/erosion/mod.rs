@@ -103,6 +103,10 @@ pub struct ErosionConfig {
     pub deposit_slope: f64,
     /// Sediment never builds above this depth.
     pub deposit_top_m: f64,
+    /// Nor above `deposit_top_m − deposit_shelf_slope · distance to the coast`: the fans of
+    /// neighbouring mouths merge into a shelf that deepens offshore (about −20 m 1 km out)
+    /// instead of a flat at `deposit_top_m`.
+    pub deposit_shelf_slope: f64,
     /// Tectonic uplift rate along a convergent boundary closing at the fastest plate speed
     /// (m/yr); slower boundaries rise proportionally, over the orogen width. 0 disables uplift.
     pub uplift_max_m_yr: f64,
@@ -171,6 +175,7 @@ impl Default for ErosionConfig {
             max_diffusion_factor: 3.0,
             deposit_slope: 0.01,
             deposit_top_m: -1.0,
+            deposit_shelf_slope: 0.02,
             uplift_max_m_yr: 5.0e-4,
             suture_uplift_share: 0.5,
             lake_min_depth_m: 2.0,
@@ -200,8 +205,10 @@ impl ErosionConfig {
         if self.rift_width_m <= 0.0 || self.detail_finest_m <= 0.0 {
             return Err("rift_width_m and detail_finest_m must be > 0".into());
         }
-        if self.deposit_top_m >= 0.0 || self.deposit_slope < 0.0 {
-            return Err("deposit_top_m must be < 0 and deposit_slope >= 0".into());
+        if self.deposit_top_m >= 0.0 || self.deposit_slope < 0.0 || self.deposit_shelf_slope < 0.0 {
+            return Err(
+                "deposit_top_m must be < 0, deposit_slope and deposit_shelf_slope >= 0".into(),
+            );
         }
         Ok(())
     }

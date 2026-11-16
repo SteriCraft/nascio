@@ -61,6 +61,15 @@ const PRECIP_STOPS: [(f64, &str); 7] = [
 ];
 
 /// Temperature, °C → colour (diverging, white at 0 °C).
+/// Mixing ratio of the surface air, g/kg.
+const HUMIDITY_STOPS: [(f64, &str); 5] = [
+    (0.0, "#f2e6c8"),
+    (3.0, "#d9d39a"),
+    (7.0, "#7fbf8e"),
+    (12.0, "#2f8fb8"),
+    (20.0, "#1d2766"),
+];
+
 const TEMP_STOPS: [(f64, &str); 8] = [
     (-35.0, "#1d2766"),
     (-20.0, "#256abf"),
@@ -79,9 +88,10 @@ const BIOME_COLORS: [&str; crate::biomes::code::COUNT] = [
 ];
 
 /// Climate maps evaluated at a day of the year (the viewer animates them).
-pub const CLIMATE_MAPS: [&str; 5] = [
+pub const CLIMATE_MAPS: [&str; 6] = [
     "temperature",
     "precipitation",
+    "humidity",
     "snow_fraction",
     "cloud_cover",
     "wind",
@@ -135,6 +145,10 @@ pub fn colorize_climate(world: &World, name: &str, n: Option<f64>) -> Option<Vec
                 })
                 .collect()
         }
+        "humidity" => field("humidity")
+            .iter()
+            .map(|&w| ramp(&HUMIDITY_STOPS, w))
+            .collect(),
         "snow_fraction" => {
             let s = field("snow_fraction");
             (0..size)
@@ -201,6 +215,11 @@ pub fn climate_legend(name: &str) -> Vec<(Color, &'static str)> {
             (hex("#256abf"), "snow cover 100%"),
         ],
         "cloud_cover" => vec![(hex("#2a78d6"), "clear"), (hex("#f4f2ee"), "overcast")],
+        "humidity" => HUMIDITY_STOPS
+            .iter()
+            .zip(["0 g/kg", "3", "7", "12", "20"])
+            .map(|(&(v, _), l)| (ramp(&HUMIDITY_STOPS, v), l))
+            .collect(),
         "wind" => vec![(hex("#e87ba4"), "10 m/s (arrows: direction)")],
         _ => Vec::new(),
     }

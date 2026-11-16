@@ -20,10 +20,18 @@
 //! - **Ocean currents** (schematic, constant over the year): warm poleward boundary currents on
 //!   the western edges of the basins, cold equatorward ones (upwelling) on their eastern edges in
 //!   the subtropics, zonal drift with the winds elsewhere.
-//! - **Moisture and precipitation**: relative moisture advected along the wind (semi-Lagrangian
-//!   gather, deterministic), recharged over the sea, drying over land, emptied by climbs
-//!   (windward rain, rain shadow), times the zonal profile shifted with the ITCZ (wet ITCZ, dry
-//!   belts near 30°). Polar band: precipitation forced up to `polar_precip_mm·c_min(s)`.
+//! - **Moisture and precipitation**: the air carries water vapour as a mixing ratio `w` (g/kg),
+//!   advected along the wind (semi-Lagrangian gather, deterministic). Over the sea it recharges
+//!   towards `sea_humidity` times the saturation mixing ratio `w_s(T, P)` at the local air
+//!   temperature and pressure ([`nascio_core::atmosphere`]); over land it slowly dries. Wherever
+//!   `w > w_s(T, P)` the excess condenses and rains out: air climbing a slope cools with the
+//!   lapse rate and meets a lower pressure (windward rain, rain shadow beyond), and air carried
+//!   over colder land does the same (coastal winter snow). Over the sea the air only cools from
+//!   below (cold currents): the excess condenses into fog and is removed, without rain. The large-scale rain is the zonal
+//!   profile shifted with the ITCZ (wet ITCZ, dry belts near 30°), scaled by the moisture of the
+//!   air relative to marine air at the cell's sea-level temperature. Polar band: precipitation
+//!   forced up to `polar_precip_mm·c_min(s)`. The surface mixing ratio is exported (`humidity`):
+//!   with the temperature and the pressure it gives the relative humidity anywhere.
 //! - **Clouds** from the precipitation, never below `c_min(s)` (§2.7).
 //! - **Snow cover**: snowpack balance (snowfall below freezing, degree-day melt) run until it
 //!   repeats from one year to the next; permanent snow in the polar band (§4.3).
@@ -35,6 +43,7 @@ use std::collections::BinaryHeap;
 use std::f64::consts::TAU;
 
 use nascio_core::AstroConfig;
+use nascio_core::atmosphere::saturation_mixing_ratio;
 use nascio_core::climate::Harmonics;
 use nascio_core::geo::{latitude, seam_distance};
 use nascio_core::math::smoothstep;
@@ -47,6 +56,7 @@ use crate::grid::PeriodicGrid;
 use crate::world_io::Layer;
 
 const YEAR: f64 = 365.0;
+const SECONDS_PER_YEAR: f64 = YEAR * 86_400.0;
 
 /// Tunable climate parameters (`[climate]` in TOML).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -114,10 +124,13 @@ pub struct ClimateConfig {
     pub land_decay_m: f64,
     /// Share of the zonal precipitation kept by fully dried air.
     pub dry_floor: f64,
-    /// Moisture flux of saturated air, mm/yr × m (rain released over a climb).
-    pub orographic_flux: f64,
-    /// Climb that releases 63 % of the moisture, m.
-    pub orographic_height_m: f64,
+    /// Relative humidity the air reaches over the sea (0–1).
+    pub sea_humidity: f64,
+    /// Effective mass of air whose condensed vapour rains out, kg/m²: the rain of a cell is
+    /// this mass times the wind speed times the condensed mixing ratio per metre travelled.
+    /// It lumps the depth of the lifted layer, the share of the time it rains and the
+    /// precipitation efficiency (calibrated on the orographic rain of the M4 climate).
+    pub rain_column_kg_m2: f64,
     /// Precipitation forced in the polar band, mm/yr at `c_min(s) = 1` (§2.7: heavy).
     pub polar_precip_mm: f64,
     // --- Clouds and snow ---
@@ -149,10 +162,14 @@ impl Default for ClimateConfig {
             mean_profile: vec![
                 [0.0, -14.0],
                 [0.2, -11.0],
-                [0.58, -8.0],
-                [0.66, -1.0],
-                [0.75, 6.0],
-                [0.84, 14.0],
+                [0.48, -6.0],
+                [0.52, 0.0],
+                [0.57, 5.5],
+                [0.63, 8.0],
+                [0.68, 9.5],
+                [0.74, 12.0],
+                [0.79, 14.5],
+                [0.84, 17.0],
                 [0.91, 20.0],
                 [0.96, 24.5],
                 [1.0, 26.5],
@@ -161,7 +178,7 @@ impl Default for ClimateConfig {
             lag_land_days: 30.0,
             lag_sea_days: 52.0,
             coast_decay_m: 20_000.0,
-            sea_amplitude: 0.55,
+            sea_amplitude: 0.4,
             lapse_rate_c_per_m: 0.0065,
             sea_ice_c: -1.8,
             polar_cooling_c: 6.0,
@@ -193,8 +210,8 @@ impl Default for ClimateConfig {
             ocean_recharge_m: 3_000.0,
             land_decay_m: 40_000.0,
             dry_floor: 0.3,
-            orographic_flux: 1.0e7,
-            orographic_height_m: 1_500.0,
+            sea_humidity: 0.9,
+            rain_column_kg_m2: 50.0,
             polar_precip_mm: 1_600.0,
             cloud_full_mm: 3_000.0,
             cloud_min: 0.05,
@@ -228,6 +245,9 @@ impl ClimateConfig {
         }
         if self.snow_below_c >= self.rain_above_c || self.snow_full_mm <= 0.0 {
             return Err("snow_below_c < rain_above_c and snow_full_mm > 0 required".into());
+        }
+        if !(0.0..=1.0).contains(&self.sea_humidity) || self.rain_column_kg_m2 < 0.0 {
+            return Err("sea_humidity must lie in [0, 1] and rain_column_kg_m2 be >= 0".into());
         }
         if self.advection_step_m <= 0.0 || self.advection_ref_wind_m_s <= 0.0 {
             return Err("advection_step_m and advection_ref_wind_m_s must be > 0".into());
@@ -283,9 +303,10 @@ impl HarmonicGrid {
 }
 
 /// Names of the harmonic quantities, with their units.
-pub const HARMONIC_QUANTITIES: [(&str, &str); 6] = [
+pub const HARMONIC_QUANTITIES: [(&str, &str); 7] = [
     ("temperature", "C"),
     ("precipitation", "mm/yr"),
+    ("humidity", "g/kg"),
     ("wind_u", "m/s"),
     ("wind_v", "m/s"),
     ("snow_fraction", "0-1"),
@@ -297,6 +318,8 @@ pub const HARMONIC_QUANTITIES: [(&str, &str); 6] = [
 pub struct ClimateOutput {
     pub temperature: HarmonicGrid,
     pub precipitation: HarmonicGrid,
+    /// Water vapour mixing ratio of the surface air, g/kg.
+    pub humidity: HarmonicGrid,
     /// Wind towards +x (east), m/s.
     pub wind_u: HarmonicGrid,
     /// Wind towards +z (south), m/s.
@@ -340,6 +363,7 @@ impl ClimateOutput {
         match name {
             "temperature" => &self.temperature,
             "precipitation" => &self.precipitation,
+            "humidity" => &self.humidity,
             "wind_u" => &self.wind_u,
             "wind_v" => &self.wind_v,
             "snow_fraction" => &self.snow_fraction,
@@ -688,14 +712,20 @@ pub fn run(cfg: &WorldConfig, elevation: &PeriodicGrid<f32>, is_sea: &[bool]) ->
     let mut wind_u = vec![vec![0.0; steps]; n];
     let mut wind_v = vec![vec![0.0; steps]; n];
     let mut precip = vec![vec![0.0; steps]; n];
+    let mut humidity = vec![vec![0.0; steps]; n];
+    let sea_level = cfg.atmosphere.pressure_hpa(0.0);
+    let pressure: Vec<f64> = surf
+        .height
+        .iter()
+        .map(|&h| cfg.atmosphere.pressure_hpa(h))
+        .collect();
     let recharge = |dist: f64| 1.0 - (-dist / c.ocean_recharge_m).exp();
     for (step, &day) in days.iter().enumerate() {
-        // Per cell: wind, upstream offset and climb along it.
+        // Per cell: wind, upstream offset, wind speed.
         let per_cell: Vec<(f64, f64, f64, f64, f64)> = (0..n)
             .into_par_iter()
             .map(|k| {
-                let (i, j) = (k % res, k / res);
-                let (x, z) = ((i as f64 + 0.5) * cell, (j as f64 + 0.5) * cell);
+                let z = ((k / res) as f64 + 0.5) * cell;
                 let s = seam_distance(z);
                 let dec = astro.effective_declination(day, s);
                 let lat = shifted_latitude(latitude(z).to_degrees(), dec, c.itcz_shift);
@@ -707,34 +737,62 @@ pub fn run(cfg: &WorldConfig, elevation: &PeriodicGrid<f32>, is_sea: &[bool]) ->
                 } else {
                     (0.0, 0.0)
                 };
-                let up = bilinear(&surf.height, res, cell, x + ox, z + oz);
-                let climb = (surf.height[k] - up).max(0.0);
-                (u, v, ox, oz, climb)
+                (u, v, ox, oz, speed)
             })
             .collect();
-        let mut q = vec![1.0f64; n];
-        let mut released = vec![0.0f64; n];
+        // Saturation mixing ratio at the cell (air temperature, pressure at the surface), and
+        // that of marine air at the cell's temperature brought back to sea level.
+        let sat: Vec<(f64, f64)> = (0..n)
+            .into_par_iter()
+            .map(|k| {
+                let t = temp_land[k][step];
+                let ws = saturation_mixing_ratio(t, pressure[k]);
+                let t0 = t + c.lapse_rate_c_per_m * surf.height[k];
+                let marine = c.sea_humidity * saturation_mixing_ratio(t0, sea_level);
+                (ws, marine)
+            })
+            .collect();
+        // The air is advected relative to the marine moisture of its row (latitude): moving
+        // poleward alone does not condense, the zonal profile already holds that rain. Only
+        // local departures (relief, land/sea contrast, currents) make it condense.
+        let row_ref: Vec<f64> = (0..res)
+            .map(|j| {
+                let r = &sat[j * res..(j + 1) * res];
+                (r.iter().map(|s| s.1).sum::<f64>() / res as f64).max(1e-6)
+            })
+            .collect();
+        let mut w: Vec<f64> = (0..n)
+            .map(|k| c.sea_humidity * sat[k].0 / row_ref[k / res])
+            .collect();
+        let mut condensed = vec![0.0f64; n];
         for _ in 0..c.advection_iterations {
             let next: Vec<(f64, f64)> = (0..n)
                 .into_par_iter()
                 .map(|k| {
                     let (i, j) = (k % res, k / res);
                     let (x, z) = ((i as f64 + 0.5) * cell, (j as f64 + 0.5) * cell);
-                    let (_, _, ox, oz, climb) = per_cell[k];
+                    let (_, _, ox, oz, _) = per_cell[k];
                     let len = ox.hypot(oz).max(1.0);
-                    let mut qk = bilinear(&q, res, cell, x + ox, z + oz);
+                    let wk = bilinear(&w, res, cell, x + ox, z + oz) * row_ref[j];
+                    let ws = sat[k].0;
                     let sea = surf.sea[k];
-                    // Sea: recharge towards saturation; land: slow drying.
-                    let land_q = qk * (-len / c.land_decay_m).exp();
-                    let sea_q = qk + (1.0 - qk) * recharge(len.max(cell));
-                    qk = sea * sea_q + (1.0 - sea) * land_q;
-                    let rel = qk * (1.0 - (-climb / c.orographic_height_m).exp());
-                    (qk - rel, rel / len)
+                    // Sea: recharge towards `sea_humidity · w_s`; land: slow drying.
+                    let target = c.sea_humidity * ws;
+                    let sea_w = if wk < target {
+                        wk + (target - wk) * recharge(len.max(cell))
+                    } else {
+                        wk
+                    };
+                    let land_w = wk * (-len / c.land_decay_m).exp();
+                    let wk = sea * sea_w + (1.0 - sea) * land_w;
+                    // Above saturation, the excess condenses and rains out.
+                    let excess = (wk - ws).max(0.0);
+                    ((wk - excess) / row_ref[j], excess / len)
                 })
                 .collect();
-            for (k, (qk, rel)) in next.into_iter().enumerate() {
-                q[k] = qk;
-                released[k] = rel;
+            for (k, (wk, cond)) in next.into_iter().enumerate() {
+                w[k] = wk;
+                condensed[k] = cond;
             }
         }
         for k in 0..n {
@@ -744,13 +802,24 @@ pub fn run(cfg: &WorldConfig, elevation: &PeriodicGrid<f32>, is_sea: &[bool]) ->
             let dec = astro.effective_declination(day, s);
             let lat = shifted_latitude(latitude(z).to_degrees(), dec, c.itcz_shift);
             let pz = zonal(&c.zonal_precip, lat.abs());
-            let p = pz * (c.dry_floor + (1.0 - c.dry_floor) * q[k].min(1.0))
-                + pz / 1_000.0 * c.orographic_flux * released[k];
+            let (u, v, _, _, speed) = per_cell[k];
+            let wk = w[k] * row_ref[j];
+            let moist = if sat[k].1 > 0.0 {
+                (wk / sat[k].1).min(1.0)
+            } else {
+                1.0
+            };
+            // Condensation: column mass × wind × condensed g/kg per metre → kg/m²/s → mm/yr.
+            // Over the sea the air only cools from below (cold currents): fog, not rain.
+            let rain = c.rain_column_kg_m2 * speed * condensed[k] / 1_000.0
+                * SECONDS_PER_YEAR
+                * (1.0 - surf.sea[k]);
+            let p = pz * (c.dry_floor + (1.0 - c.dry_floor) * moist) + rain;
             let polar = c.polar_precip_mm * astro.min_cloud_cover(s);
-            let (u, v, ..) = per_cell[k];
             wind_u[k][step] = u;
             wind_v[k][step] = v;
             precip[k][step] = p.max(polar);
+            humidity[k][step] = wk;
         }
     }
 
@@ -802,6 +871,7 @@ pub fn run(cfg: &WorldConfig, elevation: &PeriodicGrid<f32>, is_sea: &[bool]) ->
     ClimateOutput {
         temperature: HarmonicGrid::from_cells(res, cell, &project(&temp)),
         precipitation: HarmonicGrid::from_cells(res, cell, &project(&precip)),
+        humidity: HarmonicGrid::from_cells(res, cell, &project(&humidity)),
         wind_u: HarmonicGrid::from_cells(res, cell, &project(&wind_u)),
         wind_v: HarmonicGrid::from_cells(res, cell, &project(&wind_v)),
         snow_fraction: HarmonicGrid::from_cells(res, cell, &project(&snow)),
