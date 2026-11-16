@@ -171,7 +171,7 @@ impl Default for ErosionConfig {
             max_diffusion_factor: 3.0,
             deposit_slope: 0.01,
             deposit_top_m: -1.0,
-            uplift_max_m_yr: 3.0e-4,
+            uplift_max_m_yr: 5.0e-4,
             suture_uplift_share: 0.5,
             lake_min_depth_m: 2.0,
             lake_min_area_m2: 20_000.0,
@@ -255,7 +255,7 @@ impl std::fmt::Display for ErosionReport {
         let s = &self.stats;
         writeln!(
             f,
-            "erosion: {} steps ({} diffusion sub-steps each), uplift {:.3} km3 (max {:.0} m), fluvial {:.3} km3, coastal {:.3} km3, deposited {:.3} km3 (lost {:.3}), mean land lowering {:.1} m",
+            "erosion: {} steps ({} diffusion sub-steps each), uplift {:.3} km3 (max {:.0} m), fluvial {:.3} km3, coastal {:.3} km3, deposited {:.3} km3 (lost {:.3}), sea-floor slope fill {:.3} km3, mean land lowering {:.1} m",
             s.steps,
             s.diffusion_substeps,
             s.uplift_m3 / 1e9,
@@ -264,6 +264,7 @@ impl std::fmt::Display for ErosionReport {
             s.coastal_m3 / 1e9,
             s.deposited_m3 / 1e9,
             s.lost_m3 / 1e9,
+            s.seafloor_m3 / 1e9,
             self.mean_land_lowering_m
         )?;
         writeln!(f, "lakes: {} ({:.1} km2)", self.lakes, self.lake_area_km2)?;
@@ -339,6 +340,17 @@ pub fn run(cfg: &WorldConfig, tect: &TectonicOutput) -> ErosionOutput {
     let mut h = fine.data().to_vec();
     report.stats = timed(&mut report, "erosion", || {
         process::erode(&mut h, &rain, &uplift_fine, shape, &sea, &cfg.erosion)
+    });
+    report.stats.seafloor_m3 = timed(&mut report, "seafloor", || {
+        // Fan fronts and plunging coasts: the eroded sea floor keeps the tectonic slope limit.
+        crate::seafloor::limit_slope(
+            &mut h,
+            shape.res,
+            shape.res,
+            shape.cell,
+            cfg.tectonics.max_seafloor_slope,
+            &sea,
+        )
     });
     let land: Vec<usize> = (0..shape.n()).filter(|&k| !sea[k]).collect();
     report.mean_land_lowering_m =

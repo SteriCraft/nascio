@@ -9,7 +9,8 @@
 //!   ice albedo, and the seasonal part is `k·(Q(N) − Q̄)`; minus the lapse rate, minus the albedo
 //!   cooling of the polar band. Thermal inertia is a first-order relaxation
 //!   towards `T_eq` whose time constant gives a phase lag of about one month on land and 1.5 to
-//!   2 months at sea, blended by continentality (distance to the coast). The periodic steady
+//!   2 months at sea (with a damped seasonal swing, `sea_amplitude`), blended by
+//!   continentality (distance to the coast). The periodic steady
 //!   state of that relaxation is computed exactly, harmonic by harmonic (DFT of the samples). Sea
 //!   surfaces never cool below the freezing point of sea water. Ocean currents add warm and cold
 //!   anomalies.
@@ -67,6 +68,9 @@ pub struct ClimateConfig {
     pub lag_sea_days: f64,
     /// Distance inland over which the maritime influence decays (e-folding), m.
     pub coast_decay_m: f64,
+    /// Seasonal swing of the sea surface relative to the relaxed equilibrium at sea (the mixed
+    /// layer damps it more than a first-order lag alone): sea and coasts get mild winters.
+    pub sea_amplitude: f64,
     /// Lapse rate, °C per m.
     pub lapse_rate_c_per_m: f64,
     /// Sea surfaces never go below this temperature (sea ice), °C.
@@ -156,7 +160,8 @@ impl Default for ClimateConfig {
             seasonal_c_per_w: 0.13,
             lag_land_days: 30.0,
             lag_sea_days: 52.0,
-            coast_decay_m: 6_000.0,
+            coast_decay_m: 20_000.0,
+            sea_amplitude: 0.55,
             lapse_rate_c_per_m: 0.0065,
             sea_ice_c: -1.8,
             polar_cooling_c: 6.0,
@@ -653,9 +658,20 @@ pub fn run(cfg: &WorldConfig, elevation: &PeriodicGrid<f32>, is_sea: &[bool]) ->
             let base =
                 -c.lapse_rate_c_per_m * surf.height[k] - c.polar_cooling_c * polar + anomaly[k];
             let teq: Vec<f64> = row_teq[j].iter().map(|&t| t + base).collect();
+            // Maritime influence: the sea's temperature (lagging, with a damped seasonal
+            // swing) blended into the land's by the continentality.
             let m = surf.maritime(k, c.coast_decay_m);
-            let tau = tau_land + (tau_sea - tau_land) * m;
-            let land = relax(&teq, tau);
+            let on_land = relax(&teq, tau_land);
+            let mut on_sea = relax(&teq, tau_sea);
+            let mean = on_sea.iter().sum::<f64>() / on_sea.len() as f64;
+            on_sea
+                .iter_mut()
+                .for_each(|v| *v = mean + c.sea_amplitude * (*v - mean));
+            let land: Vec<f64> = on_land
+                .iter()
+                .zip(&on_sea)
+                .map(|(l, s)| m * s + (1.0 - m) * l)
+                .collect();
             let mut t = land.clone();
             let sea = surf.sea[k];
             if sea > 0.0 {

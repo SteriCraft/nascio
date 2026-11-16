@@ -297,13 +297,13 @@ impl Tectonics {
         // 4. Calibrate land and deep ocean on the target hypsometry (rank-preserving).
         let mut elev = raw.clone();
         match_ranks(&mut elev, &land_cells, &t.hypsometry.land);
-        match_ranks(&mut elev, &deep_cells, &t.hypsometry.deep);
+        if t.calibrate_deep {
+            match_ranks(&mut elev, &deep_cells, &t.hypsometry.deep);
+        }
         let calibrated_floor = elev.clone();
 
         // 5. Margins, island arcs and edifices on top of the calibrated surfaces.
-        let mut elevation = Vec::with_capacity(n);
-        let mut thickness = Vec::with_capacity(n);
-        let mut moho = Vec::with_capacity(n);
+        let mut surface = Vec::with_capacity(n);
         let mut history = Vec::with_capacity(n);
         let mut track = Vec::with_capacity(n);
         for (k, c) in g.data().iter().enumerate() {
@@ -325,10 +325,10 @@ impl Tectonics {
                     f |= flags::TRENCH;
                 }
                 let mut e = elev[k];
-                // Continental slope on passive margins.
-                let active = g_trench[k] > 0.05 || g_arc[k] > 0.05;
+                // Continental slope on every margin (pre-M5 review): on active margins the
+                // trench starts at its foot instead of right at the coast.
                 let dout = f64::from(d_out[k]);
-                if !active && dout < t.slope_width_m {
+                if dout < t.slope_width_m {
                     let s = smoothstep(0.0, t.slope_width_m, dout);
                     e = t.shelf_depth_m + (e - t.shelf_depth_m) * s;
                 }
@@ -354,6 +354,28 @@ impl Tectonics {
                     elev[k]
                 }
             };
+            surface.push(e);
+            history.push(f);
+            track.push(if c.hotspot > 0.0 { c.hotspot_age } else { -1.0 });
+        }
+
+        // 6. Steepest sea floor: chains plunging into the sea continue under it at most at
+        //    `max_seafloor_slope` (the floor only rises and stays below sea level).
+        let sea_floor: Vec<bool> = surface.iter().map(|&e| e < 0.0).collect();
+        crate::seafloor::limit_slope(
+            &mut surface,
+            w,
+            h,
+            self.cell_m,
+            t.max_seafloor_slope,
+            &sea_floor,
+        );
+
+        let mut elevation = Vec::with_capacity(n);
+        let mut thickness = Vec::with_capacity(n);
+        let mut moho = Vec::with_capacity(n);
+        for (k, c) in g.data().iter().enumerate() {
+            let e = surface[k];
             let thick = if c.crust == OCEANIC {
                 // Edifices and arcs are crust too.
                 t.moho_ocean_m + 0.5 * (e - calibrated_floor[k]).max(0.0)
@@ -364,8 +386,6 @@ impl Tectonics {
             elevation.push(e as f32);
             thickness.push(thick as f32);
             moho.push((thick - e) as f32);
-            history.push(f);
-            track.push(if c.hotspot > 0.0 { c.hotspot_age } else { -1.0 });
         }
         let land_fraction = elevation.iter().filter(|&&e| e > 0.0).count() as f64 / n as f64;
         let shelf_fraction = elevation

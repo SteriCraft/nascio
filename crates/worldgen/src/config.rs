@@ -8,7 +8,7 @@ use nascio_core::time::GameClock;
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a change alters generated output for a given config.
-pub const GENERATOR_VERSION: u32 = 6;
+pub const GENERATOR_VERSION: u32 = 7;
 
 /// Full-resolution cell size of the tectonic grid, in metres (spec §1.4).
 pub const TECTONIC_CELL_M: u32 = 160;
@@ -171,6 +171,15 @@ pub struct TectonicsConfig {
     pub shelf_share: f64,
     /// Width of the continental slope, from the shelf edge down to the deep ocean.
     pub slope_width_m: f64,
+    /// Steepest slope of the sea floor (m/m): the floor is raised wherever it drops faster
+    /// away from the coast, a shallower sea cell or a sediment fan (chains plunging into the
+    /// sea, fan fronts). Applied to the tectonic and to the eroded fine elevation; 0 disables.
+    pub max_seafloor_slope: f64,
+    /// Rank-calibrate the deep ocean floor on `hypsometry.deep` like the land. Off by default:
+    /// the old floor is nearly flat, so the ranks were decided by the abyssal hills and the
+    /// calibration stretched them into hundreds of metres of relief; the floor then follows
+    /// the age–depth law directly.
+    pub calibrate_deep: bool,
     /// Distance inland over which coastal plains rise (orders land before calibration).
     pub coastal_plain_width_m: f64,
     /// Amplitude of the low-frequency relief of continental plains (before calibration).
@@ -198,10 +207,10 @@ impl Default for TectonicsConfig {
             total_displacement_m: 40_000.0,
             plate_speed_fraction: [0.25, 1.0],
             duration_ma: 150.0,
-            ridge_depth_m: -1_500.0,
-            abyssal_depth_m: -3_000.0,
+            ridge_depth_m: -900.0,
+            abyssal_depth_m: -1_800.0,
             abyssal_age_ma: 80.0,
-            trench_depth_m: -3_500.0,
+            trench_depth_m: -2_500.0,
             trench_width_m: 3_000.0,
             arc_distance_m: 4_000.0,
             arc_width_m: 2_500.0,
@@ -228,7 +237,9 @@ impl Default for TectonicsConfig {
             shelf_depth_m: -150.0,
             shelf_width_m: 5_000.0,
             shelf_share: 0.2,
-            slope_width_m: 2_500.0,
+            slope_width_m: 5_000.0,
+            max_seafloor_slope: 0.35,
+            calibrate_deep: false,
             coastal_plain_width_m: 15_000.0,
             plains_relief_m: 150.0,
             abyssal_hill_m: 100.0,
@@ -272,6 +283,9 @@ impl TectonicsConfig {
             );
         }
         self.hypsometry.validate()?;
+        if self.max_seafloor_slope < 0.0 {
+            return Err("max_seafloor_slope must be >= 0".into());
+        }
         if !(self.shelf_depth_m < 0.0 && self.shelf_width_m > 0.0 && self.slope_width_m > 0.0) {
             return Err("shelf_depth_m must be < 0, shelf and slope widths > 0".into());
         }
@@ -287,8 +301,10 @@ impl TectonicsConfig {
 /// uniform inside a band, bands ascending and contiguous.
 ///
 /// Earth → Nascio remapping: land 0/1 000/2 000/4 000/8 848 m → 0/400/900/1 800/3 000 m;
-/// ocean −2 000/−3 000/−4 000/−5 000/−6 000/−11 000 m → −1 500/−2 200/−2 700/−3 000/−3 200/
-/// −3 500 m. Shelves (0 to −200 m on Earth, 0 to −150 m here) and slopes are built
+/// ocean −2 000/−3 000/−4 000/−5 000/−6 000/−11 000 m → −900/−1 300/−1 650/−1 900/−2 050/
+/// −2 500 m (pre-M5 review: a shallower ocean than the §3 Earth-like scaling, abyss around
+/// −1 500 to −2 000 m). The deep bands are the reference of the hypsometry chart and only
+/// calibrate the floor when `calibrate_deep` is set. Shelves (0 to −200 m on Earth, 0 to −150 m here) and slopes are built
 /// geometrically and are not remapped; their Earth shares are kept for the histogram.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -313,11 +329,11 @@ impl Default for HypsometryConfig {
                 [1_800.0, 3_000.0, 0.9],
             ],
             deep: vec![
-                [-3_500.0, -3_200.0, 1.0],
-                [-3_200.0, -3_000.0, 13.8],
-                [-3_000.0, -2_700.0, 23.3],
-                [-2_700.0, -2_200.0, 13.6],
-                [-2_200.0, -1_500.0, 4.5],
+                [-2_500.0, -2_050.0, 1.0],
+                [-2_050.0, -1_900.0, 13.8],
+                [-1_900.0, -1_650.0, 23.3],
+                [-1_650.0, -1_300.0, 13.6],
+                [-1_300.0, -900.0, 4.5],
             ],
             shelf_pct: 7.6,
             slope_pct: 6.1,

@@ -113,13 +113,16 @@ Le monde est environ 400 fois plus petit que la Terre à l'horizontale. Les prof
 |---|---|
 | Niveau de la mer | y = 0 |
 | Plus hauts sommets | ~ +3 000 m |
-| Dorsales océaniques | ~ −1 500 m |
-| Plaines abyssales | ~ −3 000 m |
-| Fosses de subduction | jusqu'à ~ −3 500 m |
+| Dorsales océaniques | ~ −900 m |
+| Plaines abyssales | ~ −1 800 m (de −1 500 à −2 000 m) |
+| Fosses de subduction | jusqu'à ~ −2 500 m |
+| Talus continental | de −150 m à l'abysse sur ~5 km, pente ≤ 0,35 |
 | Moho sous l'océan | ~ 700 m sous le plancher |
 | Moho sous un continent | ~ 3 500 m sous la surface |
 | Moho sous une chaîne de montagnes | jusqu'à ~ 6 000 m sous la surface |
 | Au-delà du Moho | **magme du manteau**, infini et mortel |
+
+**Écart assumé à l'hypsométrie terrestre** (revue de M4) : l'océan est moins profond qu'une mise à l'échelle de la Terre (abysse à −1 800 m au lieu de −3 000 m), et les bassins, larges de 20 à 40 km seulement, sont dominés par les talus : environ 17 % du monde sous −1 500 m, 39 % entre −1 500 et −200 m, 15 % entre −200 et 0 m, contre une majorité d'abysse sur Terre. Seules les terres restent calées sur l'hypsométrie terrestre.
 
 L'isostasie (modèle d'Airy) guide la relation entre l'épaisseur de la croûte et l'altitude, mais avec des paramètres **ajustés** pour atteindre ces cibles. On ne cherche pas l'exactitude physique.
 
@@ -143,7 +146,8 @@ Référence : Cortial et al., *Procedural Tectonic Planets* (2019), adaptée à 
 - **Subsidence océanique** : la profondeur croît comme `√âge`.
 - **Points chauds** : de 2 à 5 *(config)*, fixes dans le repère du manteau. La plaque qui défile au-dessus reçoit une suite d'édifices volcaniques dont l'âge augmente avec la distance, ce qui donne des **archipels de type Hawaï**. Ils peuvent aussi tomber sous un continent (trapps, plateaux).
 - Le nombre de pas suffit à faire émerger des continents de formes variées. On n'a pas besoin de cycles de Wilson complets.
-- **Marges et hypsométrie** : plateau de 0 à −150 m sur les marges passives, puis talus vers l'océan profond ; plateau minimal sur les marges actives. Les petites inclusions océaniques (rifts) deviennent des eaux intérieures. Les altitudes des terres et de l'océan profond sont calées par rang sur l'hypsométrie terrestre ramenée aux cibles du §3 *(config)*.
+- **Marges et hypsométrie** : plateau de 0 à −150 m sur les marges passives (plateau minimal sur les marges actives), puis, sur **toutes** les marges, un talus vers l'océan profond sur `slope_width_m` *(config, 5 km)* ; sur une marge active, la fosse commence au pied du talus. Les petites inclusions océaniques (rifts) deviennent des eaux intérieures. Les altitudes des terres sont calées par rang sur l'hypsométrie terrestre ramenée aux cibles du §3 *(config)* ; le fond océanique suit directement la loi profondeur–âge (l'étalonnage par rang, `calibrate_deep`, est désactivé : il transformait les collines abyssales en centaines de mètres de relief).
+- **Pente maximale du fond marin** : le fond est relevé là où il descend plus vite que `max_seafloor_slope` *(config, 0,35)* depuis la côte (comptée à 0 m) ou une cellule marine moins profonde. Les chaînes qui plongent dans la mer continuent sous l'eau à cette pente au plus. Le fond ne fait que monter et reste sous le niveau de la mer.
 - **Sorties** : `plate_id`, `crust_type`, `crust_thickness` (épaisseur de la surface au Moho, m), `crust_age`, `elevation_tectonic` (altitude après marges et calage hypsométrique, m), `moho_depth` (profondeur du Moho sous le niveau de la mer, m, positive vers le bas), `history_flags`, `hotspot_track`.
 
 ### 4.2 Érosion (grille de 3 125²)
@@ -151,7 +155,7 @@ Référence : Cortial et al., *Procedural Tectonic Planets* (2019), adaptée à 
 - Érosion fluviale de type **stream power** (`E = K · A^m · S^n`), plus de la diffusion sur les pentes. Les précipitations sont d'abord estimées grossièrement (zonales et orographiques), car le climat n'est pas encore connu.
 - Écoulement **D8 ou MFD périodique**. Les dépressions sont traitées par *priority-flood* (comblement ou lacs).
 - **Soulèvement tectonique** pendant l'érosion : un taux de soulèvement tiré des vitesses de convergence actuelles des plaques (§4.1) est appliqué à chaque pas sur les terres proches des frontières convergentes (orogènes de collision, arcs volcaniques). Les plaques soudées, de vitesse commune, ne soulèvent plus.
-- **Sédiments côtiers** : le volume érodé en amont de chaque embouchure construit un cône de dépôt sous la mer (pente et profondeur maximale *(config)*), au lieu d'une diffusion marine. La masse est conservée et le cône ne crée jamais de terre.
+- **Sédiments côtiers** : le volume érodé en amont de chaque embouchure construit un cône de dépôt sous la mer (pente et profondeur maximale *(config)*), au lieu d'une diffusion marine. La masse est conservée et le cône ne crée jamais de terre. Après l'érosion, la pente maximale du fond marin (§4.1) est appliquée à nouveau sur la grille fine : le front des cônes devient un tablier au lieu d'un mur (ce remblai ajoute du volume).
 - **Lacs** : une dépression d'au moins 2 m de profondeur et 20 000 m² devient un lac *(config)* ; les autres sont comblées. Densité de référence : 70 à 115 lacs par monde.
 - Durée de 1 Ma *(config)* ; génération complète en pleine résolution en 50 à 60 s environ.
 
@@ -160,7 +164,7 @@ On simule une année type sur 24 à 48 pas, puis on **projette chaque grandeur s
 `X(N) = X0 + A1·cos(2π(N − p1)/365) + A2·cos(4π(N − p2)/365)`.
 On stocke `(X0, A1, p1, A2, p2)` par cellule. L'évaluation à n'importe quel instant est **continue par construction**, ce qui garantit des transitions fluides entre les mois.
 - **Température** : bilan radiatif simplifié à partir de Q, puis :
-  - inertie thermique : déphasage d'environ 1 mois sur terre et 1,5 à 2 mois en mer, amplitude réduite en mer, continentalité selon la distance à la côte ;
+  - inertie thermique : déphasage d'environ 1 mois sur terre et 1,5 à 2 mois en mer, amplitude réduite en mer, continentalité selon la distance à la côte : la température de la mer (saison amortie, `sea_amplitude` *(config)*) se mélange à celle de la terre avec un poids `exp(−d / 20 km)` *(config)* ;
   - gradient vertical de −6,5 °C/km ;
   - anomalies dues aux courants océaniques ;
   - calibration pour obtenir des moyennes zonales terrestres plausibles (≈ 26 °C à l'équateur, ≈ −20 °C en moyenne près de la couture).

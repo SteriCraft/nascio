@@ -39,6 +39,8 @@ pub struct ErosionStats {
     pub coastal_m3: f64,
     /// Deposited under the sea.
     pub deposited_m3: f64,
+    /// Volume added under the sea by the slope limit of the sea floor (`crate::seafloor`).
+    pub seafloor_m3: f64,
     /// Sediment that found no room (a sea filled up to `deposit_top_m`).
     pub lost_m3: f64,
     /// Diffusion sub-steps per step.

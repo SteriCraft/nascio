@@ -11,6 +11,7 @@ pub mod noise;
 pub mod plot;
 pub mod preview;
 pub mod rng;
+pub mod seafloor;
 pub mod sun_curves;
 pub mod tectonics;
 pub mod world_io;

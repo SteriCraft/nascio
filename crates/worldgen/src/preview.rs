@@ -36,9 +36,9 @@ const ACCUM_LOG_RANGE: (f64, f64) = (-3.0, 3.0);
 
 /// Hypsometric tint, metres → colour.
 const ELEVATION_STOPS: [(f64, &str); 11] = [
-    (-3_500.0, "#0d2a4f"),
-    (-3_000.0, "#13396b"),
-    (-1_500.0, "#2f6db0"),
+    (-2_500.0, "#0d2a4f"),
+    (-1_800.0, "#13396b"),
+    (-900.0, "#2f6db0"),
     (-200.0, "#6fa8dc"),
     (-0.001, "#a9d0ef"),
     (0.0, "#5f9e4f"),
@@ -591,8 +591,8 @@ pub fn colorize(world: &World, name: &str) -> Option<Vec<Color>> {
 pub fn legend(name: &str) -> Vec<(Color, &'static str)> {
     match name {
         "elevation_tectonic" => vec![
-            (elevation_color(-3_200.0), "-3200 m"),
-            (elevation_color(-1_500.0), "-1500"),
+            (elevation_color(-2_500.0), "-2500 m"),
+            (elevation_color(-1_800.0), "-1800"),
             (elevation_color(-100.0), "-100"),
             (elevation_color(200.0), "200"),
             (elevation_color(1_000.0), "1000"),
@@ -600,8 +600,8 @@ pub fn legend(name: &str) -> Vec<(Color, &'static str)> {
             (elevation_color(3_000.0), "3000"),
         ],
         "elevation" => vec![
-            (elevation_color(-3_200.0), "-3200 m"),
-            (elevation_color(-1_500.0), "-1500"),
+            (elevation_color(-2_500.0), "-2500 m"),
+            (elevation_color(-1_800.0), "-1800"),
             (elevation_color(-100.0), "-100"),
             (elevation_color(200.0), "200"),
             (elevation_color(1_000.0), "1000"),
@@ -867,7 +867,7 @@ pub fn write_previews(world: &World, plates: &[Plate], dir: &Path) -> anyhow::Re
 /// Bin width of the hypsometry histogram, m.
 const HYPSO_BIN_M: f64 = 100.0;
 /// Range of the hypsometry histogram, m.
-const HYPSO_RANGE: (f64, f64) = (-3_600.0, 3_100.0);
+const HYPSO_RANGE: (f64, f64) = (-2_600.0, 3_100.0);
 
 /// Target share (%) of the surface in `[lo, hi)`, from piecewise-uniform bands.
 fn band_share(bands: &[[f64; 3]], lo: f64, hi: f64, total: f64) -> f64 {
@@ -894,7 +894,8 @@ pub fn write_hypsometry(world: &World, path: &Path) -> anyhow::Result<()> {
     let h = &world.config.tectonics.hypsometry;
     let t = &world.config.tectonics;
     let shelf = [[t.shelf_depth_m, 0.0, h.shelf_pct]];
-    let slope = [[-1_500.0, t.shelf_depth_m, h.slope_pct]];
+    let deep_top = h.deep.last().map_or(t.ridge_depth_m, |b| b[1]);
+    let slope = [[deep_top, t.shelf_depth_m, h.slope_pct]];
     let total: f64 =
         h.land.iter().chain(&h.deep).map(|b| b[2]).sum::<f64>() + h.shelf_pct + h.slope_pct;
     let n_bins = ((HYPSO_RANGE.1 - HYPSO_RANGE.0) / HYPSO_BIN_M) as usize;
@@ -991,7 +992,7 @@ pub fn write_hypsometry(world: &World, path: &Path) -> anyhow::Result<()> {
         );
         p += step;
     }
-    let mut e = -3_500.0;
+    let mut e = -2_500.0;
     while e <= 3_000.0 {
         let x = px(e).round() as i32;
         let label = format!("{e:.0}");
