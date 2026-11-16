@@ -185,32 +185,97 @@ On recalcule les débits avec les précipitations du climat, puis on détermine 
 Classification à partir des harmoniques de température et de précipitations, de type **Köppen** simplifié, ou Whittaker en premier jet. On ajoute des cas particuliers : glaciers et calottes (température moyenne annuelle et altitude), mangroves, marais.
 
 ### 4.6 Géologie et ressources
-**Colonne verticale** (de haut en bas), calculée à partir des couches macro :
-1. **Sol** de 0 à 3 m, selon le biome et la pente ;
-2. **Altérites et régolithe** : latérite en climat tropical humide ;
-3. **Couverture sédimentaire** : épaisseur selon les bassins (subsidence, deltas, marges passives), alternance grès, argile, calcaire, évaporites, charbon selon le paléo-contexte ;
+**Contextes géologiques** (étape `geology`, grille de 160 m) : chaque cellule reçoit un poids entre 0 et 1 pour chacun des contextes connus du code. Ces poids viennent du type et de l'âge de la croûte, de l'historique tectonique (`history_flags`), de l'épaisseur des sédiments, du climat et de l'hydrologie :
+
+| Contexte | Définition |
+|---|---|
+| `ocean`, `ridge`, `trench` | croûte océanique, dorsale, fosse |
+| `arc`, `orogen`, `rift`, `hotspot`, `ophiolite` | marques de l'historique tectonique |
+| `ultramafic` | ophiolites, et dans une moindre mesure les basaltes des points chauds |
+| `craton`, `platform` | croûte continentale ancienne ou plus jeune, hors orogène et hors arc |
+| `basin` | couverture sédimentaire épaisse sur un continent |
+| `marine_shelf` | plateau et marge passive, sous une mer peu profonde |
+| `humid`, `arid` | climat actuel, faute de paléoclimat |
+| `laterite` | climat tropical humide sur une pente faible |
+| `river_source` | lit de rivière à l'aval d'un orogène ou d'un arc |
+| `coast` | plages et rivages |
+
+Sorties : `geo_context` (contexte dominant), `sediment_thickness` (m), `weathering_depth` (m) et `laterite` (0 à 1).
+
+**Colonne verticale** (de haut en bas) :
+1. **Sol** de 0 à 3 m, selon le biome et la pente. On trouve du **sable de quartz** sur les plages, les déserts chauds et les fonds marins peu profonds, et du **gravier** sur le lit des rivières.
+2. **Altérites** : régolithe, ou latérite en climat tropical humide. Épaisseur `weathering_depth` *(config)*, nulle sur les fortes pentes.
+3. **Couverture sédimentaire**, d'épaisseur `sediment_thickness`, **jusqu'à environ 500 m** *(config)* :
+   - épaisse dans les bassins (plaines continentales basses), les rifts, les deltas et cônes de dépôt (dépôts de l'érosion), et sur les plateaux et marges passives ;
+   - mince sur les cratons et quasi nulle sur les orogènes ;
+   - sur l'océan, les sédiments pélagiques s'épaississent avec l'âge de la croûte.
+
+   Les bancs alternent **grès, argile, calcaire et évaporites (gypse)** selon le contexte : calcaire et argile en milieu marin, grès et argile sur les continents, gypse en climat aride. Leur épaisseur va de quelques mètres à environ 30 m. Ils suivent une altitude absolue légèrement ondulée, comme des strates horizontales.
 4. **Socle** :
    - continental : granite et gneiss, ou schistes et roches métamorphiques dans les orogènes ;
    - océanique : basalte en surface, puis gabbro ;
    - arcs et points chauds : andésite et basalte ;
+   - ophiolites : basalte, gabbro et péridotite ;
+   - rifts : coulées de basalte sur le socle.
 5. **Croûte inférieure** (dernier tiers environ avant le Moho) : granulite ou gabbro ;
-6. **Moho**, puis **magme**, infini et mortel.
+6. **Moho**, à profondeur variable (§3, tectonique), puis **magme**, infini et mortel.
 
-**Température du sous-sol** : `T(prof) = T_surface + (T_moho − T_surface) · (prof / moho_depth)`, avec `T_moho ≈ 1 200 °C` *(config)*. Le gradient est donc plus fort sous les océans, ce qui est cohérent avec un flux de chaleur plus élevé.
+Les limites entre contextes sont déformées par un bruit périodique : elles ne suivent pas les cellules de 160 m.
 
-**Gisements** (première liste, à affiner plus tard avec le gameplay) :
-| Contexte tectonique ou climatique | Minerais |
+**Température du sous-sol** (`nascio-core::geotherm`, config `[geotherm]`). La courbe est douce près de la surface et raide près du Moho :
+
+`T(d) = T_s + (T_moho − T_s) · (e^(k·u) − 1) / (e^k − 1)`, avec `u = d / D`.
+
+- `d` est la profondeur sous la surface rocheuse et `D` l'épaisseur de la croûte (de la surface rocheuse au Moho).
+- `T_moho = 1 200 °C` et `k = 2,7` *(config)*.
+- Sous un continent (`D` = 3 500 m, `T_s` ≈ 10 °C), cela donne environ 50 °C à 500 m, 250 °C à mi-croûte et un gradient d'environ 1 °C/m juste au-dessus du Moho. On peut donc miner sans danger les premières centaines de mètres ; la chaleur ne devient mortelle qu'à l'approche du Moho.
+- `T_s` est la température moyenne annuelle de l'air sur les terres. Au fond des mers, c'est la température de l'eau de fond : 2 °C sous plus de 200 m d'eau *(config)*, en raccord avec la surface au-dessus.
+- Pour une même profondeur, le gradient est plus fort sous les océans (croûte mince) et plus faible sous les orogènes (croûte épaisse).
+
+**Gisements** : le **catalogue** est un fichier, `config/deposits.toml`. Les types n'y sont pas codés en dur : le code ne connaît que les **contextes** ci-dessus et les **formes**.
+
+Chaque type de gisement décrit :
+- le bloc et ses proportions (un mélange est possible, ainsi qu'un « toit » d'un autre bloc pour les couches) ;
+- les contextes et leurs poids, et les contextes requis (multiplicatifs) ;
+- la forme, la plage de profondeur, la taille, la teneur et la rareté ;
+- à titre indicatif, les éléments obtenus après raffinage.
+
+Le catalogue est **copié dans le monde** à la génération et son hachage entre dans l'empreinte : modifier le fichier ne change jamais un monde existant. Les blocs sont désignés **par leur nom**. Leurs identifiants `u16` sont attribués à la génération et enregistrés avec le monde (`blocks.toml`), en attendant le format de sauvegarde des blocs.
+
+Formes, toutes déterministes et continues à travers la couture :
+
+| Forme | Description | Hôte |
+|---|---|---|
+| `vein` (filon) | plaque mince et inclinée | le socle |
+| `stock` (amas porphyrique) | ellipsoïde ; la teneur décroît du cœur vers le bord | le socle |
+| `lens` (lentille) | petit ellipsoïde massif | le socle |
+| `layer` (couche) | nappe horizontale à contour irrégulier, éventuellement avec un toit d'un autre bloc | les sédiments, ou le socle pour le fer rubané |
+| `blanket` (manteau d'altération) | bande parallèle à la surface | les altérites |
+| `placer` | bande allongée sous le lit d'une rivière ou sous une plage | sable et gravier |
+| `trap` (piège) | carte seulement, sans bloc | — |
+
+Placement : le monde est découpé en **tuiles de 2 km** (2 km divise 100 km). Chaque tuile a son propre RNG, dérivé de la graine, de l'étiquette `deposits` et de l'indice de la tuile. Ce RNG tire les corps selon les poids de contexte de la tuile.
+- Un bloc de minerai ne remplace que de la roche (ou sable et gravier pour les placers), jamais l'air, l'eau, le sol ou le magma.
+- Un corps qui recoupe la surface **affleure**.
+- Les tailles restent à l'échelle du jeu (non divisées par 10).
+- Rareté visée : environ 0,1 % du volume de roche des 500 premiers mètres sous un continent. Les métaux précieux sont environ dix fois plus rares que le fer, le charbon ou le sel.
+
+Sorties : `deposits.bin` (les corps), couches `deposits` (gisement dominant) et `hydrocarbons` (provinces et pièges).
+
+Première liste (à affiner avec le gameplay) :
+
+| Contexte tectonique ou climatique | Minerais (sous-produits) |
 |---|---|
-| Arc volcanique au-dessus d'une subduction | cuivre porphyrique (chalcopyrite), molybdène, or |
+| Arc volcanique au-dessus d'une subduction | cuivre porphyrique (chalcopyrite), molybdène (molybdénite), or ; or filonien |
 | Vieux cratons continentaux | fer rubané (magnétite, hématite) |
-| Orogène de collision, granites | étain (cassitérite), tungstène, or filonien |
-| Ophiolites, roches ultrabasiques | chromite, nickel, platine |
-| Bassins sédimentaires | plomb-zinc (galène, sphalérite), charbon, pétrole, gaz, sel |
-| Latérites tropicales | bauxite (aluminium), nickel latéritique |
+| Orogène de collision, granites | étain (cassitérite), tungstène (wolframite), or filonien |
+| Ophiolites, roches ultrabasiques | chromite, nickel (pentlandite, avec cobalt), platine (avec palladium) |
+| Bassins sédimentaires | plomb-zinc (galène avec argent, sphalérite), charbon, sel gemme (avec potasse en toit), **pétrole et gaz (carte seulement)** |
+| Plateaux marins et marges passives | manganèse (couche), phosphate (couche) |
+| Latérites tropicales | bauxite (aluminium), nickel latéritique (garniérite, avec cobalt) |
 | Rivières en aval des massifs riches | placers d'or et d'étain |
-| Points chauds, basaltes | soufre, basalte, obsidienne |
-
-Les gisements sont placés comme des **corps** cohérents (filons, amas, couches) par une génération déterministe propre à chaque région. Ils ne sont pas répartis en bruit uniforme.
+| Plages | placers côtiers d'ilménite (titane) |
+| Points chauds, basaltes | soufre, obsidienne |
 
 ---
 
@@ -219,7 +284,7 @@ Les gisements sont placés comme des **corps** cohérents (filons, amas, couches
 - L'altitude de surface vient de l'interpolation bicubique périodique de la grille de 32 m, plus un bruit de détail périodique dont l'amplitude dépend du contexte (rugueux en montagne, doux en plaine).
 - Le contenu vertical suit la colonne géologique du §4.6. L'eau va jusqu'à y = 0 pour les océans, et jusqu'au niveau des lacs et des rivières. Glace et neige dépendent du climat.
 - **Bruit périodique** : bruit de gradient sur réseau, avec un espacement de réseau qui **divise 100 000** (16, 20, 25, 32, 40, 50, 80, 100, 125, 160, 200, 250, 400, 500, 625, 800, 1 000…). Le hachage des nœuds se fait modulo `100 000 / espacement`.
-- Les identifiants de bloc sont des `u16`, avec un registre de blocs (nom, couleur provisoire, propriétés physiques de base).
+- Les identifiants de bloc sont des `u16`, avec un registre de blocs (nom, couleur provisoire, propriétés physiques de base). Les blocs sont désignés par leur nom ; les identifiants sont attribués à la génération du monde (blocs de la colonne, puis blocs du catalogue des gisements) et enregistrés dans `blocks.toml`.
 - Les grottes, les structures et le stockage des modifications des joueurs viendront plus tard. On prévoit seulement l'interface : `Chunk = generate(pos) ⊕ delta(pos)`.
 
 ---
@@ -229,9 +294,14 @@ Les gisements sont placés comme des **corps** cohérents (filons, amas, couches
 world-<seed>/
   world.toml          graine, version du générateur, paramètres, GAME_EPOCH
   layers/<nom>.bin    une couche par fichier : en-tête (largeur, hauteur, type, unité) + données brutes little-endian
+  deposits.toml       copie du catalogue des gisements utilisé (§4.6)
+  blocks.toml         registre des blocs : nom → identifiant u16, couleur, matière, densité
+  deposits.bin        corps des gisements (forme, position, taille, orientation, teneur)
   previews/<nom>.png  aperçus
 ```
-La version du générateur est incrémentée à chaque changement qui modifie le résultat.
+La version du générateur est incrémentée à chaque changement qui modifie le résultat. L'empreinte d'un monde (`hash`) couvre les couches, le catalogue, le registre des blocs et les corps des gisements.
+
+Pendant la génération, une **fenêtre de progression** (visualiseur, `--generate`) affiche le pourcentage total, l'étape en cours avec sa propre avancée et le temps écoulé. La CLI affiche la même chose en console. La progression ne fait que lire l'avancement : elle n'influe pas sur le résultat.
 
 ---
 
@@ -242,6 +312,8 @@ La version du générateur est incrémentée à chaque changement qui modifie le
 - Graticule de latitude et de longitude : les lignes de latitude sont espacées selon `sin φ`.
 - Curseurs de jour de l'année et d'heure, avec superposition **jour/nuit** calculée par pixel à partir de `e_vis`, et couches climatiques évaluées à cet instant.
 - Infobulle sous le curseur : x, z, φ, λ et les valeurs des couches.
+- **Coupe verticale** : un trait tracé sur la carte (clic droit, glisser) ouvre une coupe 2D du sous-sol le long de ce trait. Elle montre les roches de la colonne, le Moho, les isothermes du sous-sol et les gisements. La CLI exporte la même coupe en PNG (`nascio-worldgen section`).
+- Couches `deposits` (gisement dominant, avec sa légende) et `hydrocarbons`.
 - Un clic choisit le **point d'apparition** (cellule surlignée) ; un bouton ou un double clic y passe en 3D.
 
 **Mode 3D (vol libre)**
