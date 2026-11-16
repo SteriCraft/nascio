@@ -30,6 +30,7 @@ use nascio_core::astro::{
     AstroConfig, SunPosition, aurora_night_factor, ecliptic_to_equatorial, equatorial_direction,
     light_intensity, moon_illumination, sidereal_angle, sky_light, sun_ecliptic_longitude,
 };
+use nascio_core::atmosphere::SurfaceClimate;
 use nascio_core::climate::Harmonics;
 use nascio_core::consts::WORLD_SIZE_F64;
 use nascio_core::geo::{latitude, seam_distance};
@@ -85,7 +86,13 @@ pub struct ClimateMaps {
     cloud: Vec<Harmonics>,
     snow: Vec<Harmonics>,
     temperature: Vec<Harmonics>,
-    /// Mean height of each climate cell (sea counted as 0 m, like the climate), as a byte.
+    /// Mixing ratio of the surface air, g/kg (HUD humidity).
+    humidity: Vec<Harmonics>,
+    /// Daily temperature range, °C.
+    diurnal: Vec<f64>,
+    /// Mean height of each climate cell (sea counted as 0 m, like the climate), m.
+    height_m: Vec<f64>,
+    /// The same, as a byte over [`CLIMATE_HEIGHT_M`] (texture alpha).
     height: Vec<u8>,
     pub texture: Handle<Image>,
     last_day: Option<f64>,
@@ -114,7 +121,15 @@ impl ClimateMaps {
         let cloud = harmonics(world, "cloud_cover").unwrap_or_else(|| vec![Harmonics::default()]);
         let snow = harmonics(world, "snow_fraction").unwrap_or_else(|| vec![Harmonics::default()]);
         let temperature = harmonics(world, "temperature").unwrap_or_default();
-        let height = cell_heights(world, res);
+        let humidity = harmonics(world, "humidity").unwrap_or_default();
+        let diurnal = world.layer("diurnal_range").map_or_else(Vec::new, |l| {
+            (0..l.width * l.height).map(|k| l.data.get_f64(k)).collect()
+        });
+        let height_m = cell_heights(world, res);
+        let height = height_m
+            .iter()
+            .map(|h| ((h / CLIMATE_HEIGHT_M).clamp(0.0, 1.0) * 255.0).round() as u8)
+            .collect();
         let mut image = Image::new_fill(
             Extent3d {
                 width: res as u32,
@@ -138,6 +153,9 @@ impl ClimateMaps {
             cloud,
             snow,
             temperature,
+            humidity,
+            diurnal,
+            height_m,
             height,
             texture: images.add(image),
             last_day: None,
@@ -152,6 +170,48 @@ impl ClimateMaps {
         self.cloud
             .get(j * self.res + i)
             .map_or(0.0, |h| h.eval(day).clamp(0.0, 1.0))
+    }
+
+    /// Surface climate at a world position (bilinear between cell centres, periodic) on day
+    /// `day`, brought from the cell's mean height to the ground height `ground` with the lapse
+    /// rate. `None` for a world without temperature or humidity.
+    pub fn surface_at(
+        &self,
+        x: f64,
+        z: f64,
+        day: f64,
+        ground: f64,
+        lapse: f64,
+    ) -> Option<SurfaceClimate> {
+        let n = self.res * self.res;
+        if self.temperature.len() != n || self.humidity.len() != n {
+            return None;
+        }
+        let cell = WORLD_SIZE_F64 / self.res as f64;
+        let fx = nascio_core::torus::wrap_f64(x) / cell - 0.5;
+        let fz = nascio_core::torus::wrap_f64(z) / cell - 0.5;
+        let (i0, j0) = (fx.floor(), fz.floor());
+        let (tx, tz) = (fx - i0, fz - j0);
+        let r = self.res as i64;
+        let mut acc = [0.0f64; 4];
+        for (dj, wz) in [(0, 1.0 - tz), (1, tz)] {
+            for (di, wx) in [(0, 1.0 - tx), (1, tx)] {
+                let i = (i0 as i64 + di).rem_euclid(r) as usize;
+                let j = (j0 as i64 + dj).rem_euclid(r) as usize;
+                let k = j * self.res + i;
+                let w = wx * wz;
+                acc[0] += w * self.temperature[k].eval(day);
+                acc[1] += w * self.humidity[k].eval(day).max(0.0);
+                acc[2] += w * self.diurnal.get(k).copied().unwrap_or(0.0);
+                acc[3] += w * self.height_m.get(k).copied().unwrap_or(0.0);
+            }
+        }
+        Some(SurfaceClimate {
+            temperature_c: acc[0] - lapse * (ground - acc[3]),
+            mixing_ratio: acc[1],
+            diurnal_range_c: acc[2],
+            ground_m: ground,
+        })
     }
 
     fn bytes(&self, day: f64) -> Vec<u8> {
@@ -172,11 +232,11 @@ impl ClimateMaps {
 /// Height scale of the climate texture's alpha, m (matches `CLIMATE_HEIGHT` in the shader).
 const CLIMATE_HEIGHT_M: f64 = 3_500.0;
 
-/// Mean height of each `res²` climate cell over the fine `elevation` layer, sea counted as 0 m
-/// (the climate's own cell height), encoded on a byte over [`CLIMATE_HEIGHT_M`].
-fn cell_heights(world: &World, res: usize) -> Vec<u8> {
+/// Mean height (m) of each `res²` climate cell over the fine `elevation` layer, sea counted as
+/// 0 m (the climate's own cell height).
+fn cell_heights(world: &World, res: usize) -> Vec<f64> {
     let Some(e) = world.layer("elevation") else {
-        return vec![0; res * res];
+        return vec![0.0; res * res];
     };
     let ratio = (e.width / res).max(1);
     let norm = 1.0 / (ratio * ratio) as f64;
@@ -192,7 +252,7 @@ fn cell_heights(world: &World, res: usize) -> Vec<u8> {
                         .max(0.0);
                 }
             }
-            ((sum * norm / CLIMATE_HEIGHT_M).clamp(0.0, 1.0) * 255.0).round() as u8
+            sum * norm
         })
         .collect()
 }

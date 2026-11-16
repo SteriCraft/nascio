@@ -140,8 +140,10 @@ pub struct WorldInfo {
     pub astro: AstroConfig,
     pub clock: GameClock,
     pub seed: u64,
-    /// Lapse rate of the world's climate, °C per m (snow line in the shader).
+    /// Lapse rate of the world's climate, °C per m (snow line in the shader, HUD weather).
     pub lapse_rate_c_per_m: f64,
+    /// Pressure profile and air above the ground (HUD weather).
+    pub atmosphere: nascio_core::AtmosphereConfig,
 }
 
 /// Materials shared by every chunk.
@@ -635,6 +637,7 @@ pub fn hud(
     info: Res<WorldInfo>,
     sky: Res<crate::sky::SkyState>,
     mut map: ResMut<crate::map::MapState>,
+    climate: Option<Res<crate::sky::ClimateMaps>>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     let p = cam.pos;
@@ -793,7 +796,8 @@ pub fn hud(
     if let Some(tex) = map.minimap_texture(ctx) {
         minimap(ctx, tex, &cam, &mut hud);
     }
-    clock(ctx, &info, &settings, &cam);
+    let ground = terrain.0.height(p.x, p.z).max(0.0);
+    clock(ctx, &info, &settings, &cam, climate.as_deref(), ground);
     capture.0 = ctx.egui_wants_pointer_input() || ctx.is_pointer_over_egui();
     Ok(())
 }
@@ -835,11 +839,23 @@ fn hhmm(frac: f64) -> String {
 
 /// Top-right clock: local solar time at the camera and time of the origin meridian (λ = 0,
 /// the game's reference time, spec §2.3), with the game date. Follows the fixed hour and day.
-fn clock(ctx: &egui::Context, info: &WorldInfo, settings: &FlySettings, cam: &FlyCam) {
+/// Below the time: air temperature, relative humidity and pressure at the camera (§4.3).
+fn clock(
+    ctx: &egui::Context,
+    info: &WorldInfo,
+    settings: &FlySettings,
+    cam: &FlyCam,
+    climate: Option<&crate::sky::ClimateMaps>,
+    ground: f64,
+) {
     let (day, t_days, h) = crate::sky::instant(info, settings, cam.pos.x);
     let local = (h + std::f64::consts::PI) / TAU;
     let origin = day.rem_euclid(1.0);
     let year = (t_days / 365.0).floor();
+    let p = cam.pos;
+    let air = climate
+        .and_then(|c| c.surface_at(p.x, p.z, day, ground, info.lapse_rate_c_per_m))
+        .map(|s| info.atmosphere.air(&s, p.y, local, info.lapse_rate_c_per_m));
     egui::Area::new(egui::Id::new("clock"))
         .anchor(egui::Align2::RIGHT_TOP, [-10.0, 10.0])
         .show(ctx, |ui| {
@@ -851,6 +867,20 @@ fn clock(ctx: &egui::Context, info: &WorldInfo, settings: &FlySettings, cam: &Fl
                 ));
                 ui.monospace(format!("origin {}  (λ   0.0°)", hhmm(origin)));
                 ui.monospace(format!("year {year:.0} · day {:.0}", day.floor()));
+                ui.separator();
+                match air {
+                    Some(a) => {
+                        ui.monospace(format!("temperature {:6.1} °C", a.temperature_c));
+                        ui.monospace(format!("humidity    {:6.0} %", a.humidity * 100.0));
+                        ui.monospace(format!("pressure    {:6.1} hPa", a.pressure_hpa));
+                    }
+                    None => {
+                        ui.monospace(format!(
+                            "pressure    {:6.1} hPa",
+                            info.atmosphere.pressure_hpa(p.y)
+                        ));
+                    }
+                }
             });
         });
 }

@@ -147,18 +147,24 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         render_cfg.curvature_radius_m = r;
     }
     let terrain = Arc::new(Terrain::from_world(&world, voxel_cfg)?);
-    // Cloud, snow and temperature harmonics and the fine elevation (snow line) for the 3D
-    // mode (the map keeps the world).
+    // Cloud, snow, temperature and humidity harmonics, the diurnal range and the fine elevation
+    // (snow line, HUD weather) for the 3D mode (the map keeps the world).
     let climate_world = World {
         config: world.config.clone(),
         layers: world
             .layers
             .iter()
             .filter(|l| {
-                ["cloud_cover_", "snow_fraction_", "temperature_"]
-                    .iter()
-                    .any(|p| l.name.starts_with(p))
+                [
+                    "cloud_cover_",
+                    "snow_fraction_",
+                    "temperature_",
+                    "humidity_",
+                ]
+                .iter()
+                .any(|p| l.name.starts_with(p))
                     || l.name == "elevation"
+                    || l.name == "diurnal_range"
             })
             .cloned()
             .collect(),
@@ -168,6 +174,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         clock: world.config.clock,
         seed: world.config.seed,
         lapse_rate_c_per_m: world.config.climate.lapse_rate_c_per_m,
+        atmosphere: world.config.atmosphere,
     };
 
     let (x, z, y) = match args.pos.as_deref() {
