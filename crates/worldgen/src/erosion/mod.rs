@@ -352,6 +352,17 @@ pub fn run(cfg: &WorldConfig, tect: &TectonicOutput) -> ErosionOutput {
             &sea,
         )
     });
+    timed(&mut report, "coastal slope", || {
+        // Uplift may have steepened the coastal flanks again.
+        crate::seafloor::limit_coastal_land(
+            &mut h,
+            shape.res,
+            shape.res,
+            shape.cell,
+            cfg.tectonics.max_coastal_slope,
+            &sea,
+        )
+    });
     let land: Vec<usize> = (0..shape.n()).filter(|&k| !sea[k]).collect();
     report.mean_land_lowering_m =
         land.iter().map(|&k| fine.data()[k] - h[k]).sum::<f64>() / land.len().max(1) as f64;

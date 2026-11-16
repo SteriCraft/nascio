@@ -362,6 +362,15 @@ impl Tectonics {
         // 6. Steepest sea floor: chains plunging into the sea continue under it at most at
         //    `max_seafloor_slope` (the floor only rises and stays below sea level).
         let sea_floor: Vec<bool> = surface.iter().map(|&e| e < 0.0).collect();
+        // ... and their coastal flanks rise at most at `max_coastal_slope` from the sea.
+        crate::seafloor::limit_coastal_land(
+            &mut surface,
+            w,
+            h,
+            self.cell_m,
+            t.max_coastal_slope,
+            &sea_floor,
+        );
         crate::seafloor::limit_slope(
             &mut surface,
             w,

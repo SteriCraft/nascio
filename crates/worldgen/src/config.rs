@@ -175,6 +175,10 @@ pub struct TectonicsConfig {
     /// away from the coast, a shallower sea cell or a sediment fan (chains plunging into the
     /// sea, fan fronts). Applied to the tectonic and to the eroded fine elevation; 0 disables.
     pub max_seafloor_slope: f64,
+    /// Steepest coastal land (m/m): land is lowered to at most this slope times its distance
+    /// to the sea, so chains do not plunge into it as walls (inland slopes are untouched).
+    /// Applied to the tectonic and to the eroded fine elevation; 0 disables.
+    pub max_coastal_slope: f64,
     /// Rank-calibrate the deep ocean floor on `hypsometry.deep` like the land. Off by default:
     /// the old floor is nearly flat, so the ranks were decided by the abyssal hills and the
     /// calibration stretched them into hundreds of metres of relief; the floor then follows
@@ -239,6 +243,7 @@ impl Default for TectonicsConfig {
             shelf_share: 0.2,
             slope_width_m: 5_000.0,
             max_seafloor_slope: 0.35,
+            max_coastal_slope: 0.8,
             calibrate_deep: false,
             coastal_plain_width_m: 15_000.0,
             plains_relief_m: 150.0,
@@ -283,8 +288,8 @@ impl TectonicsConfig {
             );
         }
         self.hypsometry.validate()?;
-        if self.max_seafloor_slope < 0.0 {
-            return Err("max_seafloor_slope must be >= 0".into());
+        if self.max_seafloor_slope < 0.0 || self.max_coastal_slope < 0.0 {
+            return Err("max_seafloor_slope and max_coastal_slope must be >= 0".into());
         }
         if !(self.shelf_depth_m < 0.0 && self.shelf_width_m > 0.0 && self.slope_width_m > 0.0) {
             return Err("shelf_depth_m must be < 0, shelf and slope widths > 0".into());

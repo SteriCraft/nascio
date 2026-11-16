@@ -86,6 +86,38 @@ pub fn limit_slope(
     added
 }
 
+/// Coastal cone: land cells (`!sea`) are lowered to at most `max_slope × distance to the sea`
+/// (chamfer distance, periodic), so a chain cannot plunge into the sea as a wall. Only the
+/// distance to the coast counts: slopes between land cells inland are untouched, and summits
+/// far enough from the sea keep their height. Returns the removed volume (m³).
+pub fn limit_coastal_land(
+    h: &mut [f64],
+    w: usize,
+    hgt: usize,
+    cell: f64,
+    max_slope: f64,
+    sea: &[bool],
+) -> f64 {
+    assert_eq!(sea.len(), h.len());
+    if max_slope <= 0.0 {
+        return 0.0;
+    }
+    // Distance cone from the sea: sea cells at 0, land raised to −max_slope · distance.
+    let land: Vec<bool> = sea.iter().map(|&s| !s).collect();
+    let mut cone: Vec<f64> = sea.iter().map(|&s| if s { 0.0 } else { -1e12 }).collect();
+    limit_slope(&mut cone, w, hgt, cell, max_slope, &land);
+    let area = cell * cell;
+    let mut removed = 0.0;
+    for (k, e) in h.iter_mut().enumerate() {
+        let top = -cone[k];
+        if land[k] && *e > top {
+            removed += (*e - top) * area;
+            *e = top;
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +180,45 @@ mod tests {
         }
         // Far from the coast the abyss is untouched.
         assert_eq!(row[500], -3_000.0);
+    }
+
+    /// A 3 000 m plateau straddling the x seam, sea elsewhere: its edges become a 0.5 cone
+    /// from both coasts, its middle keeps its height.
+    #[test]
+    fn coastal_cone_lowers_walls_only_near_the_sea() {
+        let (w, hgt, cell) = (1_000, 4, 32.0);
+        let mut h: Vec<f64> = (0..w * hgt)
+            .map(|k| match k % w {
+                800.. | 0..200 => 3_000.0,
+                _ => -500.0,
+            })
+            .collect();
+        let sea: Vec<bool> = h.iter().map(|&e| e < 0.0).collect();
+        let removed = limit_coastal_land(&mut h, w, hgt, cell, 0.5, &sea);
+        assert!(removed > 0.0);
+        let row = &h[..w];
+        for d in 0..150 {
+            // d + 1 cells from the coast on both sides of the seam: 16 m per cell.
+            let top = (16.0 * (d + 1) as f64).min(3_000.0);
+            assert!(
+                (row[199 - d] - top).abs() < 1e-6,
+                "east {d}: {}",
+                row[199 - d]
+            );
+            assert!(
+                (row[800 + d] - top).abs() < 1e-6,
+                "west {d}: {}",
+                row[800 + d]
+            );
+        }
+        assert_eq!(
+            row[0], 3_000.0,
+            "the middle, 200 cells inland, is untouched"
+        );
+        assert!(
+            row[200..800].iter().all(|&e| e == -500.0),
+            "the sea is untouched"
+        );
     }
 
     #[test]
