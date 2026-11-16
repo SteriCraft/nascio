@@ -60,6 +60,212 @@ const PRECIP_STOPS: [(f64, &str); 7] = [
     (4_000.0, "#0d366b"),
 ];
 
+/// Temperature, °C → colour (diverging, white at 0 °C).
+const TEMP_STOPS: [(f64, &str); 8] = [
+    (-35.0, "#1d2766"),
+    (-20.0, "#256abf"),
+    (-8.0, "#9ec5f4"),
+    (0.0, "#f4f2ee"),
+    (10.0, "#f3d27a"),
+    (20.0, "#eb6834"),
+    (30.0, "#b8312f"),
+    (40.0, "#5c1414"),
+];
+
+/// Biome colours, in code order (see `biomes::NAMES`).
+const BIOME_COLORS: [&str; crate::biomes::code::COUNT] = [
+    "#2f6db0", "#3987e5", "#f4f2ee", "#a8b5a2", "#2e5e4e", "#4f9a4a", "#b5a15a", "#d9c98a",
+    "#f0d9a0", "#c9b9a0", "#c4c25a", "#0f6b2f", "#5a8f6a", "#6fa39a",
+];
+
+/// Climate maps evaluated at a day of the year (the viewer animates them).
+pub const CLIMATE_MAPS: [&str; 5] = [
+    "temperature",
+    "precipitation",
+    "snow_fraction",
+    "cloud_cover",
+    "wind",
+];
+
+/// Value of a harmonic quantity (`<name>_x0`… layers) at cell `k` and day `n`; `None` for `n`
+/// gives the annual mean.
+pub fn climate_value(world: &World, name: &str, k: usize, n: Option<f64>) -> Option<f64> {
+    let get = |suffix: &str| {
+        world
+            .layer(&format!("{name}_{suffix}"))
+            .map(|l| l.data.get_f64(k))
+    };
+    let x0 = get("x0")?;
+    let Some(n) = n else {
+        return Some(x0);
+    };
+    let h = nascio_core::climate::Harmonics {
+        x0,
+        a1: get("a1")?,
+        p1: get("p1")?,
+        a2: get("a2")?,
+        p2: get("p2")?,
+    };
+    Some(h.eval(n))
+}
+
+/// Colours of a climate map at day `n` (annual mean for `None`), or `None` without climate.
+pub fn colorize_climate(world: &World, name: &str, n: Option<f64>) -> Option<Vec<Color>> {
+    let base = world.layer("temperature_x0")?;
+    let size = base.width * base.height;
+    let elev = world.layer("elevation_tectonic");
+    let ground = |k: usize| elev.map_or(hex(SURFACE), |l| faded_elevation(l.data.get_f64(k)));
+    let is_sea = |k: usize| elev.is_some_and(|l| l.data.get_f64(k) <= 0.0);
+    let v = |q: &str, k: usize| climate_value(world, q, k, n).unwrap_or(0.0);
+    let colors = match name {
+        "temperature" => (0..size)
+            .map(|k| ramp(&TEMP_STOPS, v("temperature", k)))
+            .collect(),
+        "precipitation" => (0..size)
+            .map(|k| {
+                let c = ramp(&PRECIP_STOPS, v("precipitation", k));
+                if is_sea(k) {
+                    lerp_color(c, hex(SURFACE), 0.6)
+                } else {
+                    c
+                }
+            })
+            .collect(),
+        "snow_fraction" => (0..size)
+            .map(|k| {
+                let s = v("snow_fraction", k).clamp(0.0, 1.0);
+                lerp_color(ground(k), hex("#256abf"), s)
+            })
+            .collect(),
+        "cloud_cover" => (0..size)
+            .map(|k| {
+                let c = v("cloud_cover", k).clamp(0.0, 1.0);
+                lerp_color(hex("#2a78d6"), hex("#f4f2ee"), c)
+            })
+            .collect(),
+        "wind" => (0..size)
+            .map(|k| {
+                let s = v("wind_u", k).hypot(v("wind_v", k));
+                lerp_color(ground(k), hex("#e87ba4"), (s / 10.0).min(1.0) * 0.6)
+            })
+            .collect(),
+        _ => return None,
+    };
+    Some(colors)
+}
+
+/// Legend of a climate map.
+pub fn climate_legend(name: &str) -> Vec<(Color, &'static str)> {
+    match name {
+        "temperature" => vec![
+            (ramp(&TEMP_STOPS, -30.0), "-30 C"),
+            (ramp(&TEMP_STOPS, -15.0), "-15"),
+            (ramp(&TEMP_STOPS, 0.0), "0"),
+            (ramp(&TEMP_STOPS, 10.0), "10"),
+            (ramp(&TEMP_STOPS, 20.0), "20"),
+            (ramp(&TEMP_STOPS, 30.0), "30"),
+        ],
+        "precipitation" => legend("precipitation_erosion"),
+        "snow_fraction" => vec![
+            (faded_elevation(500.0), "no snow"),
+            (hex("#256abf"), "snow cover 100%"),
+        ],
+        "cloud_cover" => vec![(hex("#2a78d6"), "clear"), (hex("#f4f2ee"), "overcast")],
+        "wind" => vec![(hex("#e87ba4"), "10 m/s (arrows: direction)")],
+        _ => Vec::new(),
+    }
+}
+
+/// Arrows on a regular lattice of a `w²` grid; `uv` in m/s, `scale` in px per m/s.
+fn draw_arrows(cv: &mut Canvas, w: usize, uv: &dyn Fn(usize) -> (f64, f64), scale: f64) {
+    let k = factor(w) as f64;
+    let every = (w / 25).max(1);
+    let ink = hex(INK);
+    for j in (every / 2..w).step_by(every) {
+        for i in (every / 2..w).step_by(every) {
+            let (u, v) = uv(j * w + i);
+            let speed = u.hypot(v);
+            let len = speed * scale;
+            if len < 1.5 {
+                continue;
+            }
+            let (x0, y0) = ((i as f64 + 0.5) * k, (j as f64 + 0.5) * k);
+            let (ux, uy) = (u / speed, v / speed);
+            let (x1, y1) = (x0 + ux * len, y0 + uy * len);
+            cv.polyline(&[(x0, y0), (x1, y1)], 2, ink, None);
+            let head = |s: f64| (x1 - 6.0 * ux + s * 4.0 * uy, y1 - 6.0 * uy - s * 4.0 * ux);
+            cv.polyline(&[head(1.0), (x1, y1), head(-1.0)], 2, ink, None);
+        }
+    }
+}
+
+/// Climate previews: January and July maps, annual means, winds and ocean currents.
+fn write_climate_previews(world: &World, dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let Some(base) = world.layer("temperature_x0") else {
+        return Ok(Vec::new());
+    };
+    let w = base.width;
+    let mut written = Vec::new();
+    type Uv<'a> = Option<(&'a dyn Fn(usize) -> (f64, f64), f64)>;
+    let mut save = |name: String,
+                    colors: Vec<Color>,
+                    legend: Vec<(Color, &str)>,
+                    arrows: Uv|
+     -> anyhow::Result<()> {
+        let mut cv = Canvas {
+            img: upscale(&colors, w, w),
+        };
+        if let Some((uv, scale)) = arrows {
+            draw_arrows(&mut cv, w, uv, scale);
+        }
+        let cv = with_legend(cv.img, &legend);
+        let p = dir.join(format!("{name}.png"));
+        cv.save(&p)?;
+        written.push(p);
+        Ok(())
+    };
+    for (tag, n) in [("jan", Some(15.5)), ("jul", Some(196.5)), ("annual", None)] {
+        for name in CLIMATE_MAPS {
+            if tag == "annual" && name != "temperature" && name != "precipitation" {
+                continue;
+            }
+            let Some(colors) = colorize_climate(world, name, n) else {
+                continue;
+            };
+            let uv = |k: usize| {
+                (
+                    climate_value(world, "wind_u", k, n).unwrap_or(0.0),
+                    climate_value(world, "wind_v", k, n).unwrap_or(0.0),
+                )
+            };
+            let arrows: Uv = (name == "wind").then_some((&uv, 1.6));
+            save(
+                format!("{name}_{tag}"),
+                colors,
+                climate_legend(name),
+                arrows,
+            )?;
+        }
+    }
+    if let (Some(u), Some(v)) = (
+        world.layer("ocean_current_u"),
+        world.layer("ocean_current_v"),
+    ) {
+        let elev = world.layer("elevation_tectonic");
+        let colors = (0..w * w)
+            .map(|k| elev.map_or(hex(SURFACE), |l| faded_elevation(l.data.get_f64(k))))
+            .collect();
+        let uv = |k: usize| (u.data.get_f64(k), v.data.get_f64(k));
+        save(
+            "ocean_currents".into(),
+            colors,
+            vec![(hex(INK), "surface current (1 m/s = 20 px)")],
+            Some((&uv, 20.0)),
+        )?;
+    }
+    Ok(written)
+}
+
 /// History flags in drawing priority (first match wins).
 const FLAG_ORDER: [(u8, &str, &str); 7] = [
     (flags::HOTSPOT, SERIES[3], "hotspot"),
@@ -243,7 +449,10 @@ pub fn colorize(world: &World, name: &str) -> Option<Vec<Color>> {
                 })
                 .collect()
         }
-        "precipitation" => (0..n)
+        "biome" => (0..n)
+            .map(|i| hex(BIOME_COLORS[(v(i) as usize).min(BIOME_COLORS.len() - 1)]))
+            .collect(),
+        "precipitation_erosion" => (0..n)
             .map(|i| {
                 let c = ramp(&PRECIP_STOPS, v(i));
                 if elev(i) > 0.0 {
@@ -369,7 +578,12 @@ pub fn legend(name: &str) -> Vec<(Color, &'static str)> {
             (elevation_color(2_000.0), "2000"),
             (elevation_color(3_000.0), "3000"),
         ],
-        "precipitation" => vec![
+        "biome" => crate::biomes::NAMES
+            .iter()
+            .zip(BIOME_COLORS)
+            .map(|(name, c)| (hex(c), *name))
+            .collect(),
+        "precipitation_erosion" => vec![
             (ramp(&PRECIP_STOPS, 0.0), "0 mm/yr"),
             (ramp(&PRECIP_STOPS, 250.0), "250"),
             (ramp(&PRECIP_STOPS, 500.0), "500"),
@@ -616,6 +830,7 @@ pub fn write_previews(world: &World, plates: &[Plate], dir: &Path) -> anyhow::Re
     let p = dir.join("hypsometry.png");
     write_hypsometry(world, &p)?;
     written.push(p);
+    written.extend(write_climate_previews(world, dir)?);
     Ok(written)
 }
 

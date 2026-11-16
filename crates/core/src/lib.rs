@@ -3,6 +3,7 @@
 //! This crate must never depend on a graphics engine.
 
 pub mod astro;
+pub mod climate;
 pub mod consts;
 pub mod coords;
 pub mod geo;

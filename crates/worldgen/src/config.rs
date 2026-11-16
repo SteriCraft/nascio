@@ -1,14 +1,16 @@
-//! World configuration, stored as `world.toml` (spec Â§6).
+//! World configuration, stored as `world.toml` (spec §6).
 
+use crate::biomes::BiomeConfig;
+use crate::climate::ClimateConfig;
 use crate::erosion::ErosionConfig;
 use nascio_core::astro::AstroConfig;
 use nascio_core::time::GameClock;
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a change alters generated output for a given config.
-pub const GENERATOR_VERSION: u32 = 4;
+pub const GENERATOR_VERSION: u32 = 5;
 
-/// Full-resolution cell size of the tectonic grid, in metres (spec Â§1.4).
+/// Full-resolution cell size of the tectonic grid, in metres (spec §1.4).
 pub const TECTONIC_CELL_M: u32 = 160;
 /// Full-resolution width of the tectonic grid.
 pub const TECTONIC_RES: u32 = 625;
@@ -21,11 +23,11 @@ pub const FINE_RES: u32 = 3_125;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "u32", into = "u32")]
 pub enum Scale {
-    /// 625Â² tectonic cells of 160 m.
+    /// 625² tectonic cells of 160 m.
     Full,
-    /// 125Â² tectonic cells of 800 m.
+    /// 125² tectonic cells of 800 m.
     Fifth,
-    /// 25Â² tectonic cells of 4 km (fast tests).
+    /// 25² tectonic cells of 4 km (fast tests).
     TwentyFifth,
 }
 
@@ -79,7 +81,7 @@ impl From<Scale> for u32 {
     }
 }
 
-/// Tunable tectonics parameters (spec Â§4.1). Lengths in metres, ages in Ma.
+/// Tunable tectonics parameters (spec §4.1). Lengths in metres, ages in Ma.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TectonicsConfig {
@@ -106,7 +108,7 @@ pub struct TectonicsConfig {
     pub ridge_depth_m: f64,
     /// Abyssal plain depth.
     pub abyssal_depth_m: f64,
-    /// Age at which the ocean floor reaches the abyssal depth (depth âˆ âˆšage).
+    /// Age at which the ocean floor reaches the abyssal depth (depth ∝ √age).
     pub abyssal_age_ma: f64,
     /// Depth at the axis of a subduction trench.
     pub trench_depth_m: f64,
@@ -143,7 +145,7 @@ pub struct TectonicsConfig {
     /// so they survive coarse resolutions.
     pub min_feature_cells: f64,
     /// Uplift potential deposited by each continental collision event; after smoothing over the
-    /// orogen width it scales like `uplift Ã— shortening / width`, independently of resolution.
+    /// orogen width it scales like `uplift × shortening / width`, independently of resolution.
     pub orogeny_event_uplift_m: f64,
     /// Crest depth of an intra-oceanic island arc between its islands.
     pub island_arc_ridge_m: f64,
@@ -180,7 +182,7 @@ pub struct TectonicsConfig {
     pub inland_water_max_km2: f64,
     /// Water depth of inland water.
     pub inland_water_depth_m: f64,
-    /// Target elevation distribution (Earth hypsometry scaled to the spec Â§3 targets).
+    /// Target elevation distribution (Earth hypsometry scaled to the spec §3 targets).
     pub hypsometry: HypsometryConfig,
 }
 
@@ -281,12 +283,12 @@ impl TectonicsConfig {
 }
 
 /// Target elevation distribution: Earth's hypsometric curve with its elevations remapped to
-/// the spec Â§3 targets. Each band is `[low m, high m, share of Earth's surface in %]`, values
+/// the spec §3 targets. Each band is `[low m, high m, share of Earth's surface in %]`, values
 /// uniform inside a band, bands ascending and contiguous.
 ///
-/// Earth â†’ Nascio remapping: land 0/1 000/2 000/4 000/8 848 m â†’ 0/400/900/1 800/3 000 m;
-/// ocean âˆ’2 000/âˆ’3 000/âˆ’4 000/âˆ’5 000/âˆ’6 000/âˆ’11 000 m â†’ âˆ’1 500/âˆ’2 200/âˆ’2 700/âˆ’3 000/âˆ’3 200/
-/// âˆ’3 500 m. Shelves (0 to âˆ’200 m on Earth, 0 to âˆ’150 m here) and slopes are built
+/// Earth → Nascio remapping: land 0/1 000/2 000/4 000/8 848 m → 0/400/900/1 800/3 000 m;
+/// ocean −2 000/−3 000/−4 000/−5 000/−6 000/−11 000 m → −1 500/−2 200/−2 700/−3 000/−3 200/
+/// −3 500 m. Shelves (0 to −200 m on Earth, 0 to −150 m here) and slopes are built
 /// geometrically and are not remapped; their Earth shares are kept for the histogram.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -340,10 +342,10 @@ impl HypsometryConfig {
     }
 }
 
-/// Everything needed to regenerate a world (spec Â§6).
+/// Everything needed to regenerate a world (spec §6).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorldConfig {
-    /// World seed (TOML integers are signed: keep it below 2â¶Â³).
+    /// World seed (TOML integers are signed: keep it below 2⁶³).
     pub seed: u64,
     pub generator_version: u32,
     pub scale: Scale,
@@ -355,6 +357,10 @@ pub struct WorldConfig {
     pub tectonics: TectonicsConfig,
     #[serde(default)]
     pub erosion: ErosionConfig,
+    #[serde(default)]
+    pub climate: ClimateConfig,
+    #[serde(default)]
+    pub biomes: BiomeConfig,
 }
 
 impl WorldConfig {
@@ -368,6 +374,8 @@ impl WorldConfig {
             astro: AstroConfig::default(),
             tectonics: TectonicsConfig::default(),
             erosion: ErosionConfig::default(),
+            climate: ClimateConfig::default(),
+            biomes: BiomeConfig::default(),
         }
     }
 
@@ -381,6 +389,9 @@ impl WorldConfig {
         self.erosion
             .validate()
             .map_err(|e| anyhow::anyhow!("erosion: {e}"))?;
+        self.climate
+            .validate()
+            .map_err(|e| anyhow::anyhow!("climate: {e}"))?;
         Ok(())
     }
 

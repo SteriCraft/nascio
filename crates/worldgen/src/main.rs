@@ -109,12 +109,16 @@ fn main() -> anyhow::Result<()> {
             cfg.generator_version = GENERATOR_VERSION;
             let out = out.unwrap_or_else(|| PathBuf::from(format!("out/world-{seed}")));
             let start = Instant::now();
-            let (world, tect, ero) = generate_full(&cfg)?;
+            let g = generate_full(&cfg)?;
+            let (world, tect, ero) = (&g.world, &g.tectonics, &g.erosion);
             let elapsed = start.elapsed();
             world.save(&out)?;
-            let previews = write_previews(&world, &tect.plates, &out.join("previews"))?;
+            let previews = write_previews(world, &tect.plates, &out.join("previews"))?;
             println!("{}", tect.report);
             println!("{}", ero.report);
+            for (name, t) in &g.timings {
+                println!("{name}: {t:.2} s");
+            }
             println!("generated in {:.2} s", elapsed.as_secs_f64());
             println!("hash: {}", world.hash());
             println!(

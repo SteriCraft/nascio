@@ -113,6 +113,12 @@ pub struct ErosionConfig {
     pub lake_min_area_m2: f64,
     /// Discharge from which a cell is a river, m³/s.
     pub river_threshold_m3s: f64,
+    /// River width `a·Q^b` (m, Q in m³/s): coefficient and exponent (hydraulic geometry).
+    pub river_width_coef: f64,
+    pub river_width_exp: f64,
+    /// River depth `c·Q^f` (m): coefficient and exponent.
+    pub river_depth_coef: f64,
+    pub river_depth_exp: f64,
 }
 
 impl Default for ErosionConfig {
@@ -166,6 +172,10 @@ impl Default for ErosionConfig {
             lake_min_depth_m: 2.0,
             lake_min_area_m2: 20_000.0,
             river_threshold_m3s: 0.1,
+            river_width_coef: 2.5,
+            river_width_exp: 0.5,
+            river_depth_coef: 0.3,
+            river_depth_exp: 0.4,
         }
     }
 }
@@ -217,6 +227,10 @@ pub struct ErosionOutput {
     pub flow_accumulation: PeriodicGrid<f32>,
     /// Drainage basin, numbered by outlet (1, 2, … in outlet index order); 0 on the sea.
     pub basin_id: PeriodicGrid<u32>,
+    /// River width (m) after the final hydrology (§4.4), 0 off rivers.
+    pub river_width: PeriodicGrid<f32>,
+    /// River depth (m) after the final hydrology, 0 off rivers.
+    pub river_depth: PeriodicGrid<f32>,
     pub report: ErosionReport,
 }
 
@@ -270,13 +284,15 @@ impl ErosionOutput {
     pub fn layers(&self) -> Vec<Layer> {
         vec![
             Layer::from_f32("elevation", "m", &self.elevation),
-            Layer::from_f32("precipitation", "mm/yr", &self.precipitation),
+            Layer::from_f32("precipitation_erosion", "mm/yr", &self.precipitation),
             Layer::from_f32("uplift_rate", "mm/yr", &self.uplift.map(|&v| v * 1_000.0)),
             Layer::from_u8("flow_direction", "D8 code, 255=none", &self.flow_direction),
             Layer::from_f32("flow_accumulation", "m3/s", &self.flow_accumulation),
             Layer::from_u32("basin_id", "id, 0=sea", &self.basin_id),
             Layer::from_f32("lake_depth", "m", &self.lake_depth),
             Layer::from_u8("river_order", "Strahler, 0=none", &self.river_order),
+            Layer::from_f32("river_width", "m", &self.river_width),
+            Layer::from_f32("river_depth", "m", &self.river_depth),
         ]
     }
 }
@@ -351,6 +367,45 @@ pub fn run(cfg: &WorldConfig, tect: &TectonicOutput) -> ErosionOutput {
                 .collect(),
         ),
         basin_id: PeriodicGrid::from_vec(res, res, cell, routing.basin),
+        river_width: PeriodicGrid::new(res, res, cell, 0.0),
+        river_depth: PeriodicGrid::new(res, res, cell, 0.0),
         report,
     }
+}
+
+/// Final hydrology (spec §4.4): discharges recomputed with the climate's mean precipitation
+/// (mm/yr, climate grid) on the eroded surface, then lakes, basins, rivers and their hydraulic
+/// geometry (width and depth from the discharge).
+pub fn final_hydrology(cfg: &WorldConfig, ero: &mut ErosionOutput, precip: &PeriodicGrid<f32>) {
+    let shape = flow::Shape {
+        res: ero.elevation.width(),
+        cell: ero.elevation.cell_size(),
+    };
+    let rain = rain_volume(precip, shape);
+    let h: Vec<f64> = ero.elevation.data().iter().map(|&v| f64::from(v)).collect();
+    let sea_min_area_m2 = cfg.tectonics.inland_water_max_km2 * 1e6;
+    let hy = hydro::hydrography(&h, &rain, shape, sea_min_area_m2, &cfg.erosion);
+    let (res, cell) = (shape.res, shape.cell);
+    let f32_grid =
+        |v: &[f64]| PeriodicGrid::from_vec(res, res, cell, v.iter().map(|&x| x as f32).collect());
+    let c = &cfg.erosion;
+    let q: Vec<f64> = hy.discharge.iter().map(|d| d / SECONDS_PER_YEAR).collect();
+    let on_river = |k: usize, v: f64| if hy.river_order[k] > 0 { v } else { 0.0 };
+    let width: Vec<f64> = (0..q.len())
+        .map(|k| on_river(k, c.river_width_coef * q[k].powf(c.river_width_exp)))
+        .collect();
+    let depth: Vec<f64> = (0..q.len())
+        .map(|k| on_river(k, c.river_depth_coef * q[k].powf(c.river_depth_exp)))
+        .collect();
+    ero.report.lakes = hy.lakes;
+    ero.report.lake_area_km2 =
+        hy.lake_depth.iter().filter(|&&d| d > 0.0).count() as f64 * cell * cell / 1e6;
+    ero.elevation = f32_grid(&hy.elevation);
+    ero.lake_depth = f32_grid(&hy.lake_depth);
+    ero.flow_direction = PeriodicGrid::from_vec(res, res, cell, hy.dir);
+    ero.flow_accumulation = f32_grid(&q);
+    ero.basin_id = PeriodicGrid::from_vec(res, res, cell, hy.basin);
+    ero.river_order = PeriodicGrid::from_vec(res, res, cell, hy.river_order);
+    ero.river_width = f32_grid(&width);
+    ero.river_depth = f32_grid(&depth);
 }
