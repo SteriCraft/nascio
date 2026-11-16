@@ -162,6 +162,7 @@ fn make_plates(cfg: &WorldConfig, max_speed: f64) -> Vec<Plate> {
                 id: k as u8,
                 seed,
                 velocity: (speed * angle.cos(), speed * angle.sin()),
+                drive: (speed * angle.cos(), speed * angle.sin()),
             }
         })
         .collect()

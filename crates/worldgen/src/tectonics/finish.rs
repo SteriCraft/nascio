@@ -521,7 +521,7 @@ fn gauss(x: f64) -> f64 {
 }
 
 /// Periodic box blur of radius `r` cells, horizontal then vertical.
-fn box_blur(v: &mut [f32], w: usize, h: usize, r: usize) {
+pub(crate) fn box_blur(v: &mut [f32], w: usize, h: usize, r: usize) {
     let norm = 1.0 / (2 * r + 1) as f64;
     let mut tmp = vec![0f32; v.len()];
     for j in 0..h {

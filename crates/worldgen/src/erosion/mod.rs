@@ -12,6 +12,7 @@ pub mod flow;
 pub mod hydro;
 pub mod precip;
 pub mod process;
+pub mod uplift;
 pub mod upsample;
 
 use rayon::prelude::*;
@@ -99,6 +100,11 @@ pub struct ErosionConfig {
     pub deposit_slope: f64,
     /// Sediment never builds above this depth.
     pub deposit_top_m: f64,
+    /// Tectonic uplift rate along a convergent boundary closing at the fastest plate speed
+    /// (m/yr); slower boundaries rise proportionally, over the orogen width. 0 disables uplift.
+    pub uplift_max_m_yr: f64,
+    /// Share of the driving convergence kept across a welded continental suture.
+    pub suture_uplift_share: f64,
 
     // --- Final hydrography ---
     /// Depressions shallower than this are filled, not lakes.
@@ -155,6 +161,8 @@ impl Default for ErosionConfig {
             max_diffusion_factor: 3.0,
             deposit_slope: 0.01,
             deposit_top_m: -1.0,
+            uplift_max_m_yr: 3.0e-4,
+            suture_uplift_share: 0.5,
             lake_min_depth_m: 2.0,
             lake_min_area_m2: 20_000.0,
             river_threshold_m3s: 0.1,
@@ -201,6 +209,8 @@ pub struct ErosionOutput {
     pub river_order: PeriodicGrid<u8>,
     /// Provisional precipitation on the tectonic grid, mm/yr.
     pub precipitation: PeriodicGrid<f32>,
+    /// Tectonic uplift rate on the tectonic grid, m/yr.
+    pub uplift: PeriodicGrid<f32>,
     /// D8 direction code (index in [`flow::D8`]), [`flow::NO_DIR`] on the sea.
     pub flow_direction: PeriodicGrid<u8>,
     /// Mean discharge, m³/s.
@@ -227,9 +237,11 @@ impl std::fmt::Display for ErosionReport {
         let s = &self.stats;
         writeln!(
             f,
-            "erosion: {} steps ({} diffusion sub-steps each), fluvial {:.3} km3, coastal {:.3} km3, deposited {:.3} km3 (lost {:.3}), mean land lowering {:.1} m",
+            "erosion: {} steps ({} diffusion sub-steps each), uplift {:.3} km3 (max {:.0} m), fluvial {:.3} km3, coastal {:.3} km3, deposited {:.3} km3 (lost {:.3}), mean land lowering {:.1} m",
             s.steps,
             s.diffusion_substeps,
+            s.uplift_m3 / 1e9,
+            s.max_uplift_m,
             s.fluvial_m3 / 1e9,
             s.coastal_m3 / 1e9,
             s.deposited_m3 / 1e9,
@@ -259,6 +271,7 @@ impl ErosionOutput {
         vec![
             Layer::from_f32("elevation", "m", &self.elevation),
             Layer::from_f32("precipitation", "mm/yr", &self.precipitation),
+            Layer::from_f32("uplift_rate", "mm/yr", &self.uplift.map(|&v| v * 1_000.0)),
             Layer::from_u8("flow_direction", "D8 code, 255=none", &self.flow_direction),
             Layer::from_f32("flow_accumulation", "m3/s", &self.flow_accumulation),
             Layer::from_u32("basin_id", "id, 0=sea", &self.basin_id),
@@ -299,11 +312,13 @@ pub fn run(cfg: &WorldConfig, tect: &TectonicOutput) -> ErosionOutput {
         cell: fine.cell_size(),
     };
     let rain = rain_volume(&precipitation, shape);
+    let uplift = uplift::uplift_rate(cfg, tect);
+    let uplift_fine = uplift::on_fine(&uplift, shape.res, shape.cell);
     let sea_min_area_m2 = cfg.tectonics.inland_water_max_km2 * 1e6;
     let sea = flow::sea_mask(fine.data(), shape, sea_min_area_m2);
     let mut h = fine.data().to_vec();
     report.stats = timed(&mut report, "erosion", || {
-        process::erode(&mut h, &rain, shape, &sea, &cfg.erosion)
+        process::erode(&mut h, &rain, &uplift_fine, shape, &sea, &cfg.erosion)
     });
     let land: Vec<usize> = (0..shape.n()).filter(|&k| !sea[k]).collect();
     report.mean_land_lowering_m =
@@ -323,6 +338,7 @@ pub fn run(cfg: &WorldConfig, tect: &TectonicOutput) -> ErosionOutput {
         lake_depth: f32_grid(&routing.lake_depth),
         river_order: PeriodicGrid::from_vec(res, res, cell, routing.river_order),
         precipitation,
+        uplift,
         flow_direction: PeriodicGrid::from_vec(res, res, cell, routing.dir),
         flow_accumulation: PeriodicGrid::from_vec(
             res,

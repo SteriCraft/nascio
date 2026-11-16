@@ -29,6 +29,10 @@ use super::flow::{self, Shape};
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ErosionStats {
     pub steps: u32,
+    /// Added to the land by tectonic uplift.
+    pub uplift_m3: f64,
+    /// Largest total uplift of a cell, m.
+    pub max_uplift_m: f64,
     /// Removed from the land by rivers.
     pub fluvial_m3: f64,
     /// Moved by hillslope diffusion from the land into the sea.
@@ -41,10 +45,12 @@ pub struct ErosionStats {
     pub diffusion_substeps: u32,
 }
 
-/// Runs the erosion steps on `h` (fine grid, m), with `rain` the rain volume per cell (m³/yr).
+/// Runs the erosion steps on `h` (fine grid, m), with `rain` the rain volume per cell (m³/yr)
+/// and `uplift` the tectonic uplift rate per cell (m/yr, applied to the land only).
 pub fn erode(
     h: &mut [f64],
     rain: &[f64],
+    uplift: &[f64],
     shape: Shape,
     sea: &[bool],
     cfg: &ErosionConfig,
@@ -60,6 +66,13 @@ pub fn erode(
     stats.diffusion_substeps = substeps;
     let mut sediment = vec![0.0f64; shape.n()];
     for _ in 0..steps {
+        // Tectonic uplift of the land (the sea keeps its extent).
+        for k in 0..shape.n() {
+            if !sea[k] && uplift[k] > 0.0 {
+                h[k] += uplift[k] * cfg.dt_yr;
+                stats.uplift_m3 += uplift[k] * cfg.dt_yr * area;
+            }
+        }
         let filled = flow::priority_flood(h, sea, shape, true);
         let (rec, dir) = flow::receivers(&filled, sea, shape);
         let order = flow::stack(&rec);
@@ -110,6 +123,8 @@ pub fn erode(
         stats.deposited_m3 += deposited;
         stats.lost_m3 += delivered - deposited;
     }
+    stats.max_uplift_m =
+        uplift.iter().fold(0.0f64, |m, &u| m.max(u)) * cfg.dt_yr * f64::from(steps);
     stats
 }
 
@@ -417,7 +432,7 @@ mod tests {
         let h0 = h.clone();
         let sea: Vec<bool> = h.iter().map(|&v| v < 0.0).collect();
         let rain = vec![s.cell * s.cell; s.n()];
-        let stats = erode(&mut h, &rain, s, &sea, &cfg);
+        let stats = erode(&mut h, &rain, &vec![0.0; s.n()], s, &sea, &cfg);
         assert!(stats.fluvial_m3 > 0.0);
         assert!(h.iter().zip(&sea).all(|(&v, &is_sea)| is_sea || v >= 0.0));
         assert!(h.iter().zip(&h0).all(|(a, b)| a <= b || *b < 0.0));

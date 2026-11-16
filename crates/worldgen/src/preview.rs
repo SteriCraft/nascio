@@ -315,6 +315,15 @@ pub fn colorize(world: &World, name: &str) -> Option<Vec<Color>> {
             })
             .collect(),
         "crust_thickness" | "moho_depth" => (0..n).map(|i| blues(v(i) / 6_000.0)).collect(),
+        "uplift_rate" => (0..n)
+            .map(|i| {
+                if v(i) > 0.005 {
+                    blues(0.15 + 0.85 * (v(i) / 0.3).min(1.0))
+                } else {
+                    faded_elevation(elev(i))
+                }
+            })
+            .collect(),
         "history_flags" => (0..n)
             .map(|i| {
                 let f = v(i) as u8;
@@ -414,6 +423,11 @@ pub fn legend(name: &str) -> Vec<(Color, &'static str)> {
             (blues(700.0 / 6_000.0), "700 m"),
             (blues(3_500.0 / 6_000.0), "3500"),
             (blues(1.0), "6000"),
+        ],
+        "uplift_rate" => vec![
+            (blues(0.15), "0 mm/yr"),
+            (blues(0.575), "0.15"),
+            (blues(1.0), "0.3+"),
         ],
         "moho_depth" => vec![(blues(0.5), "3000 m below sea level"), (blues(1.0), "6000")],
         "history_flags" => FLAG_ORDER.iter().map(|(_, c, l)| (hex(c), *l)).collect(),

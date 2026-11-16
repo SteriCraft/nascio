@@ -12,6 +12,7 @@ mod hotspot;
 mod init;
 mod step;
 
+pub(crate) use finish::box_blur;
 pub use finish::{Report, TectonicOutput};
 
 use crate::config::WorldConfig;
@@ -56,6 +57,9 @@ pub struct Plate {
     pub seed: (f64, f64),
     /// Translation per step, in metres.
     pub velocity: (f64, f64),
+    /// Initial (driving) translation per step, in metres. Welding changes `velocity`, never
+    /// this: the convergence of welded plates goes on slowly after a collision (uplift, §4.2).
+    pub drive: (f64, f64),
 }
 
 /// A hotspot, fixed in the mantle frame.

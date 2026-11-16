@@ -345,11 +345,13 @@ mod tests {
                 id: 0,
                 seed: (0.0, 0.0),
                 velocity: (cell, 0.0),
+                drive: (cell, 0.0),
             },
             Plate {
                 id: 1,
                 seed: (50_000.0, 0.0),
                 velocity: (0.0, 0.0),
+                drive: (0.0, 0.0),
             },
         ];
         t.contact = vec![0.0; 4];
