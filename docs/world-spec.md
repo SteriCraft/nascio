@@ -149,6 +149,10 @@ Référence : Cortial et al., *Procedural Tectonic Planets* (2019), adaptée à 
 - Suréchantillonnage de l'altitude tectonique vers la grille de 32 m, avec du bruit périodique de détail.
 - Érosion fluviale de type **stream power** (`E = K · A^m · S^n`), plus de la diffusion sur les pentes. Les précipitations sont d'abord estimées grossièrement (zonales et orographiques), car le climat n'est pas encore connu.
 - Écoulement **D8 ou MFD périodique**. Les dépressions sont traitées par *priority-flood* (comblement ou lacs).
+- **Soulèvement tectonique** pendant l'érosion : un taux de soulèvement tiré des vitesses de convergence actuelles des plaques (§4.1) est appliqué à chaque pas sur les terres proches des frontières convergentes (orogènes de collision, arcs volcaniques). Les plaques soudées, de vitesse commune, ne soulèvent plus.
+- **Sédiments côtiers** : le volume érodé en amont de chaque embouchure construit un cône de dépôt sous la mer (pente et profondeur maximale *(config)*), au lieu d'une diffusion marine. La masse est conservée et le cône ne crée jamais de terre.
+- **Lacs** : une dépression d'au moins 2 m de profondeur et 20 000 m² devient un lac *(config)* ; les autres sont comblées. Densité de référence : 70 à 115 lacs par monde.
+- Durée de 1 Ma *(config)* ; génération complète en pleine résolution en 50 à 60 s environ.
 
 ### 4.3 Climat (grille de 625²)
 On simule une année type sur 24 à 48 pas, puis on **projette chaque grandeur sur des harmoniques annuelles** :
