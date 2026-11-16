@@ -169,7 +169,7 @@ On stocke `(X0, A1, p1, A2, p2)` par cellule. L'évaluation à n'importe quel in
 - **Humidité et précipitations** : évaporation sur l'océan, advection par le vent, pluies orographiques au vent des reliefs et sécheresse à l'abri des montagnes, ZCIT (zone de convergence intertropicale) qui suit δ_eff, ceintures sèches vers 30°.
 - **Bande polaire** : couverture nuageuse forcée (`c ≥ c_min(s)`, §2.7) et précipitations renforcées dans la bande, avec un impact réel sur le climat (albédo, neige ou glace permanente). Le facteur de précipitations est en *(config)*.
 - **Cycle diurne** (à l'exécution) : son amplitude dépend de l'humidité et de la continentalité. Le maximum est vers 14–15 h solaires locales.
-- **Sorties** : harmoniques de `temperature`, `precipitation`, `wind` (vecteur), `snow_fraction` ; champ `ocean_current`.
+- **Sorties** : harmoniques de `temperature`, `precipitation`, `wind` (vecteur), `snow_fraction` (**part du sol couverte de neige**, et non part neigeuse des précipitations), `cloud_cover` (couverture nuageuse, jamais sous `c_min(s)`) ; champ `ocean_current` ; amplitude diurne `diurnal_range`. Chaque grandeur harmonique est stockée en cinq couches (`<nom>_x0`, `_a1`, `_p1`, `_a2`, `_p2`, phases en jours).
 
 ### 4.4 Hydrologie finale (grille de 3 125²)
 On recalcule les débits avec les précipitations du climat, puis on détermine les rivières (seuil d'accumulation, largeur et profondeur selon le débit), les lacs et les deltas. Une légère passe d'érosion de finition est possible.
