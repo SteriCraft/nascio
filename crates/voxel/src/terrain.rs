@@ -35,6 +35,8 @@ pub struct VoxelConfig {
     pub sand_depth_m: i32,
     /// Chunks generated below the lowest surface of a column.
     pub underground_chunks: i32,
+    /// The crust keeps at least this thickness of stone above the magma, m.
+    pub min_crust_m: i32,
 }
 
 impl Default for VoxelConfig {
@@ -47,6 +49,7 @@ impl Default for VoxelConfig {
             beach_high_m: 0,
             sand_depth_m: 3,
             underground_chunks: 2,
+            min_crust_m: 50,
         }
     }
 }
@@ -74,6 +77,9 @@ pub struct Terrain {
     detail: Detail,
     /// Octaves at least this wide are already in `elevation`.
     baked_spacing: f64,
+    /// Depth of the Moho below sea level (m, positive downwards), per tectonic cell; `None`:
+    /// no magma.
+    moho: Option<PeriodicGrid<f32>>,
 }
 
 fn grid_f32(layer: &Layer) -> PeriodicGrid<f32> {
@@ -110,7 +116,26 @@ impl Terrain {
             elevation,
             lakes,
             cfg,
-        ))
+        )
+        .with_moho(world.layer("moho_depth").map(grid_f32)))
+    }
+
+    /// Sets the Moho depth grid (m below sea level, positive downwards).
+    pub fn with_moho(mut self, moho: Option<PeriodicGrid<f32>>) -> Self {
+        self.moho = moho;
+        self
+    }
+
+    /// First magma block of a column whose top solid block is at `top` (stone above it): the
+    /// Moho, kept at least `min_crust_m` below the surface. `i32::MIN` without Moho data.
+    pub fn moho_y(&self, x: f64, z: f64, top: i32) -> i32 {
+        match &self.moho {
+            Some(m) => {
+                let y = (-m.sample_bilinear(x, z)).floor() as i32;
+                y.min(top - self.cfg.min_crust_m)
+            }
+            None => i32::MIN,
+        }
     }
 
     /// Builds a terrain. `tectonic` and `history_flags` share the tectonic grid (they set the
@@ -150,6 +175,7 @@ impl Terrain {
             ruggedness,
             detail: Detail::new(seed, erosion),
             baked_spacing,
+            moho: None,
         }
     }
 
@@ -274,6 +300,11 @@ pub(crate) mod tests {
                 0.0
             }
         });
+        // Moho 700 m under the sea floor, 3 500 m under the land, varying across both seams.
+        let moho = PeriodicGrid::from_fn(n, n, cell, |i, j| {
+            let e = f64::from(wave(i, j, n));
+            (if e < 0.0 { 700.0 - e } else { 3_500.0 + e }) as f32
+        });
         Terrain::new(
             42,
             &ErosionConfig::default(),
@@ -283,6 +314,7 @@ pub(crate) mod tests {
             Some(lakes),
             VoxelConfig::default(),
         )
+        .with_moho(Some(moho))
     }
 
     #[test]

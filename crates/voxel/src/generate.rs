@@ -8,7 +8,7 @@
 use nascio_core::consts::{CHUNK_SIZE, CHUNKS_PER_AXIS};
 use nascio_core::coords::ChunkPos;
 
-use crate::block::{AIR, BlockId, WATER};
+use crate::block::{AIR, BlockId, MAGMA, WATER};
 use crate::chunk::{Chunk, ChunkDeltas, NP, PaddedChunk};
 use crate::terrain::Terrain;
 
@@ -27,6 +27,8 @@ pub struct ColumnSet {
     slopes: Vec<f32>,
     /// Water fills `top < y < water_top` (sea: 0; lakes: their surface), local `-1..=32`.
     water_tops: Vec<i32>,
+    /// First magma block (the Moho) of each column, local `-1..=32`.
+    mohos: Vec<i32>,
 }
 
 impl ColumnSet {
@@ -47,6 +49,7 @@ impl ColumnSet {
         let mut tops = vec![0; NP * NP];
         let mut slopes = vec![0.0; NP * NP];
         let mut water_tops = vec![0; NP * NP];
+        let mut mohos = vec![0; NP * NP];
         for lz in 0..NP {
             for lx in 0..NP {
                 let h = |dx: usize, dz: usize| heights[(lx + dx) + NH * (lz + dz)];
@@ -57,6 +60,7 @@ impl ColumnSet {
                 let x = f64::from(ox + lx as i32 - 1) + 0.5;
                 let z = f64::from(oz + lz as i32 - 1) + 0.5;
                 water_tops[lx + NP * lz] = terrain.water_top(x, z);
+                mohos[lx + NP * lz] = terrain.moho_y(x, z, tops[lx + NP * lz]);
             }
         }
         Self {
@@ -65,7 +69,24 @@ impl ColumnSet {
             tops,
             slopes,
             water_tops,
+            mohos,
         }
+    }
+
+    /// First magma block of local column `(x, z)`.
+    #[inline]
+    pub fn moho(&self, x: i32, z: i32) -> i32 {
+        self.mohos[Self::k(x, z)]
+    }
+
+    /// Chunk layers of the whole crust: from one chunk of magma below the deepest Moho up to
+    /// the highest surface or water surface (without Moho data: `underground` chunks).
+    pub fn crust_chunk_range(&self, underground: i32) -> std::ops::RangeInclusive<i32> {
+        let lowest = *self.mohos.iter().min().expect("non-empty");
+        if lowest == i32::MIN {
+            return self.chunk_range(underground);
+        }
+        (lowest.div_euclid(CHUNK_SIZE) - 1)..=*self.chunk_range(0).end()
     }
 
     #[inline]
@@ -130,6 +151,8 @@ impl ColumnSet {
         let top = self.top(x, z);
         if y > top {
             if y < self.water_top(x, z) { WATER } else { AIR }
+        } else if y < self.moho(x, z) {
+            MAGMA
         } else {
             terrain.column_block(top, self.slope(x, z), top - y)
         }
@@ -222,6 +245,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Chunks go down to the Moho: stone above it, magma below, with no visible face in
+    /// between (both opaque), and the same Moho on both sides of the seams.
+    #[test]
+    fn crust_down_to_the_moho_then_magma() {
+        use crate::block::MAGMA;
+        let t = test_terrain();
+        let last = CHUNKS_PER_AXIS - 1;
+        for (cx, cz) in [(0, 0), (last, 900), (1_500, last), (2_000, 1_200)] {
+            let col = ColumnSet::new(&t, cx, cz);
+            let range = col.crust_chunk_range(2);
+            let (mut stone, mut magma) = (false, false);
+            for cy in range.clone() {
+                let c = generate_chunk(&t, ChunkPos::new(cx, cy, cz));
+                for y in 0..32u8 {
+                    let wy = cy * CHUNK_SIZE + i32::from(y);
+                    let b = c.get(LocalPos { x: 7, y, z: 7 });
+                    if wy < col.moho(7, 7) {
+                        assert_eq!(b, MAGMA, "({cx},{cz}) y {wy}");
+                        magma = true;
+                    } else if wy <= col.top(7, 7) - 10 {
+                        assert_eq!(b, STONE, "({cx},{cz}) y {wy}");
+                        stone = true;
+                    }
+                }
+                if !col.may_have_faces(cy) {
+                    assert!(crate::mesh::mesh_chunk(&col.padded_chunk(&t, cy)).is_empty());
+                }
+            }
+            assert!(stone && magma, "({cx},{cz}) range {range:?}");
+            assert!(col.moho(7, 7) <= col.top(7, 7) - t.config().min_crust_m);
+            assert!(col.moho(7, 7) < -600);
+        }
+        // Continuity of the Moho across the x seam.
+        let a = ColumnSet::new(&t, last, 300);
+        let b = ColumnSet::new(&t, 0, 300);
+        assert_eq!(a.moho(CHUNK_SIZE, 5), b.moho(0, 5));
     }
 
     #[test]

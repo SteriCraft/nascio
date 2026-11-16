@@ -9,6 +9,8 @@ pub const STONE: BlockId = 2;
 pub const DIRT: BlockId = 3;
 pub const GRASS: BlockId = 4;
 pub const SAND: BlockId = 5;
+/// Mantle magma under the Moho: infinite and deadly (spec §3). Opaque for now.
+pub const MAGMA: BlockId = 6;
 
 /// How a block takes part in rendering and physics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,7 +35,7 @@ pub struct BlockDef {
 }
 
 /// The registry, indexed by [`BlockId`].
-pub const BLOCKS: [BlockDef; 6] = [
+pub const BLOCKS: [BlockDef; 7] = [
     BlockDef {
         name: "air",
         color: [0, 0, 0],
@@ -69,6 +71,12 @@ pub const BLOCKS: [BlockDef; 6] = [
         color: [212, 196, 146],
         matter: Matter::Solid,
         density: 1_600.0,
+    },
+    BlockDef {
+        name: "magma",
+        color: [255, 96, 24],
+        matter: Matter::Solid,
+        density: 3_000.0,
     },
 ];
 
@@ -118,6 +126,7 @@ mod tests {
             ("dirt", DIRT),
             ("grass", GRASS),
             ("sand", SAND),
+            ("magma", MAGMA),
         ] {
             assert_eq!(by_name(name), Some(id));
         }
