@@ -51,8 +51,8 @@ struct Args {
     /// Camera speed, m/s.
     #[arg(long, default_value_t = 40.0)]
     speed: f64,
-    /// Chunk view distance, m.
-    #[arg(long, default_value_t = 512.0)]
+    /// Chunk view distance, m (1 024 m by default, the slider's maximum).
+    #[arg(long, default_value_t = 1_024.0)]
     view_distance: f32,
     /// Fixed local solar hour for lighting (default: real time).
     #[arg(long)]
@@ -147,13 +147,19 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         render_cfg.curvature_radius_m = r;
     }
     let terrain = Arc::new(Terrain::from_world(&world, voxel_cfg)?);
-    // Cloud and snow harmonics for the 3D mode (the map keeps the world).
+    // Cloud, snow and temperature harmonics and the fine elevation (snow line) for the 3D
+    // mode (the map keeps the world).
     let climate_world = World {
         config: world.config.clone(),
         layers: world
             .layers
             .iter()
-            .filter(|l| l.name.starts_with("cloud_cover_") || l.name.starts_with("snow_fraction_"))
+            .filter(|l| {
+                ["cloud_cover_", "snow_fraction_", "temperature_"]
+                    .iter()
+                    .any(|p| l.name.starts_with(p))
+                    || l.name == "elevation"
+            })
             .cloned()
             .collect(),
     };
@@ -161,6 +167,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         astro: world.config.astro,
         clock: world.config.clock,
         seed: world.config.seed,
+        lapse_rate_c_per_m: world.config.climate.lapse_rate_c_per_m,
     };
 
     let (x, z, y) = match args.pos.as_deref() {
@@ -184,6 +191,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         horizon: !args.no_horizon,
         curvature_radius_m: render_cfg.radius(),
         shadows: !args.no_shadows,
+        vsync: !args.no_vsync,
         ..default()
     };
 
@@ -254,6 +262,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         Update,
         (
             switch_mode,
+            fly::apply_vsync,
             (
                 fly::fly_input,
                 fly::stream_chunks,
@@ -263,6 +272,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
                 sky::update_sky_state,
                 sky::update_light_and_fog,
                 sky::update_sky,
+                sky::update_star_limit,
                 curvature::sync_curved,
                 update_fog,
             )
@@ -320,7 +330,8 @@ fn setup(
     commands.spawn((
         Camera3d::default(),
         Projection::from(PerspectiveProjection {
-            fov: 70f32.to_radians(),
+            // 42° vertical (pre-M5 review): less stretching at the edges (round Moon).
+            fov: 42f32.to_radians(),
             near: 0.1,
             far: 60_000.0,
             ..default()
@@ -425,9 +436,8 @@ fn switch_mode(
     terrain: Res<fly::SharedTerrain>,
 ) {
     match state.get() {
-        Mode::Map if map.fly_request => {
-            map.fly_request = false;
-            let (x, z) = map.center;
+        Mode::Map if map.fly_request.is_some() => {
+            let (x, z) = map.fly_request.take().unwrap_or(map.center);
             cam.pos = WorldPos::new(x, terrain.0.height(x, z).max(0.0) + 60.0, z);
             next.set(Mode::Fly);
         }

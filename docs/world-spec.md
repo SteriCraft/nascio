@@ -239,14 +239,15 @@ La version du générateur est incrémentée à chaque changement qui modifie le
 - Graticule de latitude et de longitude : les lignes de latitude sont espacées selon `sin φ`.
 - Curseurs de jour de l'année et d'heure, avec superposition **jour/nuit** calculée par pixel à partir de `e_vis`, et couches climatiques évaluées à cet instant.
 - Infobulle sous le curseur : x, z, φ, λ et les valeurs des couches.
+- Un clic choisit le **point d'apparition** (cellule surlignée) ; un bouton ou un double clic y passe en 3D.
 
 **Mode 3D (vol libre)**
 - Caméra libre (ZQSD/WASD et souris, vitesse ajustable de 5 m/s à 2 km/s), téléportation vers des coordonnées.
-- Chargement des chunks autour de la caméra par génération asynchrone, maillage glouton (*greedy meshing*), couleurs par bloc (les textures viendront plus tard). Distance de vue réglable, 512 m par défaut.
+- Chargement des chunks autour de la caméra par génération asynchrone, maillage glouton (*greedy meshing*), couleurs par bloc (les textures viendront plus tard). Distance de vue réglable, 1 024 m par défaut.
 - **Horizon** : au-delà des chunks, un maillage de hauteurs en anneaux emboîtés dont la résolution diminue de moitié à chaque anneau, sur plusieurs dizaines de km. La portée reste sous 50 km, pour ne jamais revoir le même relief par l'autre côté du tore. Les hauteurs viennent de la même fonction de surface que les chunks, avec des jupes entre niveaux. Aucune couture visible, ni avec les chunks ni à la couture du tore.
 - Rendu relatif à la caméra. Traverser la couture ne doit produire aucun artefact.
 - **Courbure d'affichage** (rendu uniquement ; la physique et la génération restent planes) : le shader de sommets des chunks, de l'eau et de l'horizon abaisse chaque sommet de `d² / (2·R_vis)`, où `d` est la distance horizontale à la caméra. `R_vis` *(config `[render] curvature_radius_m`, 200 km par défaut, curseur du panneau 3D ; 0 = plat)* ; le rayon réel, de même circonférence que le tore, vaut `100 km / 2π ≈ 15 915 m`. Les boîtes englobantes des chunks sont prolongées vers le bas de la chute maximale, l'horizon n'est pas soumis au frustum culling. Un point d'altitude `H` est visible depuis l'altitude `h` jusqu'à `√(2·R_vis·h) + √(2·R_vis·H)` : l'horizon ne dessine que les niveaux en deçà, avec `H` le plus haut sommet de l'horizon affiché.
 - Soleil, ciel, couvert polaire, aurores, Lune et étoiles selon les §2.5 à §2.8. Le temps est contrôlable : temps réel, accéléré, ou figé sur une date et une heure.
-- Interface affichée : position, φ, λ, s, heure solaire locale, date du jeu, biome, roche sous le curseur.
+- Interface affichée : position, φ, λ, s, heure solaire locale, date du jeu, biome, roche sous le curseur. Champ de vision vertical de 42°. **Minimap** en bas à droite (position et cap, monde entier ou 20 km). État de la vsync et case pour la couper (Carte et 3D). Curseur de magnitude limite des étoiles (BSC5 jusqu'à la limite absolue de 6,5, 5 par défaut). Horloge en haut à droite : heure solaire locale et heure de l'origine (λ = 0).
 - Compteur à l'écran des temps CPU et GPU par image ; mode benchmark (trajet de caméra scripté, sortie en ms par image).
 - **Cible** : 60 i/s en 1080p, réglages maximum, sur un portable Linux (Ryzen 5 5600H, RTX 3050 Mobile).

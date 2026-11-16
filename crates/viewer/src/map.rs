@@ -47,6 +47,10 @@ pub struct MapState {
     /// Climate texture and the (map, day) it was made for.
     climate_tex: Option<(egui::TextureHandle, &'static str, f64)>,
     night_tex: Option<egui::TextureHandle>,
+    /// Downsampled elevation map of the 3D minimap.
+    minimap: Option<egui::TextureHandle>,
+    /// Spawn point chosen by a click on the map (centre of the clicked cell), world metres.
+    pub spawn: Option<(f64, f64)>,
     /// View centre, world metres.
     pub center: (f64, f64),
     /// Metres per screen point; 0 until the first frame fits the world to the view.
@@ -59,8 +63,8 @@ pub struct MapState {
     real_time: bool,
     /// Animation speed, game days per real second (0: paused).
     days_per_second: f64,
-    /// Set by the "Fly here" button: switch to 3D at the view centre.
-    pub fly_request: bool,
+    /// Set by the fly buttons (or a double click): switch to 3D at this point.
+    pub fly_request: Option<(f64, f64)>,
 }
 
 impl MapState {
@@ -79,6 +83,8 @@ impl MapState {
             textures,
             climate_tex: None,
             night_tex: None,
+            minimap: None,
+            spawn: None,
             center: (WORLD_SIZE_F64 / 2.0, WORLD_SIZE_F64 / 2.0),
             mpp: 0.0,
             graticule: true,
@@ -86,10 +92,45 @@ impl MapState {
             time: clock.now(),
             real_time: true,
             days_per_second: 0.0,
-            fly_request: false,
+            fly_request: None,
         }
     }
 
+    /// Elevation colours of the whole world, downsampled for the 3D minimap (built once).
+    pub fn minimap_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureId> {
+        if self.minimap.is_none() {
+            let l = self
+                .world
+                .layer("elevation")
+                .or_else(|| self.world.layer("elevation_tectonic"))?;
+            let (name, w, h) = (l.name.clone(), l.width, l.height);
+            let colors = preview::colorize(&self.world, &name)?;
+            let n = MINIMAP_RES.min(w);
+            let pixels = (0..n * n)
+                .map(|k| {
+                    let c = colors[(k / n * h / n) * w + (k % n) * w / n];
+                    egui::Color32::from_rgb(c[0], c[1], c[2])
+                })
+                .collect();
+            let image = egui::ColorImage::new([n, n], pixels);
+            self.minimap =
+                Some(ctx.load_texture("minimap", image, egui::TextureOptions::LINEAR_REPEAT));
+        }
+        self.minimap.as_ref().map(|t| t.id())
+    }
+
+    /// Centre of the cell of the shown layer that contains `(x, z)`.
+    fn snap(&self, x: f64, z: f64) -> (f64, f64) {
+        let cell = self.cell_m();
+        let c = |v: f64| wrap_f64(((v / cell).floor() + 0.5) * cell);
+        (c(x), c(z))
+    }
+}
+
+/// Resolution of the minimap texture.
+const MINIMAP_RES: usize = 512;
+
+impl MapState {
     /// Shows a layer or climate map by name (`--map-layer`); unknown names are ignored.
     pub fn select(&mut self, name: &str) {
         if let Some(c) = preview::CLIMATE_MAPS.iter().find(|&&c| c == name) {
@@ -130,7 +171,12 @@ fn is_harmonic(name: &str) -> bool {
 }
 
 /// egui system of the map mode.
-pub fn ui(mut contexts: EguiContexts, mut state: ResMut<MapState>, time: Res<Time>) -> Result {
+pub fn ui(
+    mut contexts: EguiContexts,
+    mut state: ResMut<MapState>,
+    mut settings: ResMut<crate::fly::FlySettings>,
+    time: Res<Time>,
+) -> Result {
     let ctx = contexts.ctx_mut()?;
     let state = &mut *state;
     advance_time(state, time.delta_secs_f64());
@@ -145,7 +191,7 @@ pub fn ui(mut contexts: EguiContexts, mut state: ResMut<MapState>, time: Res<Tim
         .resizable(false)
         .min_size(230.0)
         .show(&mut root, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| side_panel(ui, state));
+            egui::ScrollArea::vertical().show(ui, |ui| side_panel(ui, state, &mut settings));
         });
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
@@ -164,7 +210,7 @@ fn advance_time(s: &mut MapState, dt: f64) {
     }
 }
 
-fn side_panel(ui: &mut egui::Ui, s: &mut MapState) {
+fn side_panel(ui: &mut egui::Ui, s: &mut MapState, settings: &mut crate::fly::FlySettings) {
     ui.heading("Nascio — map");
     let c = &s.world.config;
     ui.label(format!(
@@ -216,15 +262,30 @@ fn side_panel(ui: &mut egui::Ui, s: &mut MapState) {
             s.mpp * 100.0 / 1_000.0
         ));
     }
-    if ui.button("Fly here (3D)").clicked() {
-        s.fly_request = true;
+    match s.spawn {
+        Some((x, z)) => {
+            ui.label(format!("Spawn point: x {x:.0}, z {z:.0}"));
+            if ui.button("Fly to the spawn point (3D)").clicked() {
+                s.fly_request = Some((x, z));
+            }
+        }
+        None => {
+            ui.label("Click the map to choose a spawn point (double click: fly there).");
+        }
+    }
+    if ui.button("Fly at the view centre (3D)").clicked() {
+        s.fly_request = Some(s.center);
     }
     if ui.button("Reset view").clicked() {
         s.center = (WORLD_SIZE_F64 / 2.0, WORLD_SIZE_F64 / 2.0);
         s.mpp = 0.0;
     }
     ui.separator();
-    ui.small("Drag to pan, wheel to zoom. The map repeats: the world is a torus.");
+    crate::fly::vsync_toggle(ui, settings);
+    ui.separator();
+    ui.small(
+        "Drag to pan, wheel to zoom, click to set the spawn point. The map repeats: the world is a torus.",
+    );
 }
 
 fn date_controls(ui: &mut egui::Ui, s: &mut MapState) {
@@ -427,9 +488,51 @@ fn map(ui: &mut egui::Ui, s: &mut MapState) {
         draw_graticule(&painter, rect, s);
     }
 
+    // Spawn point: a click highlights the cell under the cursor, a double click flies there.
+    if (response.clicked() || response.double_clicked())
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let (x, z) = screen_to_world(s, rect, pos);
+        s.spawn = Some(s.snap(x, z));
+        if response.double_clicked() {
+            s.fly_request = s.spawn;
+        }
+    }
+    if let Some((x, z)) = s.spawn {
+        draw_spawn(&painter, rect, s, x, z);
+    }
+
     if let Some(pos) = response.hover_pos() {
         let (x, z) = screen_to_world(s, rect, pos);
         response.on_hover_ui_at_pointer(|ui| tooltip(ui, s, x, z));
+    }
+}
+
+/// Highlights the spawn cell (at least 8 points wide) and rings it, on every repetition.
+fn draw_spawn(painter: &egui::Painter, rect: egui::Rect, s: &MapState, x: f64, z: f64) {
+    let c = rect.center();
+    let side = ((s.cell_m() / s.mpp) as f32).max(8.0);
+    for px in repeats(x, s.center.0, s.mpp, c.x, rect.width() * 0.5) {
+        for py in repeats(z, s.center.1, s.mpp, c.y, rect.height() * 0.5) {
+            let p = egui::pos2(px, py);
+            let cell = egui::Rect::from_center_size(p, egui::vec2(side, side));
+            painter.rect_filled(
+                cell,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(255, 220, 0, 170),
+            );
+            painter.rect_stroke(
+                cell,
+                0.0,
+                egui::Stroke::new(2.0, egui::Color32::BLACK),
+                egui::StrokeKind::Outside,
+            );
+            painter.circle_stroke(
+                p,
+                side * 0.5 + 9.0,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 220, 0)),
+            );
+        }
     }
 }
 

@@ -3,8 +3,9 @@
 //! - [`SkyState`]: the instant (real time, or a fixed day and solar hour), the sun at the
 //!   camera, the cloud cover at the camera, the Moon and the sidereal angle; computed once per
 //!   frame and shared by every consumer.
-//! - [`ClimateMaps`]: weather cloud cover and snow cover evaluated from the climate harmonics
-//!   at the current date into a world-wide texture (red: clouds, green: snow), sampled per pixel
+//! - [`ClimateMaps`]: weather cloud cover, snow cover and temperature evaluated from the climate
+//!   harmonics at the current date into a world-wide texture (red: clouds, green: snow, blue:
+//!   temperature, alpha: mean height of the climate cell, for the snow line), sampled per pixel
 //!   by the curved materials (`curvature.wesl`) and refreshed every few game hours.
 //! - The sky dome (`sky.wesl`): gradient, sun and Moon discs, aurorae, overcast deck.
 //! - The stars: one mesh of small quads in equatorial coordinates, rotated to the local sky
@@ -83,6 +84,9 @@ pub struct ClimateMaps {
     res: usize,
     cloud: Vec<Harmonics>,
     snow: Vec<Harmonics>,
+    temperature: Vec<Harmonics>,
+    /// Mean height of each climate cell (sea counted as 0 m, like the climate), as a byte.
+    height: Vec<u8>,
     pub texture: Handle<Image>,
     last_day: Option<f64>,
 }
@@ -109,6 +113,8 @@ impl ClimateMaps {
         let res = world.layer("cloud_cover_x0").map_or(1, |l| l.width);
         let cloud = harmonics(world, "cloud_cover").unwrap_or_else(|| vec![Harmonics::default()]);
         let snow = harmonics(world, "snow_fraction").unwrap_or_else(|| vec![Harmonics::default()]);
+        let temperature = harmonics(world, "temperature").unwrap_or_default();
+        let height = cell_heights(world, res);
         let mut image = Image::new_fill(
             Extent3d {
                 width: res as u32,
@@ -131,6 +137,8 @@ impl ClimateMaps {
             res,
             cloud,
             snow,
+            temperature,
+            height,
             texture: images.add(image),
             last_day: None,
         }
@@ -152,10 +160,41 @@ impl ClimateMaps {
         for k in 0..self.res * self.res {
             let c = self.cloud.get(k).map_or(0.0, |h| h.eval(day));
             let s = self.snow.get(k).map_or(0.0, |h| h.eval(day));
-            out.extend_from_slice(&[byte(c), byte(s), 0, 255]);
+            // Without temperatures (older worlds), +50 °C: no snow added with height.
+            let t = self.temperature.get(k).map_or(50.0, |h| h.eval(day));
+            let a = self.height.get(k).copied().unwrap_or(0);
+            out.extend_from_slice(&[byte(c), byte(s), byte((t + 50.0) / 100.0), a]);
         }
         out
     }
+}
+
+/// Height scale of the climate texture's alpha, m (matches `CLIMATE_HEIGHT` in the shader).
+const CLIMATE_HEIGHT_M: f64 = 3_500.0;
+
+/// Mean height of each `res²` climate cell over the fine `elevation` layer, sea counted as 0 m
+/// (the climate's own cell height), encoded on a byte over [`CLIMATE_HEIGHT_M`].
+fn cell_heights(world: &World, res: usize) -> Vec<u8> {
+    let Some(e) = world.layer("elevation") else {
+        return vec![0; res * res];
+    };
+    let ratio = (e.width / res).max(1);
+    let norm = 1.0 / (ratio * ratio) as f64;
+    (0..res * res)
+        .map(|k| {
+            let (i, j) = (k % res, k / res);
+            let mut sum = 0.0;
+            for fj in j * ratio..(j + 1) * ratio {
+                for fi in i * ratio..(i + 1) * ratio {
+                    sum += e
+                        .data
+                        .get_f64((fj % e.height) * e.width + fi % e.width)
+                        .max(0.0);
+                }
+            }
+            ((sum * norm / CLIMATE_HEIGHT_M).clamp(0.0, 1.0) * 255.0).round() as u8
+        })
+        .collect()
 }
 
 /// Instant shown by the 3D mode: real time, or the fixed day of year and local solar hour of
@@ -288,12 +327,50 @@ pub struct SkyUniform {
     pub time: Vec4,
     pub seam: Vec4,
     pub aurora: Vec4,
+    /// xyz: towards the north celestial pole.
+    pub pole: Vec4,
 }
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 pub struct SkyMaterial {
     #[uniform(0)]
     pub u: SkyUniform,
+    /// Moon albedo map (NASA SVS CGI Moon Kit, see `ASSETS.md`).
+    #[texture(1)]
+    #[sampler(2)]
+    pub moon_map: Option<Handle<Image>>,
+}
+
+/// Moon map shipped with the viewer.
+const MOON_MAP: &str = "assets/moon/lroc_color_512.png";
+
+/// Loads the Moon map (next to the working directory, the executable or the crate sources);
+/// `None` (a plain disc) if it cannot be read.
+fn load_moon_map(images: &mut Assets<Image>) -> Option<Handle<Image>> {
+    let candidates = [
+        std::path::PathBuf::from(MOON_MAP),
+        std::path::Path::new("crates/viewer").join(MOON_MAP),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MOON_MAP),
+    ];
+    let bytes = candidates.iter().find_map(|p| std::fs::read(p).ok());
+    let Some(bytes) = bytes else {
+        warn!("moon map {MOON_MAP} not found: plain Moon");
+        return None;
+    };
+    match Image::from_buffer(
+        &bytes,
+        bevy::image::ImageType::Extension("png"),
+        bevy::image::CompressedImageFormats::NONE,
+        true,
+        ImageSampler::linear(),
+        RenderAssetUsages::default(),
+    ) {
+        Ok(image) => Some(images.add(image)),
+        Err(e) => {
+            warn!("moon map {MOON_MAP}: {e}");
+            None
+        }
+    }
 }
 
 impl Material for SkyMaterial {
@@ -348,28 +425,31 @@ fn dome_mesh(radius: f32) -> Mesh {
     .with_inserted_indices(Indices::U32(idx))
 }
 
-/// The stars as small quads facing the centre, in equatorial axes (x: α = 0, y: α = 6 h,
-/// z: north celestial pole), brightness from the magnitude in the vertex colour.
-fn star_mesh() -> Mesh {
+/// The stars of `catalogue` down to magnitude `limit` as small quads facing the centre, in
+/// equatorial axes (x: α = 0, y: α = 6 h, z: north celestial pole); brightness from the
+/// magnitude and tint from the B−V index in the vertex colour.
+fn star_mesh(catalogue: &[crate::stars::Star], limit: f64) -> Mesh {
     let mut pos = Vec::new();
     let mut colors = Vec::new();
     let mut idx = Vec::new();
-    for &(ra_h, dec_deg, mag) in &crate::stars::STARS {
-        let (ra, dec) = ((ra_h * 15.0f64).to_radians(), dec_deg.to_radians());
+    for s in catalogue.iter().filter(|s| s.vmag <= limit) {
         let n = Vec3::new(
-            (dec.cos() * ra.cos()) as f32,
-            (dec.cos() * ra.sin()) as f32,
-            dec.sin() as f32,
+            (s.dec.cos() * s.ra.cos()) as f32,
+            (s.dec.cos() * s.ra.sin()) as f32,
+            s.dec.sin() as f32,
         );
         let t = if n.z.abs() < 0.99 { Vec3::Z } else { Vec3::X };
         let u = n.cross(t).normalize();
         let v = n.cross(u);
-        let size = (70.0 + 45.0 * (2.5 - mag as f32).max(0.0)) * 0.5;
-        let b = (0.25 + 0.3 * (2.8 - mag as f32)).clamp(0.2, 1.6);
+        let mag = s.vmag as f32;
+        let size = (55.0 + 45.0 * (2.5 - mag).max(0.0)) * 0.5;
+        // Perceived brightness: flux relative to a first-magnitude star, softened.
+        let b = 10f32.powf(-0.4 * (mag - 1.0)).powf(0.6).clamp(0.015, 1.8);
+        let tint = crate::stars::color(s.bv);
         let base = pos.len() as u32;
         for (du, dv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
             pos.push((n * STAR_RADIUS + (u * du + v * dv) * size).to_array());
-            colors.push([b, b, b * 0.95, 1.0]);
+            colors.push([b * tint[0], b * tint[1], b * tint[2], 1.0]);
         }
         idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -382,15 +462,45 @@ fn star_mesh() -> Mesh {
     .with_inserted_indices(Indices::U32(idx))
 }
 
+/// The star catalogue and the mesh built for the current magnitude limit.
+#[derive(Resource)]
+pub struct StarCatalogue {
+    stars: Vec<crate::stars::Star>,
+    mesh: Handle<Mesh>,
+    limit: f64,
+}
+
+/// Rebuilds the star mesh when the magnitude limit slider moves.
+pub fn update_star_limit(
+    settings: Res<FlySettings>,
+    mut catalogue: ResMut<StarCatalogue>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let limit = settings.star_mag_limit;
+    if (catalogue.limit - limit).abs() < 1e-6 {
+        return;
+    }
+    catalogue.limit = limit;
+    if let Some(mut m) = meshes.get_mut(&catalogue.mesh) {
+        *m = star_mesh(&catalogue.stars, limit);
+    }
+}
+
 pub fn setup_sky(
     mut commands: Commands,
+    settings: Res<FlySettings>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut sky_materials: ResMut<Assets<SkyMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
+    let moon_map = load_moon_map(&mut images);
     commands.spawn((
         Mesh3d(meshes.add(dome_mesh(DOME_RADIUS))),
-        MeshMaterial3d(sky_materials.add(SkyMaterial::default())),
+        MeshMaterial3d(sky_materials.add(SkyMaterial {
+            moon_map,
+            ..default()
+        })),
         Transform::default(),
         NoFrustumCulling,
         NotShadowCaster,
@@ -406,8 +516,16 @@ pub fn setup_sky(
         ..default()
     });
     commands.insert_resource(StarMaterial(stars.clone()));
+    let catalogue = crate::stars::load();
+    let limit = settings.star_mag_limit;
+    let mesh = meshes.add(star_mesh(&catalogue, limit));
+    commands.insert_resource(StarCatalogue {
+        stars: catalogue,
+        mesh: mesh.clone(),
+        limit,
+    });
     commands.spawn((
-        Mesh3d(meshes.add(star_mesh())),
+        Mesh3d(mesh),
         MeshMaterial3d(stars),
         Transform::default(),
         NoFrustumCulling,
@@ -481,6 +599,13 @@ pub fn update_sky(
                     AURORA_ALTITUDE_M,
                     0.0,
                 ),
+                pole: v(equatorial_direction(
+                    latitude(cam.pos.z),
+                    sky.sidereal,
+                    0.0,
+                    FRAC_PI_2,
+                ))
+                .extend(0.0),
             };
         }
     }

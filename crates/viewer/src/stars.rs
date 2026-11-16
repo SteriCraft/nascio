@@ -1,115 +1,179 @@
-//! Bright-star catalogue (spec §2.8: real stars, equatorial coordinates J2000).
+//! Star catalogue (spec §2.8: real stars, equatorial coordinates J2000).
 //!
-//! The ~90 brightest stars of the night sky (down to magnitude ≈ 3): right ascension in hours,
-//! declination in degrees, visual magnitude. Positions and magnitudes are public astronomical
-//! facts (Yale Bright Star Catalogue values, rounded).
+//! The stars come from the Yale Bright Star Catalogue (5th revised edition, Hoffleit & Warren
+//! 1991) down to magnitude 6.5, the absolute limit of the display (the catalogue goes to 7.96):
+//! 8 404 stars in `assets/stars/bsc5.csv`, read at start-up (see `ASSETS.md`). Their colour follows
+//! the B−V index; a slider sets the faintest shown.
 
-/// `(right ascension h, declination °, magnitude)`.
-pub const STARS: [(f64, f64, f64); 92] = [
-    (6.752, -16.716, -1.46),  // Sirius
-    (6.399, -52.696, -0.74),  // Canopus
-    (14.660, -60.834, -0.27), // Rigil Kentaurus
-    (14.261, 19.182, -0.05),  // Arcturus
-    (18.616, 38.784, 0.03),   // Vega
-    (5.278, 45.998, 0.08),    // Capella
-    (5.242, -8.202, 0.13),    // Rigel
-    (7.655, 5.225, 0.34),     // Procyon
-    (1.629, -57.237, 0.46),   // Achernar
-    (5.919, 7.407, 0.50),     // Betelgeuse
-    (14.064, -60.373, 0.61),  // Hadar
-    (19.846, 8.868, 0.76),    // Altair
-    (12.443, -63.099, 0.76),  // Acrux
-    (4.599, 16.509, 0.86),    // Aldebaran
-    (16.490, -26.432, 0.96),  // Antares
-    (13.420, -11.161, 0.97),  // Spica
-    (7.755, 28.026, 1.14),    // Pollux
-    (22.961, -29.622, 1.16),  // Fomalhaut
-    (20.690, 45.280, 1.25),   // Deneb
-    (12.795, -59.689, 1.25),  // Mimosa
-    (10.140, 11.967, 1.35),   // Regulus
-    (6.977, -28.972, 1.50),   // Adhara
-    (7.577, 31.888, 1.58),    // Castor
-    (17.560, -37.104, 1.62),  // Shaula
-    (12.519, -57.113, 1.63),  // Gacrux
-    (5.419, 6.350, 1.64),     // Bellatrix
-    (5.438, 28.608, 1.65),    // Elnath
-    (9.220, -69.717, 1.68),   // Miaplacidus
-    (5.604, -1.202, 1.69),    // Alnilam
-    (22.137, -46.961, 1.74),  // Alnair
-    (12.900, 55.960, 1.76),   // Alioth
-    (5.679, -1.943, 1.77),    // Alnitak
-    (11.062, 61.751, 1.79),   // Dubhe
-    (3.405, 49.861, 1.79),    // Mirfak
-    (7.140, -26.393, 1.83),   // Wezen
-    (18.403, -34.385, 1.85),  // Kaus Australis
-    (8.375, -59.510, 1.86),   // Avior
-    (13.792, 49.313, 1.86),   // Alkaid
-    (17.622, -42.998, 1.87),  // Sargas
-    (5.992, 44.947, 1.90),    // Menkalinan
-    (16.811, -69.028, 1.91),  // Atria
-    (6.629, 16.399, 1.92),    // Alhena
-    (20.427, -56.735, 1.94),  // Peacock
-    (2.530, 89.264, 1.98),    // Polaris
-    (6.378, -17.956, 1.98),   // Mirzam
-    (9.460, -8.659, 1.98),    // Alphard
-    (10.333, 19.842, 2.01),   // Algieba
-    (2.120, 23.462, 2.00),    // Hamal
-    (0.727, -17.987, 2.02),   // Diphda
-    (18.921, -26.297, 2.05),  // Nunki
-    (14.111, -36.370, 2.06),  // Menkent
-    (0.140, 29.091, 2.06),    // Alpheratz
-    (1.162, 35.621, 2.05),    // Mirach
-    (5.796, -9.670, 2.07),    // Saiph
-    (14.845, 74.156, 2.08),   // Kochab
-    (17.582, 12.560, 2.08),   // Rasalhague
-    (22.711, -46.885, 2.07),  // Tiaki
-    (3.136, 40.957, 2.09),    // Algol
-    (2.065, 42.330, 2.10),    // Almach
-    (11.818, 14.572, 2.13),   // Denebola
-    (9.285, -59.275, 2.21),   // Aspidiske
-    (9.133, -43.433, 2.21),   // Suhail
-    (15.578, 26.715, 2.22),   // Alphecca
-    (13.399, 54.925, 2.23),   // Mizar
-    (20.370, 40.257, 2.23),   // Sadr
-    (5.533, -0.299, 2.23),    // Mintaka
-    (0.675, 56.537, 2.24),    // Schedar
-    (17.943, 51.489, 2.24),   // Eltanin
-    (8.060, -40.003, 2.25),   // Naos
-    (0.153, 59.150, 2.27),    // Caph
-    (16.006, -22.622, 2.29),  // Dschubba
-    (16.836, -34.293, 2.29),  // Larawag
-    (11.031, 56.382, 2.37),   // Merak
-    (14.750, 27.074, 2.37),   // Izar
-    (21.736, 9.875, 2.39),    // Enif
-    (0.438, -42.306, 2.40),   // Ankaa
-    (23.063, 28.083, 2.42),   // Scheat
-    (17.173, -15.725, 2.43),  // Sabik
-    (11.897, 53.695, 2.44),   // Phecda
-    (7.402, -29.303, 2.45),   // Aludra
-    (21.310, 62.585, 2.45),   // Alderamin
-    (23.079, 15.205, 2.48),   // Markab
-    (3.038, 4.090, 2.54),     // Menkar
-    (12.263, -17.542, 2.59),  // Gienah
-    (15.283, -9.383, 2.61),   // Zubeneschamali
-    (15.738, 6.426, 2.63),    // Unukalhai
-    (1.430, 60.235, 2.68),    // Ruchbah
-    (19.771, 10.613, 2.72),   // Tarazed
-    (14.848, -16.042, 2.75),  // Zubenelgenubi
-    (16.504, 21.490, 2.78),   // Kornephoros
-    (13.036, 10.959, 2.83),   // Vindemiatrix
-    (3.791, 24.105, 2.87),    // Alcyone
-];
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
+
+/// Catalogue shipped with the viewer.
+pub const CATALOGUE: &str = "assets/stars/bsc5.csv";
+/// Absolute magnitude limit of the display (end of the limit slider); the shipped catalogue
+/// stops there.
+pub const FAINTEST: f64 = 6.5;
+/// Default magnitude limit.
+pub const DEFAULT_LIMIT: f64 = 5.0;
+/// Brightest end of the limit slider: Sirius (−1.46) and Canopus (−0.72) stay visible.
+pub const SLIDER_BRIGHTEST: f64 = -1.0;
+
+/// A star: equatorial position (J2000), visual magnitude and B−V colour index.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Star {
+    /// Right ascension, rad.
+    pub ra: f64,
+    /// Declination, rad.
+    pub dec: f64,
+    pub vmag: f64,
+    /// B−V, mag (0.6, a sun-like white, when the catalogue has none).
+    pub bv: f64,
+}
+
+/// Parses the CSV catalogue (`#` comments, a header line, then
+/// `hr,name,ra_deg,dec_deg,vmag,bv`).
+pub fn parse(text: &str) -> anyhow::Result<Vec<Star>> {
+    let mut stars = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("hr,") {
+            continue;
+        }
+        let f: Vec<&str> = line.split(',').collect();
+        anyhow::ensure!(f.len() == 6, "line {}: expected 6 fields", n + 1);
+        let num = |s: &str| -> anyhow::Result<f64> {
+            s.trim()
+                .trim_start_matches('+')
+                .parse::<f64>()
+                .with_context(|| format!("line {}: bad number {s:?}", n + 1))
+        };
+        stars.push(Star {
+            ra: num(f[2])?.to_radians(),
+            dec: num(f[3])?.to_radians(),
+            vmag: num(f[4])?,
+            bv: if f[5].trim().is_empty() {
+                0.6
+            } else {
+                num(f[5])?
+            },
+        });
+    }
+    Ok(stars)
+}
+
+/// Where the catalogue is looked for: next to the working directory (`crates/viewer` or the
+/// repository root), next to the executable, then in the crate's source tree.
+fn candidates() -> Vec<PathBuf> {
+    let mut out = vec![
+        PathBuf::from(CATALOGUE),
+        Path::new("crates/viewer").join(CATALOGUE),
+    ];
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+    {
+        out.push(dir.join(CATALOGUE));
+    }
+    out.push(Path::new(env!("CARGO_MANIFEST_DIR")).join(CATALOGUE));
+    out
+}
+
+/// Loads the shipped catalogue; an empty sky (with a warning) if it cannot be found.
+pub fn load() -> Vec<Star> {
+    for path in candidates() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            match parse(&text) {
+                Ok(stars) => return stars,
+                Err(e) => {
+                    bevy::log::warn!("star catalogue {}: {e:#}", path.display());
+                    return Vec::new();
+                }
+            }
+        }
+    }
+    bevy::log::warn!("star catalogue {CATALOGUE} not found: no stars");
+    Vec::new()
+}
+
+/// Linear RGB tint of a star from its B−V index (blue-white to orange-red), normalised so the
+/// brightest channel is 1. Black-body temperature from Ballesteros (2012), colour from a
+/// fit of the Planck locus.
+pub fn color(bv: f64) -> [f32; 3] {
+    let bv = bv.clamp(-0.4, 2.0);
+    let t = 4_600.0 * (1.0 / (0.92 * bv + 1.7) + 1.0 / (0.92 * bv + 0.62));
+    let t = t / 100.0;
+    let r = if t <= 66.0 {
+        1.0
+    } else {
+        (1.292_936 * (t - 60.0).powf(-0.133_204_76)).clamp(0.0, 1.0)
+    };
+    let g = if t <= 66.0 {
+        (0.390_081_58 * t.ln() - 0.631_841_4).clamp(0.0, 1.0)
+    } else {
+        (1.129_890_9 * (t - 60.0).powf(-0.075_514_85)).clamp(0.0, 1.0)
+    };
+    let b = if t >= 66.0 {
+        1.0
+    } else if t <= 19.0 {
+        0.0
+    } else {
+        (0.543_206_8 * (t - 10.0).ln() - 1.196_254_1).clamp(0.0, 1.0)
+    };
+    // sRGB-ish values to linear, then normalised.
+    let lin = |c: f64| c.powf(2.2);
+    let (r, g, b) = (lin(r), lin(g), lin(b));
+    let m = r.max(g).max(b).max(1e-6);
+    [(r / m) as f32, (g / m) as f32, (b / m) as f32]
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn shipped() -> Vec<Star> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(CATALOGUE);
+        parse(&std::fs::read_to_string(path).expect("catalogue")).expect("parse")
+    }
+
     #[test]
-    fn catalogue_is_sane() {
-        for &(ra, dec, mag) in &STARS {
-            assert!((0.0..24.0).contains(&ra));
-            assert!((-90.0..=90.0).contains(&dec));
-            assert!((-1.5..3.0).contains(&mag));
+    fn shipped_catalogue_is_sane() {
+        let stars = shipped();
+        assert!(stars.len() >= 8_000, "{} stars", stars.len());
+        let faintest = stars.iter().map(|s| s.vmag).fold(f64::MIN, f64::max);
+        assert!(
+            faintest <= FAINTEST && faintest > FAINTEST - 0.05,
+            "{faintest}"
+        );
+        for s in &stars {
+            assert!((0.0..std::f64::consts::TAU).contains(&s.ra));
+            assert!((-90f64.to_radians()..=90f64.to_radians()).contains(&s.dec));
+            assert!((-1.5..=FAINTEST).contains(&s.vmag));
         }
+        // Sirius: α = 6 h 45 min 09 s, δ = −16° 42′ 58″, V = −1.46.
+        let sirius = stars
+            .iter()
+            .min_by(|a, b| a.vmag.total_cmp(&b.vmag))
+            .unwrap();
+        assert!((sirius.ra.to_degrees() - 101.2871).abs() < 1e-3);
+        assert!((sirius.dec.to_degrees() + 16.7161).abs() < 1e-3);
+        assert!((sirius.vmag + 1.46).abs() < 1e-9);
+    }
+
+    #[test]
+    fn colours_go_from_blue_to_red() {
+        let blue = color(-0.3);
+        let sun = color(0.65);
+        let red = color(1.8);
+        assert!(blue[2] >= blue[0], "{blue:?}");
+        assert!(red[0] > red[2], "{red:?}");
+        assert!(sun[0] >= sun[2] && sun[2] > 0.5, "{sun:?}");
+    }
+
+    #[test]
+    fn parse_rejects_bad_lines() {
+        assert!(parse("hr,name,ra_deg,dec_deg,vmag,bv\n1,x,10,20\n").is_err());
+        let s = parse("# c\n1,A,90,-45,1.5,\n").unwrap();
+        assert_eq!(s[0].bv, 0.6);
     }
 }

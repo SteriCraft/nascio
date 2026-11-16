@@ -59,18 +59,24 @@ pub struct FlySettings {
     pub horizon: bool,
     /// Display curvature radius `R_vis`, m (`None`: flat). Render only.
     pub curvature_radius_m: Option<f64>,
+    /// Faintest star shown (visual magnitude).
+    pub star_mag_limit: f64,
+    /// Vertical sync of the window (`--no-vsync` turns it off at start).
+    pub vsync: bool,
 }
 
 impl Default for FlySettings {
     fn default() -> Self {
         Self {
-            view_distance_m: 512.0,
+            view_distance_m: VIEW_MAX,
             fixed_hour: None,
             fixed_day: None,
             shadows: true,
             night_floor: true,
             horizon: true,
             curvature_radius_m: crate::curvature::RenderConfig::default().radius(),
+            star_mag_limit: crate::stars::DEFAULT_LIMIT,
+            vsync: true,
         }
     }
 }
@@ -134,6 +140,8 @@ pub struct WorldInfo {
     pub astro: AstroConfig,
     pub clock: GameClock,
     pub seed: u64,
+    /// Lapse rate of the world's climate, °C per m (snow line in the shader).
+    pub lapse_rate_c_per_m: f64,
 }
 
 /// Materials shared by every chunk.
@@ -598,6 +606,8 @@ pub fn place_camera(
 pub struct HudState {
     pub teleport: (String, String),
     pub map_request: bool,
+    /// Minimap span: the whole world, or a 20 km close-up (click the minimap to switch).
+    pub minimap_close: bool,
 }
 
 impl Default for HudState {
@@ -605,6 +615,7 @@ impl Default for HudState {
         Self {
             teleport: ("50000".into(), "50000".into()),
             map_request: false,
+            minimap_close: false,
         }
     }
 }
@@ -623,6 +634,7 @@ pub fn hud(
     terrain: Res<SharedTerrain>,
     info: Res<WorldInfo>,
     sky: Res<crate::sky::SkyState>,
+    mut map: ResMut<crate::map::MapState>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     let p = cam.pos;
@@ -733,6 +745,15 @@ pub fn hud(
                 ui.checkbox(&mut settings.shadows, "shadows");
                 ui.checkbox(&mut settings.night_floor, "night floor");
             });
+            ui.add(
+                egui::Slider::new(
+                    &mut settings.star_mag_limit,
+                    crate::stars::SLIDER_BRIGHTEST..=crate::stars::FAINTEST,
+                )
+                .step_by(0.1)
+                .text("star magnitude limit"),
+            );
+            vsync_toggle(ui, &mut settings);
             if let Some(p) = sky.sun {
                 ui.monospace(format!(
                     "day {:6.2}  sun e {:+5.1}  e_vis {:+5.1} deg",
@@ -769,8 +790,133 @@ pub fn hud(
                 info.seed
             ));
         });
+    if let Some(tex) = map.minimap_texture(ctx) {
+        minimap(ctx, tex, &cam, &mut hud);
+    }
+    clock(ctx, &info, &settings, &cam);
     capture.0 = ctx.egui_wants_pointer_input() || ctx.is_pointer_over_egui();
     Ok(())
+}
+
+/// Vsync state and switch (shared by the map and the 3D panels).
+pub fn vsync_toggle(ui: &mut egui::Ui, settings: &mut FlySettings) {
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut settings.vsync, "vsync");
+        ui.label(if settings.vsync {
+            "on: frame rate capped by the display"
+        } else {
+            "off: uncapped"
+        });
+    });
+}
+
+/// Applies the vsync setting to the window.
+pub fn apply_vsync(
+    settings: Res<FlySettings>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+) {
+    let want = if settings.vsync {
+        bevy::window::PresentMode::AutoVsync
+    } else {
+        bevy::window::PresentMode::AutoNoVsync
+    };
+    for mut w in &mut windows {
+        if w.present_mode != want {
+            w.present_mode = want;
+        }
+    }
+}
+
+/// `hh:mm` of a day fraction.
+fn hhmm(frac: f64) -> String {
+    let minutes = (frac.rem_euclid(1.0) * 1_440.0).floor() as u32 % 1_440;
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+/// Top-right clock: local solar time at the camera and time of the origin meridian (λ = 0,
+/// the game's reference time, spec §2.3), with the game date. Follows the fixed hour and day.
+fn clock(ctx: &egui::Context, info: &WorldInfo, settings: &FlySettings, cam: &FlyCam) {
+    let (day, t_days, h) = crate::sky::instant(info, settings, cam.pos.x);
+    let local = (h + std::f64::consts::PI) / TAU;
+    let origin = day.rem_euclid(1.0);
+    let year = (t_days / 365.0).floor();
+    egui::Area::new(egui::Id::new("clock"))
+        .anchor(egui::Align2::RIGHT_TOP, [-10.0, 10.0])
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.monospace(format!(
+                    "local  {}  (λ {:5.1}°)",
+                    hhmm(local),
+                    longitude(cam.pos.x).to_degrees()
+                ));
+                ui.monospace(format!("origin {}  (λ   0.0°)", hhmm(origin)));
+                ui.monospace(format!("year {year:.0} · day {:.0}", day.floor()));
+            });
+        });
+}
+
+/// Side of the minimap, points.
+const MINIMAP_SIZE: f32 = 220.0;
+/// Span of the minimap's close-up, m.
+const MINIMAP_CLOSE_M: f64 = 20_000.0;
+
+/// Minimap in the bottom-right corner: the elevation map centred on the camera (the torus
+/// repeats), with an arrow for the position and the heading. A click switches between the
+/// whole world and a 20 km close-up.
+fn minimap(ctx: &egui::Context, tex: egui::TextureId, cam: &FlyCam, hud: &mut HudState) {
+    let span = if hud.minimap_close {
+        MINIMAP_CLOSE_M
+    } else {
+        nascio_core::consts::WORLD_SIZE_F64
+    };
+    egui::Area::new(egui::Id::new("minimap"))
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-10.0, -10.0])
+        .show(ctx, |ui| {
+            let (rect, response) = ui
+                .allocate_exact_size(egui::vec2(MINIMAP_SIZE, MINIMAP_SIZE), egui::Sense::click());
+            let w = nascio_core::consts::WORLD_SIZE_F64;
+            let (cx, cz) = (
+                nascio_core::torus::wrap_f64(cam.pos.x) / w,
+                nascio_core::torus::wrap_f64(cam.pos.z) / w,
+            );
+            let h = span / w / 2.0;
+            let uv = egui::Rect::from_min_max(
+                egui::pos2((cx - h) as f32, (cz - h) as f32),
+                egui::pos2((cx + h) as f32, (cz + h) as f32),
+            );
+            let painter = ui.painter_at(rect.expand(2.0));
+            painter.image(tex, rect, uv, egui::Color32::WHITE);
+            painter.rect_stroke(
+                rect,
+                2.0,
+                egui::Stroke::new(1.5, egui::Color32::from_black_alpha(200)),
+                egui::StrokeKind::Outside,
+            );
+            // Heading from north (−z, up on the map) towards east (+x, right).
+            let c = rect.center();
+            let dir = egui::vec2(cam.yaw.sin() as f32, -cam.yaw.cos() as f32);
+            let side = egui::vec2(-dir.y, dir.x);
+            let arrow = vec![
+                c + dir * 12.0,
+                c - dir * 7.0 + side * 7.0,
+                c - dir * 7.0 - side * 7.0,
+            ];
+            painter.add(egui::Shape::convex_polygon(
+                arrow,
+                egui::Color32::from_rgb(230, 40, 40),
+                egui::Stroke::new(1.5, egui::Color32::WHITE),
+            ));
+            painter.text(
+                rect.left_top() + egui::vec2(5.0, 3.0),
+                egui::Align2::LEFT_TOP,
+                format!("{:.0} km · click to zoom", span / 1_000.0),
+                egui::FontId::proportional(11.0),
+                egui::Color32::WHITE,
+            );
+            if response.clicked() {
+                hud.minimap_close = !hud.minimap_close;
+            }
+        });
 }
 
 /// Entering the 3D mode: every column is re-evaluated by [`column_visibility`].

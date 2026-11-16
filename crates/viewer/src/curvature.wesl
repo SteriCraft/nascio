@@ -10,7 +10,10 @@
 // seam twilight band and distant sunsets show on the horizon. Direct light fades in from 0° to
 // +10° of e_vis, sky light from −6° to +10° (§2.5). Shadows come from Bevy's cascades of the
 // camera's sun (the sun barely moves over the shadow range). Clouds (max of c_min(s) and the
-// weather) dim the direct light; seasonal snow whitens upward faces.
+// weather) dim the direct light. Seasonal snow covers every face but the downward ones (the
+// sides of the voxel steps match their tops); the snow cover of the 160 m climate cell is
+// corrected by the lapse rate between the fragment's height and the cell's mean height, so
+// the snow line follows the fine relief.
 
 import bevy_pbr::render::{
     mesh_functions,
@@ -33,10 +36,13 @@ struct Curved {
     seam: vec4<f32>,
     // x: shadows (0/1); y: direct light scale; z: sky light scale; w: night floor.
     light: vec4<f32>,
+    // x: camera world height (m); y: lapse rate (°C/m); z: snow cover per °C; w: unused.
+    snow: vec4<f32>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<storage, read> curved: Curved;
-// r: weather cloud cover, g: snow cover, over the whole world (repeat sampler).
+// r: weather cloud cover, g: snow cover, b: temperature ((T + 50 °C) / 100), a: mean height of
+// the climate cell (/ 3 500 m), over the whole world (repeat sampler).
 @group(constants::MATERIAL_BIND_GROUP) @binding(101) var climate_tex: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(102) var climate_smp: sampler;
 
@@ -47,6 +53,21 @@ const OBLIQUITY: f32 = 0.40910518;
 const SEAM_MARGIN: f32 = 0.06981317; // 4°
 const LIGHT_FADE: f32 = 0.17453292; // 10°
 const SKY_LOW: f32 = -0.10471976; // −6°
+const CLIMATE_HEIGHT: f32 = 3500.0;
+
+// Snow cover at a fragment of world height `h`: the cell's cover, less snow below the cell's
+// mean height, more above it where it is cold enough (no summer snow on warm peaks).
+fn snow_cover(climate: vec4<f32>, h: f32) -> f32 {
+    let t_cell = climate.b * 100.0 - 50.0;
+    let dt = -curved.snow.y * (h - climate.a * CLIMATE_HEIGHT);
+    let t_local = t_cell + dt;
+    let k = curved.snow.z;
+    if dt > 0.0 {
+        return clamp(climate.g - k * dt, 0.0, 1.0);
+    }
+    let cold = 1.0 - smoothstep(0.0, 5.0, t_local);
+    return clamp(climate.g - k * dt * cold, 0.0, 1.0);
+}
 
 @vertex
 fn vertex(vertex_in: Vertex) -> VertexOutput {
@@ -136,10 +157,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let c_min = 1.0 - smoothstep(curved.seam.z, curved.seam.w, sun.s);
     let cloud = max(c_min, climate.r);
 
-    // Seasonal snow on upward land faces (not on water).
+    // Seasonal snow on land faces (not on water), sides included, never on downward faces.
     if !is_water {
-        let up = smoothstep(0.55, 0.85, n.y);
-        let snow = smoothstep(0.15, 0.6, climate.g) * up;
+        let h = in.world_position.y + curved.drop.x * dot(rel, rel) - curved.drop.z + curved.snow.x;
+        let facing = smoothstep(-0.5, -0.2, n.y);
+        let snow = smoothstep(0.15, 0.6, snow_cover(climate, h)) * facing;
         albedo = mix(albedo, vec3<f32>(0.86, 0.89, 0.93), snow);
     }
 

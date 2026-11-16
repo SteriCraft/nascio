@@ -1,0 +1,8 @@
+# Ressources tierces
+
+Chaque ressource tierce du dépôt est listée ici avec sa source et sa licence. On privilégie le domaine public et CC0.
+
+| Fichier | Contenu | Source | Licence et crédit |
+|---|---|---|---|
+| `crates/viewer/assets/stars/bsc5.csv` | Les 8 404 étoiles du catalogue jusqu'à la magnitude visuelle 6 5  la limite absolue du visualiseur (le catalogue complet va jusqu'à 7 96). Pour chacune : numéro HR, nom, ascension droite et déclinaison J2000, magnitude V, indice B−V. Sélectionné et converti en CSV, sans autre modification. | *Yale Bright Star Catalogue*, 5e édition révisée : D. Hoffleit et W. H. Warren Jr., Yale University Observatory, NASA Astronomical Data Center, 1991 (catalogue V/50 du CDS). Fichier `bsc5.dat` récupéré sur <http://tdc-www.harvard.edu/catalogs/bsc5.html>. | Aucune licence explicite n'accompagne le catalogue. Ce sont des données scientifiques diffusées librement par le NASA ADC et le CDS pour toute utilisation, à condition de citer la référence ci-contre. |
+| `crates/viewer/assets/moon/lroc_color_512.png` | Carte couleur de la Lune en projection équirectangulaire. La longitude 0 est au centre et l'est est à droite. L'original de 1 024 × 512 a été réduit à 512 × 256 et converti en PNG. | *CGI Moon Kit*, NASA Scientific Visualization Studio, Ernie Wright (2019), à partir des données de la Lunar Reconnaissance Orbiter Camera (LROC) : fichier `lroc_color_poles_1k.jpg` sur <https://svs.gsfc.nasa.gov/4720/>. | Domaine public : les productions de la NASA ne sont pas protégées par le droit d'auteur. Crédit demandé : « NASA's Scientific Visualization Studio ». |

@@ -40,6 +40,9 @@ pub const CHUNK_AABB_DROP: f32 = drop_at(RADIUS_MIN_M, CHUNK_REACH_M) as f32;
 
 const SHADER: &str = "embedded://nascio_viewer/curvature.wesl";
 const PREPASS_SHADER: &str = "embedded://nascio_viewer/curvature_prepass.wesl";
+/// Snow cover gained per °C of cooling with height above the climate cell's mean (5 °C, about
+/// 770 m, from bare ground to full cover).
+const SNOW_PER_DEGREE: f32 = 0.2;
 /// Default display radius `R_vis`, m (decided after the author's trial, M4).
 pub const DEFAULT_RADIUS_M: f64 = 200_000.0;
 
@@ -107,11 +110,13 @@ pub struct CurvedUniform {
     pub seam: Vec4,
     /// x: shadows on; y: direct light scale; z: sky light scale; w: night floor.
     pub light: Vec4,
+    /// x: camera world height (m); y: lapse rate (°C/m); z: snow cover per °C; w: unused.
+    pub snow: Vec4,
 }
 
 impl CurvedUniform {
     fn floats(&self) -> Vec<f32> {
-        [self.drop, self.sun, self.seam, self.light]
+        [self.drop, self.sun, self.seam, self.light, self.snow]
             .iter()
             .flat_map(|v| v.to_array())
             .collect()
@@ -135,7 +140,8 @@ pub struct Curvature {
     /// [`CurvedUniform`], shared by every curved material.
     #[storage(100, read_only)]
     pub frame: Handle<ShaderBuffer>,
-    /// Weather clouds (red) and snow cover (green) over the whole world.
+    /// Weather clouds (red), snow cover (green), temperature (blue) and cell height (alpha)
+    /// over the whole world (see [`crate::sky::ClimateMaps`]).
     #[texture(101)]
     #[sampler(102)]
     pub climate: Handle<Image>,
@@ -231,6 +237,12 @@ pub fn sync_curved(
             0.45,
             // Dev viewer: a night floor keeps the relief readable.
             if settings.night_floor { 1.0 } else { 0.0 },
+        ),
+        snow: Vec4::new(
+            cam.pos.y as f32,
+            info.lapse_rate_c_per_m as f32,
+            SNOW_PER_DEGREE,
+            0.0,
         ),
     };
     if let Some(mut b) = buffers.get_mut(&frame.0) {

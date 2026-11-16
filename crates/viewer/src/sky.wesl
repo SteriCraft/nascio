@@ -3,6 +3,8 @@
 // - Colour from the visible sun elevation at the camera: day, twilight glow towards the sun,
 //   night; overcast grey under the cloud cover c = max(c_min(s), weather).
 // - Sun and Moon discs (the Moon lit from the geometric sun: its phase), weighted by 1 − c.
+//   The Moon is textured (NASA SVS CGI Moon Kit): near side towards the observer, lunar north
+//   towards the celestial pole.
 // - Aurorae: curtains on the geographic ring around the seam band (§2.7), at a few kilometres
 //   of altitude. The view ray meets the displayed (lowered) shell `y = H − k·d²`, so the ring
 //   is seen far away, low on the horizon. Night only (e_vis at the curtain), masked by clouds.
@@ -28,12 +30,18 @@ struct Sky {
     seam: vec4<f32>,
     // x: ring peak s_aurora; y: ring outer edge; z: curtain base altitude (m); w: unused.
     aurora: vec4<f32>,
+    // xyz: towards the north celestial pole; w: unused.
+    pole: vec4<f32>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> sky: Sky;
+// Moon albedo map, equirectangular, longitude 0 in the middle, east to the right.
+@group(constants::MATERIAL_BIND_GROUP) @binding(1) var moon_tex: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(2) var moon_smp: sampler;
 
 const WORLD: f32 = 100000.0;
 const TAU: f32 = 6.2831855;
+const PI: f32 = 3.1415927;
 const HALF_PI: f32 = 1.5707964;
 const OBLIQUITY: f32 = 0.40910518;
 const DEG: f32 = 0.017453292;
@@ -168,7 +176,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let normal = normalize(off - m * nz);
         let lit = max(dot(normal, sky.sun_geo.xyz), 0.0);
         let edge = smoothstep(cos(r_moon), cos(r_moon * 0.92), cm);
-        let moon = vec3<f32>(0.85, 0.85, 0.8) * (0.03 + 1.2 * lit);
+        // Selenographic coordinates: the sub-observer point (−m) is (0, 0), lunar north is
+        // the celestial pole projected on the disc, lunar east points to the sky's west.
+        var up = sky.pole.xyz - m * dot(sky.pole.xyz, m);
+        if dot(up, up) < 1e-6 {
+            up = vec3<f32>(0.0, 1.0, 0.0) - m * m.y;
+        }
+        up = normalize(up);
+        let east = cross(m, up);
+        let lat = asin(clamp(dot(normal, up), -1.0, 1.0));
+        let lon = atan2(dot(normal, east), dot(normal, -m));
+        let uv = vec2<f32>(0.5 + lon / TAU, 0.5 - lat / PI);
+        let albedo = textureSampleLevel(moon_tex, moon_smp, uv, 0.0).rgb;
+        let moon = albedo * 1.4 * (0.03 + 1.2 * lit);
         col = mix(col, col + moon, edge * clear);
     }
 

@@ -78,6 +78,12 @@ Chaque jalon se termine par une revue avec l'auteur. On ne passe pas au jalon su
 - visualiseur : cartes climatiques animées selon la date, jour/nuit par pixel ; en 3D, soleil calculé par pixel, ombres dans le shader courbé, dôme du ciel, Lune et ses phases, étoiles réelles, aurores, couvert polaire, neige saisonnière ; `R_vis` = 200 km ;
 - graines 42, 7, 1234 et 2026 : génération complète en 61 à 73 s (climat 7,5 s) ; benchmark : p95 6,22 ms avec les ombres, 4,43 ms sans (M3 : 4,29 ms).
 
+**Retouches après la revue de M4 (2026-11-16)** :
+- relief marin : abysse à −1 800 m, fosses à −2 500 m, talus de 5 km sur toutes les marges, pente du fond bornée à 0,35 et pente côtière à terre bornée à 0,8 (plus de parois ni de murs de cônes) ; écart à l'hypsométrie terrestre consigné au §3 ;
+- continentalité sur 20 km avec une saison amortie en mer ; soulèvement maximal de 0,5 mm/an ;
+- rendu : neige sur les faces verticales et limite des neiges par l'altitude fine, étoiles du BSC5 jusqu'à la magnitude 6,5 (curseur, 5 par défaut), Lune texturée (NASA SVS), FOV de 42°, minimap, point d'apparition choisi sur la carte, vsync, horloge locale et d'origine, distance des chunks de 1 024 m par défaut ;
+- graines 42, 7 et 1234 : génération en 80 à 93 s ; benchmark sur la graine 42 : moyenne 3,52 ms, p95 4,78 ms (M4 : 3,72 et 6,22 ms).
+
 ## M5 — Géologie et sous-sol
 - Colonne géologique (§4.6), Moho variable, température en profondeur, magme mortel, gisements par contexte.
 - Visualiseur : coupe verticale (2D) et couche des « gisements ».
@@ -87,6 +93,16 @@ Chaque jalon se termine par une revue avec l'auteur. On ne passe pas au jalon su
 ## M6 — Finition du générateur de chunks
 - Biomes et climat dans les chunks (sol, végétation provisoire, neige, glace), eau des rivières et des lacs.
 - Préparation pour le serveur : implémentation du stockage des deltas (`generate ⊕ delta`), mesures de performance (chunks par seconde).
+
+## Audit — Revue complète avant la phase « Serveur et réseau »
+Audit complet du projet par Fable, à partir des derniers benchmarks du PC Windows (RTX 5060) et du portable Linux de référence (RTX 3050 Mobile). Il couvre :
+- le déterminisme et le respect des invariants de `CLAUDE.md` (tore, coordonnées entières, RNG, bruit périodique) ;
+- la performance de la génération et du maillage des chunks ;
+- l'architecture des crates et le sens des dépendances ;
+- la dette des solutions provisoires consignées dans `decisions.md` ;
+- le rendu (shaders, éclairage, ciel, horizon).
+
+**Validation** : un rapport priorisé, trié en revue avec l'auteur avant d'ouvrir la phase « Serveur et réseau ».
 
 ---
 Ensuite viendra la **Phase « Serveur et réseau »**, qui fera l'objet d'une feuille de route séparée.
