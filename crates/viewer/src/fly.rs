@@ -421,7 +421,8 @@ pub fn stream_chunks(
                     let tx = s.tx.clone();
                     workers.pool.spawn(move || {
                         let col = ColumnSet::new(&terrain, key.0, key.1);
-                        let tint = terrain.chunk_tint(key.0, key.1);
+                        let mut tint = terrain.chunk_tint(key.0, key.1);
+                        tint.water_depth = col.water_depths();
                         let meshes = col
                             .chunk_range(underground)
                             .filter(|&cy| col.may_have_faces(cy))

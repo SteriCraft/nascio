@@ -10,8 +10,18 @@ use crate::terrain::ChunkTint;
 
 /// Brightness factor per occlusion level (0 = fully occluded corner, 3 = open).
 const AO_CURVE: [f32; 4] = [0.45, 0.65, 0.82, 1.0];
-/// Opacity of the water surface.
-pub const WATER_ALPHA: f32 = 0.62;
+/// Opacity of the water surface over one block of water, and its limit over deep water
+/// (below 0.99: the shader recognises water by its alpha).
+pub const WATER_ALPHA: f32 = 0.4;
+pub const WATER_ALPHA_DEEP: f32 = 0.97;
+/// Depth scale of the water opacity, blocks.
+const WATER_DEPTH_SCALE: f32 = 5.0;
+
+/// Opacity of water `depth` blocks deep: light over shallow rivers, nearly opaque over the sea.
+pub fn water_alpha(depth: u8) -> f32 {
+    let d = f32::from(depth.max(1)) - 1.0;
+    (1.0 - (1.0 - WATER_ALPHA) * (-d / WATER_DEPTH_SCALE).exp()).min(WATER_ALPHA_DEEP)
+}
 
 /// Vertex arrays of one mesh.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -88,6 +98,8 @@ fn face(blocks: &Blocks, block: BlockId, neighbour: BlockId) -> Option<bool> {
 struct Face {
     block: BlockId,
     water: bool,
+    /// Water depth below the face's column (blocks), 0 off water.
+    depth: u8,
     /// Thin layer (snow cover): drawn `LAYER_H` thick at the bottom of its cell.
     layer: bool,
     ao: [u8; 4],
@@ -131,6 +143,11 @@ pub fn mesh_chunk(p: &PaddedChunk, blocks: &Blocks, tint: &ChunkTint) -> ChunkMe
                                 Face {
                                     block,
                                     water,
+                                    depth: if water {
+                                        tint.water_depth[(c[0] + n * c[2]) as usize]
+                                    } else {
+                                        0
+                                    },
                                     layer: blocks.matter(block) == Matter::Layer,
                                     ao,
                                 }
@@ -242,7 +259,7 @@ fn emit(
             }
         }
     }
-    let alpha = if f.water { WATER_ALPHA } else { 1.0 };
+    let alpha = if f.water { water_alpha(f.depth) } else { 1.0 };
     let mut colors = [0usize, 1, 2, 3].map(|k| {
         let rgb = tint.map_or(rgb, |t| t.at(corners[k][0], corners[k][2]));
         let a = AO_CURVE[usize::from(f.ao[k])];

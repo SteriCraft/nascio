@@ -262,7 +262,8 @@ fn level_heights(
             let z = f64::from(center.1) - half + j as f64 * s;
             // Block tops sit on average half a metre above the continuous surface.
             data.push((terrain.height_lod(x, z, 0.5 * s) + 0.5) as f32);
-            water.push(terrain.water_top(x, z) as f32);
+            // Sea and lakes only: the coarse surface has no river channels.
+            water.push(terrain.water_level(x, z).round() as f32);
         }
     }
     let max = data

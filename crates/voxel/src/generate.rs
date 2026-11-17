@@ -117,6 +117,14 @@ impl ColumnSet {
         self.tops[Self::k(x, z)]
     }
 
+    /// Water depth (blocks, at most 255) of the 32² local columns, `x + 32 z`, for meshing.
+    pub fn water_depths(&self) -> [u8; 1024] {
+        std::array::from_fn(|k| {
+            let (x, z) = ((k % 32) as i32, (k / 32) as i32);
+            (self.water_top(x, z) - 1 - self.top(x, z)).clamp(0, 255) as u8
+        })
+    }
+
     /// Water fills local column `(x, z)` for `top < y < water_top`.
     #[inline]
     pub fn water_top(&self, x: i32, z: i32) -> i32 {

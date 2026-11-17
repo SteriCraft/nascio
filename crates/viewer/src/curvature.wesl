@@ -308,11 +308,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var albedo = pbr_input.material.base_color.rgb;
     var alpha = pbr_input.material.base_color.a;
     let n = pbr_input.N;
-    // Chunk water is translucent but its sea floor is often not loaded: darken it towards the
-    // deep-water tone of the horizon and keep it nearly opaque (depth-aware water: M6).
+    // Chunk water: its alpha grows with the depth of the column (mesher, M6), from light
+    // rivers to a nearly opaque sea whose floor may not be loaded; darken it the same way
+    // towards the deep-water tone of the horizon.
     if is_water && alpha < 0.99 {
-        albedo *= 0.5;
-        alpha = max(alpha, 0.9);
+        let deep = clamp((alpha - 0.4) / 0.57, 0.0, 1.0);
+        albedo *= mix(0.95, 0.5, deep);
     }
 
     // World position of the fragment (camera-relative offsets are exact across the seam).

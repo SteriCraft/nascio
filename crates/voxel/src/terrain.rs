@@ -20,6 +20,7 @@ use nascio_worldgen::world_io::{Layer, World};
 use crate::block::{BlockId, Blocks, srgb_to_linear};
 use crate::climate::{ColumnClimate, SurfaceClimate};
 use crate::geology::{Class, ColumnGeo, Geology};
+use crate::rivers::{RiverHit, RiverParams, Rivers};
 use serde::{Deserialize, Serialize};
 
 /// Tunable parameters of chunk generation (`[voxel]` in TOML). The relief itself (detail noise
@@ -42,6 +43,12 @@ pub struct VoxelConfig {
     pub shelf_sand_m: i32,
     /// Gravel thickness on river beds.
     pub gravel_depth_m: i32,
+    /// Rivers carry water from this width on, m.
+    pub river_min_width_m: f64,
+    /// Banks levelled with the river surface on each side of the channel, m.
+    pub river_bank_m: f64,
+    /// Smoothing passes of the river trace.
+    pub river_smooth_passes: usize,
     /// Chunks generated below the lowest surface of a column.
     pub underground_chunks: i32,
     /// The crust keeps at least this thickness of stone above the magma, m.
@@ -165,6 +172,9 @@ impl Default for VoxelConfig {
             sand_depth_m: 3,
             shelf_sand_m: -40,
             gravel_depth_m: 2,
+            river_min_width_m: 1.5,
+            river_bank_m: 2.0,
+            river_smooth_passes: 2,
             underground_chunks: 2,
             min_crust_m: 50,
             glacier_warm_c: 0.0,
@@ -221,6 +231,8 @@ pub struct Terrain {
     soils: [Soil; biomes::code::COUNT],
     /// Surface climate (`None`: worlds made before M4, temperate everywhere).
     climate: Option<SurfaceClimate>,
+    /// River water (`None`: worlds made before M4).
+    rivers: Option<Rivers>,
 }
 
 /// Grass tint of the four corners of a chunk column, for meshing: bilinear inside the chunk,
@@ -231,12 +243,15 @@ pub struct ChunkTint {
     pub grass: Option<BlockId>,
     /// Linear RGB at local `(0, 0)`, `(32, 0)`, `(0, 32)`, `(32, 32)`.
     pub corners: [[f32; 3]; 4],
+    /// Water depth (blocks) of each local column, `x + 32 z`; 255: deep or unknown.
+    pub water_depth: [u8; 1024],
 }
 
 impl ChunkTint {
     pub const NONE: Self = Self {
         grass: None,
         corners: [[1.0; 3]; 4],
+        water_depth: [u8::MAX; 1024],
     };
 
     /// Colour at local horizontal position `(x, z)` in `[0, 32]`.
@@ -334,6 +349,35 @@ impl Terrain {
         )
         .with_geology(blocks, geology);
         t.climate = SurfaceClimate::from_world(world, &t.elevation);
+        t.rivers = match (
+            world.layer("flow_direction"),
+            world.layer("river_width"),
+            world.layer("river_depth"),
+        ) {
+            (Some(d), Some(w), Some(dp)) if d.width == t.elevation.width() => {
+                let dir = PeriodicGrid::from_vec(
+                    d.width,
+                    d.height,
+                    d.cell_m,
+                    (0..d.width * d.height)
+                        .map(|k| d.data.get_f64(k) as u8)
+                        .collect(),
+                );
+                Some(Rivers::new(
+                    &dir,
+                    &grid_f32(w),
+                    &grid_f32(dp),
+                    &t.elevation,
+                    t.lake_level.as_ref(),
+                    RiverParams {
+                        min_width_m: t.cfg.river_min_width_m,
+                        bank_m: t.cfg.river_bank_m,
+                        smooth_passes: t.cfg.river_smooth_passes,
+                    },
+                ))
+            }
+            _ => None,
+        };
         Ok(t)
     }
 
@@ -360,7 +404,16 @@ impl Terrain {
             .as_ref()
             .map_or_else(ColumnGeo::default, |g| g.column(x, z));
         c.climate = self.climate(x, z);
+        if self.rivers.is_some() {
+            c.river = self.river(x, z).is_some();
+        }
         c
+    }
+
+    /// The river at `(x, z)` (column centre), if any.
+    #[inline]
+    pub fn river(&self, x: f64, z: f64) -> Option<RiverHit> {
+        self.rivers.as_ref()?.at(x, z)
     }
 
     /// Surface climate at `(x, z)`.
@@ -472,6 +525,7 @@ impl Terrain {
                 corner(0.0, 1.0),
                 corner(1.0, 1.0),
             ],
+            water_depth: [u8::MAX; 1024],
         }
     }
 
@@ -526,6 +580,7 @@ impl Terrain {
         let blocks = Blocks::builtin();
         Self {
             climate: None,
+            rivers: None,
             soils: resolve_soils(&cfg, &blocks),
             cfg,
             elevation,
@@ -552,10 +607,15 @@ impl Terrain {
             .unwrap_or(f64::INFINITY)
     }
 
-    /// Surface height at a world position, full detail.
+    /// Surface height at a world position, full detail, river channels and banks included.
     #[inline]
     pub fn height(&self, x: f64, z: f64) -> f64 {
-        self.height_lod(x, z, 0.0)
+        let h = self.height_lod(x, z, 0.0);
+        match self.river(x, z) {
+            Some(RiverHit::Channel { bed, .. }) => h.min(f64::from(bed) + 0.5),
+            Some(RiverHit::Bank { top }) => h.max(f64::from(top) + 0.5),
+            None => h,
+        }
     }
 
     /// Macro elevation (eroded grid), without the chunk detail.
@@ -596,10 +656,15 @@ impl Terrain {
         }
     }
 
-    /// Highest water block + 1 of a column: water fills `top < y < water_top`.
+    /// Highest water block + 1 of a column: water fills `top < y < water_top` (sea, lakes and
+    /// river channels).
     #[inline]
     pub fn water_top(&self, x: f64, z: f64) -> i32 {
-        self.water_level(x, z).round() as i32
+        let still = self.water_level(x, z).round() as i32;
+        match self.river(x, z) {
+            Some(RiverHit::Channel { water_top, .. }) => still.max(water_top),
+            _ => still,
+        }
     }
 
     /// Soil of a column whose top solid block is at `top`; thickness 0 for bare rock.
