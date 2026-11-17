@@ -84,6 +84,18 @@ impl PaddedChunk {
         self.blocks[Self::index(x, y, z)]
     }
 
+    /// A padded chunk filled with `id`.
+    pub fn filled(id: BlockId) -> Self {
+        Self {
+            blocks: Box::new([id; NP * NP * NP]),
+        }
+    }
+
+    #[inline]
+    pub fn set(&mut self, x: i32, y: i32, z: i32, id: BlockId) {
+        self.blocks[Self::index(x, y, z)] = id;
+    }
+
     /// The inner 32³ chunk.
     pub fn inner(&self) -> Chunk {
         let mut c = Chunk::filled(AIR);
@@ -105,8 +117,7 @@ impl PaddedChunk {
 }
 
 /// Player modifications of the world (spec §5: `Chunk = generate(pos) ⊕ delta(pos)`).
-///
-/// Only the interface exists for now: storing and applying deltas comes with the server (M6).
+/// Implemented by [`crate::delta::DeltaStore`].
 pub trait ChunkDeltas {
     /// Applies the stored modifications of `pos`, if any, to a freshly generated chunk.
     fn apply(&self, pos: ChunkPos, chunk: &mut Chunk);

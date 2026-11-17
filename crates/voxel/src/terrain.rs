@@ -94,6 +94,8 @@ pub struct VoxelConfig {
     /// Each column reads its biome this far (at most, triangular draw per axis) from its
     /// centre: biome boundaries become a mixed fringe (soils, plant density), m.
     pub biome_dither_m: f64,
+    /// Modified blocks above which a chunk delta switches to a palette.
+    pub delta_palette_above: usize,
 }
 
 /// Soil of one biome: `top` block over `under`, `depth_m` thick in all (on flat ground; it
@@ -211,6 +213,7 @@ impl Default for VoxelConfig {
             plant_cell_m: 5,
             vegetation: default_vegetation(),
             biome_dither_m: 64.0,
+            delta_palette_above: crate::delta::DEFAULT_PALETTE_ABOVE,
         }
     }
 }

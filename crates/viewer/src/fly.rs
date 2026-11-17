@@ -9,7 +9,7 @@
 //! **Streaming.** Chunk columns within the view distance are generated and meshed on a
 //! dedicated rayon pool, nearest first, then turned into Bevy meshes on the main thread.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::f64::consts::{FRAC_PI_2, TAU};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -23,12 +23,12 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
 use nascio_core::astro::AstroConfig;
 use nascio_core::consts::{CHUNK_SIZE, CHUNKS_PER_AXIS};
-use nascio_core::coords::{BlockPos, WorldPos};
+use nascio_core::coords::{BlockPos, ChunkPos, WorldPos};
 use nascio_core::geo::{latitude, longitude, seam_distance};
 use nascio_core::time::GameClock;
 use nascio_core::torus::delta;
 use nascio_voxel::mesh::MeshData;
-use nascio_voxel::{ChunkMesh, ColumnSet, Terrain, mesh_chunk};
+use nascio_voxel::{ChunkMesh, ColumnSet, DeltaStore, Terrain, mesh_chunk};
 
 use crate::curvature::{self, CurvedMaterial};
 use crate::perf::FrameStats;
@@ -195,17 +195,32 @@ impl Workers {
     }
 }
 
+/// The world's modifications (god mode). Workers take a snapshot (`Arc` clone); an edit
+/// copies the store only while a snapshot is held.
+#[derive(Resource, Clone)]
+pub struct SharedDeltas(pub Arc<Mutex<Arc<DeltaStore>>>);
+
+impl SharedDeltas {
+    pub fn snapshot(&self) -> Arc<DeltaStore> {
+        self.0.lock().expect("deltas").clone()
+    }
+}
+
 struct ColumnResult {
     key: (i32, i32),
+    /// Request number: only the latest request of a column is kept.
+    request: u64,
     meshes: Vec<(i32, ChunkMesh)>,
 }
 
 enum Slot {
-    Pending,
+    Pending(u64),
     Ready {
         entities: Vec<Entity>,
         quads: usize,
         shown: bool,
+        /// A new mesh is on its way (after an edit): replaces this one when it arrives.
+        remesh: Option<u64>,
     },
 }
 
@@ -230,6 +245,9 @@ pub struct Streamer {
     pub missing: usize,
     pub quads: usize,
     pub ready_columns: usize,
+    requests: u64,
+    /// Columns to mesh again (edited blocks).
+    remesh: Vec<(i32, i32)>,
 }
 
 impl Streamer {
@@ -247,7 +265,14 @@ impl Streamer {
             missing: usize::MAX,
             quads: 0,
             ready_columns: 0,
+            requests: 0,
+            remesh: Vec::new(),
         }
+    }
+
+    /// Meshes these columns again, if loaded or loading.
+    pub fn request_remesh(&mut self, keys: impl IntoIterator<Item = (i32, i32)>) {
+        self.remesh.extend(keys);
     }
 
     fn set_radius(&mut self, radius: i32) {
@@ -290,6 +315,96 @@ pub fn chunk_delta(a: i32, b: i32) -> i32 {
     }
 }
 
+/// Generates and meshes column `key` (with its deltas) on the worker pool.
+fn spawn_column(
+    workers: &Workers,
+    terrain: &Arc<Terrain>,
+    deltas: Arc<DeltaStore>,
+    tx: Sender<ColumnResult>,
+    key: (i32, i32),
+    request: u64,
+) {
+    let terrain = terrain.clone();
+    workers.pool.spawn(move || {
+        let underground = terrain.config().underground_chunks;
+        let col = ColumnSet::new(&terrain, key.0, key.1);
+        let mut tint = terrain.chunk_tint(key.0, key.1);
+        tint.water_depth = col.water_depths();
+        let mut ys: BTreeSet<i32> = col
+            .chunk_range(underground)
+            .filter(|&cy| col.may_have_faces(cy))
+            .collect();
+        ys.extend(deltas.touched_ys(key.0, key.1));
+        let meshes = ys
+            .into_iter()
+            .map(|cy| {
+                let mut p = col.padded_chunk(&terrain, cy);
+                deltas.apply_padded(ChunkPos::new(key.0, cy, key.1), &mut p);
+                (cy, mesh_chunk(&p, terrain.blocks(), &tint))
+            })
+            .filter(|(_, m)| !m.is_empty())
+            .collect();
+        let _ = tx.send(ColumnResult {
+            key,
+            request,
+            meshes,
+        });
+    });
+}
+
+/// Spawns the Bevy entities of a meshed column; returns them and their quad count.
+fn spawn_meshes(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &TerrainMaterials,
+    origin: &RenderOrigin,
+    key: (i32, i32),
+    column: Vec<(i32, ChunkMesh)>,
+    shown: bool,
+) -> (Vec<Entity>, usize) {
+    let mut entities = Vec::new();
+    let mut quads = 0;
+    for (cy, m) in column {
+        let anchor = Anchor {
+            x: key.0 * CHUNK_SIZE,
+            y: cy * CHUNK_SIZE,
+            z: key.1 * CHUNK_SIZE,
+        };
+        let t = Transform::from_translation(origin.translation(anchor.x, anchor.y, anchor.z));
+        quads += m.opaque.quad_count() + m.water.quad_count();
+        for (data, material, water) in [
+            (m.opaque, &materials.opaque, false),
+            (m.water, &materials.water, true),
+        ] {
+            if data.is_empty() {
+                continue;
+            }
+            let mesh = to_bevy_mesh(data);
+            // Bounds deep enough for the display curvature (no recomputation by Bevy).
+            let aabb = curvature::chunk_aabb(&mesh).unwrap_or_default();
+            let h = meshes.add(mesh);
+            let mut e = commands.spawn((
+                Mesh3d(h),
+                MeshMaterial3d(material.clone()),
+                t,
+                anchor,
+                aabb,
+                NoAutoAabb,
+                if shown {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                },
+            ));
+            if water {
+                e.insert(bevy::light::NotShadowCaster);
+            }
+            entities.push(e.id());
+        }
+    }
+    (entities, quads)
+}
+
 pub fn to_bevy_mesh(m: MeshData) -> Mesh {
     Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -308,6 +423,7 @@ pub fn stream_chunks(
     mut streamer: ResMut<Streamer>,
     workers: Res<Workers>,
     terrain: Res<SharedTerrain>,
+    deltas: Res<SharedDeltas>,
     settings: Res<FlySettings>,
     cam: Res<FlyCam>,
     origin: Res<RenderOrigin>,
@@ -327,68 +443,90 @@ pub fn stream_chunks(
     }
     let keep = s.radius + 2;
 
-    // 1. Finished columns (spawned hidden: the horizon decides when they appear).
+    // 1. Finished columns (spawned hidden: the horizon decides when they appear); new meshes
+    // of edited columns replace the old ones.
     let results: Vec<ColumnResult> = s.rx.lock().expect("channel").try_iter().collect();
     for r in results {
         s.in_flight -= 1;
-        if !matches!(s.slots.get(&r.key), Some(Slot::Pending)) || !s.within(r.key, keep) {
-            if matches!(s.slots.get(&r.key), Some(Slot::Pending)) {
-                s.slots.remove(&r.key);
-            }
-            continue;
-        }
-        let mut entities = Vec::new();
-        let mut quads = 0;
-        for (cy, m) in r.meshes {
-            let anchor = Anchor {
-                x: r.key.0 * CHUNK_SIZE,
-                y: cy * CHUNK_SIZE,
-                z: r.key.1 * CHUNK_SIZE,
-            };
-            let t = Transform::from_translation(origin.translation(anchor.x, anchor.y, anchor.z));
-            quads += m.opaque.quad_count() + m.water.quad_count();
-            for (data, material, water) in [
-                (m.opaque, &materials.opaque, false),
-                (m.water, &materials.water, true),
-            ] {
-                if data.is_empty() {
+        let in_range = s.within(r.key, keep);
+        match s.slots.get_mut(&r.key) {
+            Some(Slot::Pending(q)) if *q == r.request => {
+                if !in_range {
+                    s.slots.remove(&r.key);
                     continue;
                 }
-                let mesh = to_bevy_mesh(data);
-                // Bounds deep enough for the display curvature (no recomputation by Bevy).
-                let aabb = curvature::chunk_aabb(&mesh).unwrap_or_default();
-                let h = meshes.add(mesh);
-                let mut e = commands.spawn((
-                    Mesh3d(h),
-                    MeshMaterial3d(material.clone()),
-                    t,
-                    anchor,
-                    aabb,
-                    NoAutoAabb,
-                    Visibility::Hidden,
-                ));
-                if water {
-                    e.insert(bevy::light::NotShadowCaster);
-                }
-                entities.push(e.id());
+                let (entities, quads) = spawn_meshes(
+                    &mut commands,
+                    &mut meshes,
+                    &materials,
+                    &origin,
+                    r.key,
+                    r.meshes,
+                    false,
+                );
+                s.quads += quads;
+                s.version += 1;
+                s.slots.insert(
+                    r.key,
+                    Slot::Ready {
+                        entities,
+                        quads,
+                        shown: false,
+                        remesh: None,
+                    },
+                );
             }
-        }
-        s.quads += quads;
-        s.version += 1;
-        s.slots.insert(
-            r.key,
-            Slot::Ready {
+            Some(Slot::Ready {
                 entities,
                 quads,
-                shown: false,
-            },
+                shown,
+                remesh,
+            }) if *remesh == Some(r.request) => {
+                for &e in entities.iter() {
+                    commands.entity(e).despawn();
+                }
+                let (new, n) = spawn_meshes(
+                    &mut commands,
+                    &mut meshes,
+                    &materials,
+                    &origin,
+                    r.key,
+                    r.meshes,
+                    *shown,
+                );
+                s.quads = s.quads - *quads + n;
+                *entities = new;
+                *quads = n;
+                *remesh = None;
+            }
+            _ => {}
+        }
+    }
+
+    // Edited columns: request a new mesh (a pending request is superseded).
+    for key in std::mem::take(&mut s.remesh) {
+        s.requests += 1;
+        let request = s.requests;
+        match s.slots.get_mut(&key) {
+            Some(Slot::Pending(q)) => *q = request,
+            Some(Slot::Ready { remesh, .. }) => *remesh = Some(request),
+            None => continue,
+        }
+        s.in_flight += 1;
+        spawn_column(
+            &workers,
+            &terrain.0,
+            deltas.snapshot(),
+            s.tx.clone(),
+            key,
+            request,
         );
     }
 
     // 2. Forget pending columns that left the range (their results will be discarded).
     let center_now = s.center;
     s.slots.retain(|&k, slot| {
-        if !matches!(slot, Slot::Pending) {
+        if !matches!(slot, Slot::Pending(_)) {
             return true;
         }
         let (dx, dz) = (
@@ -400,9 +538,9 @@ pub fn stream_chunks(
 
     // 3. Request missing columns, nearest first.
     let max_in_flight = workers.threads * 2;
-    let underground = terrain.0.config().underground_chunks;
     let mut missing = 0;
     let mut ready = 0;
+    let mut snapshot = None;
     for i in 0..s.offsets.len() {
         let (dx, dz) = s.offsets[i];
         let key = (
@@ -411,35 +549,16 @@ pub fn stream_chunks(
         );
         match s.slots.get(&key) {
             Some(Slot::Ready { .. }) => ready += 1,
-            Some(Slot::Pending) => missing += 1,
+            Some(Slot::Pending(_)) => missing += 1,
             None => {
                 missing += 1;
                 if s.in_flight < max_in_flight {
                     s.in_flight += 1;
-                    s.slots.insert(key, Slot::Pending);
-                    let terrain = terrain.0.clone();
-                    let tx = s.tx.clone();
-                    workers.pool.spawn(move || {
-                        let col = ColumnSet::new(&terrain, key.0, key.1);
-                        let mut tint = terrain.chunk_tint(key.0, key.1);
-                        tint.water_depth = col.water_depths();
-                        let meshes = col
-                            .chunk_range(underground)
-                            .filter(|&cy| col.may_have_faces(cy))
-                            .map(|cy| {
-                                (
-                                    cy,
-                                    mesh_chunk(
-                                        &col.padded_chunk(&terrain, cy),
-                                        terrain.blocks(),
-                                        &tint,
-                                    ),
-                                )
-                            })
-                            .filter(|(_, m)| !m.is_empty())
-                            .collect();
-                        let _ = tx.send(ColumnResult { key, meshes });
-                    });
+                    s.requests += 1;
+                    let request = s.requests;
+                    s.slots.insert(key, Slot::Pending(request));
+                    let d = snapshot.get_or_insert_with(|| deltas.snapshot()).clone();
+                    spawn_column(&workers, &terrain.0, d, s.tx.clone(), key, request);
                 }
             }
         }
@@ -470,6 +589,7 @@ pub fn column_visibility(
             entities,
             quads,
             shown,
+            ..
         } = slot
         else {
             return true;
@@ -520,13 +640,16 @@ pub fn fly_input(
     scroll: Res<AccumulatedMouseScroll>,
     ui: Res<UiCapture>,
     terrain: Res<SharedTerrain>,
+    deltas: Res<SharedDeltas>,
+    mut god: ResMut<crate::god::God>,
     mut cam: ResMut<FlyCam>,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     if cam.scripted {
         return;
     }
-    let looking = buttons.pressed(MouseButton::Right) && !ui.0;
+    // God mode captures the mouse for good (cross at the centre, right click places).
+    let looking = god.on || (buttons.pressed(MouseButton::Right) && !ui.0);
     if let Ok(mut c) = cursor.single_mut() {
         let (grab, visible) = if looking {
             (CursorGrabMode::Locked, false)
@@ -544,7 +667,7 @@ pub fn fly_input(
         cam.pitch =
             (cam.pitch - f64::from(d.y) * 0.0025).clamp(-FRAC_PI_2 + 0.01, FRAC_PI_2 - 0.01);
     }
-    if !ui.0 && scroll.delta.y != 0.0 {
+    if !ui.0 && !god.on && scroll.delta.y != 0.0 {
         let notches = match scroll.unit {
             MouseScrollUnit::Line => f64::from(scroll.delta.y),
             MouseScrollUnit::Pixel => f64::from(scroll.delta.y) / 40.0,
@@ -574,8 +697,21 @@ pub fn fly_input(
     let step = cam.speed * time.delta_secs_f64() / len;
     v = v.map(|c| c * step);
     let mut p = cam.pos.translate(v);
-    let ground = terrain.0.height(p.x, p.z).max(0.0);
-    p.y = p.y.max(ground + GROUND_CLEARANCE);
+    // Floor: the generated ground, or the first solid block below the camera where blocks
+    // were modified (dug pits, placed blocks). Walls and ceilings do not stop the camera.
+    let (cx, cz) = (
+        (p.x.floor() as i32).div_euclid(CHUNK_SIZE),
+        (p.z.floor() as i32).div_euclid(CHUNK_SIZE),
+    );
+    let store = deltas.snapshot();
+    let ground = if store.column_modified(cx, cz) {
+        // From the higher of the old and new heights: a fast fall cannot start inside a block.
+        god.floor_below(&terrain.0, &store, p.x, p.y.max(cam.pos.y), p.z)
+            .unwrap_or(f64::NEG_INFINITY)
+    } else {
+        terrain.0.height(p.x, p.z)
+    };
+    p.y = p.y.max(ground.max(0.0) + GROUND_CLEARANCE);
     cam.pos = p;
 }
 

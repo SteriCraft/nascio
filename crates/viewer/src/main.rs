@@ -9,6 +9,7 @@ mod bench;
 mod curvature;
 mod fly;
 mod generating;
+mod god;
 mod horizon;
 mod map;
 mod perf;
@@ -25,7 +26,7 @@ use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 use clap::Parser;
 use nascio_core::consts::WORLD_SIZE_F64;
 use nascio_core::coords::{BlockPos, WorldPos};
-use nascio_voxel::{Terrain, VoxelConfig};
+use nascio_voxel::{DeltaStore, Terrain, VoxelConfig};
 use nascio_worldgen::world_io::World;
 
 use fly::{FlyCam, FlySettings, RenderOrigin};
@@ -174,7 +175,33 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     if let Some(r) = args.curvature_radius {
         render_cfg.curvature_radius_m = r;
     }
+    let palette_above = voxel_cfg.delta_palette_above;
     let terrain = Arc::new(Terrain::from_world(&world, voxel_cfg)?);
+    // Player modifications (god mode), `world-<seed>/deltas/`. Deltas of another world are
+    // left untouched: edits then stay in memory.
+    let deltas = match DeltaStore::open(
+        &args.world.join("deltas"),
+        nascio_worldgen::config::GENERATOR_VERSION,
+        &world.hash(),
+        terrain.blocks(),
+        palette_above,
+    ) {
+        Ok((d, warnings)) => {
+            for w in warnings {
+                warn!("deltas: {w}");
+            }
+            d
+        }
+        Err(e) => {
+            error!("deltas not loaded, edits will not be saved: {e:#}");
+            DeltaStore::new(
+                nascio_worldgen::config::GENERATOR_VERSION,
+                "",
+                palette_above,
+            )
+        }
+    };
+    let god = god::God::new(terrain.blocks().id("granite").unwrap_or(1));
     // Cloud, snow, temperature and humidity harmonics, the diurnal range and the fine elevation
     // (snow line, HUD weather) for the 3D mode (the map keeps the world).
     let climate_world = World {
@@ -288,6 +315,10 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     .insert_resource(fly::SharedTerrain(terrain))
     .insert_resource(fly::Workers::new())
     .insert_resource(fly::Streamer::new())
+    .insert_resource(fly::SharedDeltas(Arc::new(std::sync::Mutex::new(
+        Arc::new(deltas),
+    ))))
+    .insert_resource(god)
     .insert_resource(horizon::Horizon::new(horizon_cfg))
     .insert_resource(RenderOrigin(BlockPos::new(0, 0, 0)))
     .insert_resource(ClearColor(Color::srgb(0.45, 0.64, 0.9)))
@@ -299,7 +330,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         EguiPrimaryContextPass,
         (
             map::ui.run_if(in_state(Mode::Map)),
-            fly::hud.run_if(in_state(Mode::Fly)),
+            (god::god_ui, fly::hud).chain().run_if(in_state(Mode::Fly)),
         ),
     )
     .add_systems(
@@ -309,6 +340,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             fly::apply_vsync,
             (
                 fly::fly_input,
+                god::god_input,
                 fly::stream_chunks,
                 horizon::update_horizon,
                 fly::column_visibility,

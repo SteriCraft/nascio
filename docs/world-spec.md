@@ -302,7 +302,9 @@ Première liste (à affiner avec le gameplay) :
   La neige saisonnière reste un effet de rendu jusqu'à la météo.
 - **Bruit périodique** : bruit de gradient sur réseau, avec un espacement de réseau qui **divise 100 000** (16, 20, 25, 32, 40, 50, 80, 100, 125, 160, 200, 250, 400, 500, 625, 800, 1 000…). Le hachage des nœuds se fait modulo `100 000 / espacement`.
 - Les identifiants de bloc sont des `u16`, avec un registre de blocs (nom, couleur provisoire, propriétés physiques de base). Les blocs sont désignés par leur nom ; les identifiants sont attribués à la génération du monde (blocs de la colonne, puis blocs du catalogue des gisements) et enregistrés dans `blocks.toml`.
-- Les grottes, les structures et le stockage des modifications des joueurs viendront plus tard. On prévoit seulement l'interface : `Chunk = generate(pos) ⊕ delta(pos)`.
+- Les grottes et les structures viendront plus tard.
+- **Modifications** : `Chunk = generate(pos) ⊕ delta(pos)` (`nascio-voxel::delta`). Un delta garde les blocs modifiés d'un chunk **en valeur absolue** (le bloc présent, pas une différence) : une modification garde son sens si le générateur change. Liste triée `(indice, bloc)` ; au-delà de `delta_palette_above` blocs (2 048), une palette (`KEEP` pour les blocs générés) sur 1, 2, 4, 8 ou 16 bits par bloc.
+- **Fichiers** : `world-<seed>/deltas/r.<rx>.<rz>.bin`, une région de 25 × 25 colonnes de chunks (800 m ; 25 divise 3 125, les régions pavent le tore), toutes hauteurs. En-tête : `NSCDELTA`, format, `generator_version`, empreinte du monde (`World::hash`), noms des blocs utilisés (les identifiants sont renumérotés au chargement). Écriture atomique (fichier temporaire puis renommage). Des deltas d'un autre monde sont refusés ; ceux d'une autre version du générateur sont chargés avec un avertissement.
 
 ---
 
