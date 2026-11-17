@@ -62,32 +62,32 @@ fn chunk_hash(t: &Terrain, p: ChunkPos) -> String {
     blake3::hash(&bytes).to_hex()[..16].to_string()
 }
 
-const GOLDEN_WORLD: &str = "d81b05353fe038e1438a65aae795aec57148711c07355ef69f04c17a03ded883";
+const GOLDEN_WORLD: &str = "c6b4518e104b06bbf8398188995f998b01672353fc1cb18b290805fb603902ff";
 const GOLDEN_CHUNKS: [&str; 24] = [
-    "df4d14965dd2f0f5",
-    "2ca7167ea364b601",
-    "e6023b1f1af59076",
-    "a0a15357a690ef5b",
-    "449f62d63ed71e46",
-    "9ad3071cc973b6fa",
-    "e90ec17f86136c22",
-    "3e27c4fa72d20f0d",
-    "4f627cafae03923b",
-    "ac1523a43963337e",
-    "2258b80962e90993",
-    "334542625eb89145",
-    "9b0cce629bcae363",
+    "3d169d6ab2644409",
+    "832c5daebb8b7c8d",
+    "3697c600d5a72fdc",
+    "8dd9edbb0fab3aa5",
+    "0d12e7b5ca628fc5",
+    "84b3c38e822bae75",
+    "30b95649d7471928",
+    "8e7ee8ee3d2ebb93",
+    "5ab67303795a64c4",
+    "2e2392efd81c59dc",
+    "5d8b96579da8f202",
+    "edb6184e919db50c",
+    "cc3940c4dab7b424",
     "0445a6ba4cd05489",
-    "9eeaca15cd94daf1",
+    "3dd8d18ee0d5982f",
     "3026edee840c118f",
-    "1d8103c726c40387",
-    "04ee1c4d6cbe02ca",
-    "8dcece9245b88d79",
+    "58901fd905e7ed01",
+    "427f851760e08672",
+    "dd6d073c390489aa",
     "7e4081ee18fb19b4",
-    "d1cc3fd066723c94",
-    "7e4081ee18fb19b4",
-    "b72774b6f5a9b0fd",
-    "87f16344847bce9b",
+    "fa35e505722cc934",
+    "8978184afb8b41bb",
+    "e5881705100c2f85",
+    "d90101daa182c197",
 ];
 
 #[test]
@@ -95,7 +95,7 @@ fn world_hash_is_the_reference() {
     let (w, _) = world();
     assert_eq!(
         (GENERATOR_VERSION, w.hash().as_str()),
-        (16, GOLDEN_WORLD),
+        (17, GOLDEN_WORLD),
         "world of seed 42 at 1/25 changed"
     );
 }
@@ -111,7 +111,7 @@ fn chunk_hashes_are_the_reference() {
         .collect();
     assert_eq!(
         (GENERATOR_VERSION, got.as_slice()),
-        (16, GOLDEN_CHUNKS.map(String::from).as_slice()),
+        (17, GOLDEN_CHUNKS.map(String::from).as_slice()),
         "chunks changed:\n{}",
         listing.join("\n")
     );
@@ -149,7 +149,7 @@ fn height_bits_are_the_reference() {
     let (_, t) = world();
     assert_eq!(
         (GENERATOR_VERSION, height_bits_hash(t).as_str()),
-        (16, "e7864faa4a66e8a0"),
+        (17, "c7ad10b37ca905d1"),
         "surface heights changed (bits)"
     );
 }

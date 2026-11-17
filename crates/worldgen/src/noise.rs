@@ -27,12 +27,28 @@ pub fn divisor_at_most(max: f64) -> u32 {
         .unwrap_or(1)
 }
 
+/// The node hash picks one of `2^GRADIENT_BITS` unit gradients at evenly spaced angles.
+const GRADIENT_BITS: u32 = 8;
+
+/// The shared gradient table (computed once with the deterministic `sin`/`cos`).
+fn gradients() -> &'static [(f64, f64); 1 << GRADIENT_BITS] {
+    static TABLE: std::sync::OnceLock<[(f64, f64); 1 << GRADIENT_BITS]> =
+        std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        std::array::from_fn(|k| {
+            let angle = k as f64 / f64::from(1u32 << GRADIENT_BITS) * std::f64::consts::TAU;
+            (angle.det_cos(), angle.det_sin())
+        })
+    })
+}
+
 /// One octave of periodic 2D gradient (Perlin-style) noise, roughly in `[-1, 1]`.
 #[derive(Clone, Debug)]
 pub struct PeriodicNoise {
     seed: u64,
     spacing: f64,
     nodes: i64,
+    gradients: &'static [(f64, f64); 1 << GRADIENT_BITS],
 }
 
 impl PeriodicNoise {
@@ -46,6 +62,7 @@ impl PeriodicNoise {
             seed,
             spacing: f64::from(spacing_m),
             nodes: i64::from(WORLD_SIZE as u32 / spacing_m),
+            gradients: gradients(),
         }
     }
 
@@ -59,8 +76,7 @@ impl PeriodicNoise {
         let ix = ix.rem_euclid(self.nodes) as u64;
         let iz = iz.rem_euclid(self.nodes) as u64;
         let h = mix64(self.seed ^ mix64(ix.wrapping_mul(0x8CB9_2BA7_2F3D_8DD7) ^ iz));
-        let angle = (h >> 11) as f64 / (1u64 << 53) as f64 * std::f64::consts::TAU;
-        (angle.det_cos(), angle.det_sin())
+        self.gradients[(h >> (64 - GRADIENT_BITS)) as usize]
     }
 
     /// Noise value at world position `(x, z)` (metres, any value: wrapped internally).

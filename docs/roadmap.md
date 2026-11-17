@@ -123,10 +123,10 @@ Audit complet du projet par Fable, à partir des derniers benchmarks du PC Windo
 
 **Fait (2026-11-17)** : rapport `rapport-audit-M7.md` (0 critique, 6 élevés, 11 moyens, 9 faibles), validé par l'auteur. Tous les constats sont appliqués avant la phase Serveur, en cinq lots, un commit par lot (lot 5 : un commit par sous-lot) :
 1. **Déterminisme** — fait et validé (2026-11-17) : empreinte de génération (monde + `[voxel]`), `--dev-override` marqué, `libm` pour le code de génération, hachages de référence (monde au 1/25, 24 chunks), CI Linux et Windows ; `generator_version` 15. Monde de référence d'échelle 1 : `out/m7/world-42` (101 s).
-2. **Rivières et anomalies** — fait (2026-11-17, à valider) : gabarit de jeu par ordre de Strahler, méandres, vallées sans gorges, embouchures, pas d'eau sous la glace ; banquise tramée ; altération amincie et tramée (cause de l'anomalie c prouvée) ; `generator_version` 16. Vues avant/après dans `out/m7/lot2/`.
-3. **Performances** (bruits par colonne, gauchissement dédoublonné, pools ; puis table de gradients, `generator_version` 17), mesurées sur un monde d'échelle 1.
+2. **Rivières et anomalies** — fait et validé (2026-11-17) : gabarit de jeu par ordre de Strahler, méandres, vallées sans gorges, embouchures, pas d'eau sous la glace ; banquise tramée ; altération amincie et tramée (cause de l'anomalie c prouvée) ; `generator_version` 16. Vues avant/après dans `out/m7/lot2/`.
+3. **Performances** — fait (2026-11-17, à valider) : données de roche et bruits par colonne, gauchissement et biome dédoublonnés (sortie identique), pools mesurés et écartés ; table de gradients de Perlin, `generator_version` 17, qui rattrape le coût de libm. Monde d'échelle 1 : 55 → 143 colonnes/s sur 1 cœur, 410 → 1 214 sur 12. Le monde de référence `out/m7/world-42` est régénéré en version 17 (121 s).
 4. **Stockage des deltas** (régions à la demande, journal, instantanés par chunk).
-5. **Constats restants** : 5a crates, 5b maillage, 5c shaders, 5d documentation.
+5. **Constats restants** : 5a crates, 5b maillage, 5c shaders, 5d documentation ; plus l'analyse et la correction de la ligne verticale du site polaire (86 592, 0), sur la couture (spec §2.7).
 
 ---
 Ensuite viendra la **Phase « Serveur et réseau »**, qui fera l'objet d'une feuille de route séparée.
