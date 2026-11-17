@@ -4,6 +4,7 @@
 //! cargo run -p nascio-voxel --release --bin geology -- section out/m5/world-42 --from 1000,2000 --to 9000,2000 --out out/section.png
 //! cargo run -p nascio-voxel --release --bin geology -- stats out/m5/world-42
 //! cargo run -p nascio-voxel --release --bin geology -- geotherm --out out/geotherm.png
+//! cargo run -p nascio-voxel --release --bin geology -- depths out/m5/world-42
 //! ```
 
 use std::collections::BTreeMap;
@@ -60,6 +61,13 @@ enum Command {
         #[arg(long, default_value_t = 500)]
         depth: i32,
     },
+    /// Depth and rock temperature of the deposit bodies, per type (actual columns).
+    Depths {
+        world: PathBuf,
+        /// Temperature that a type must not lie entirely beyond, °C.
+        #[arg(long, default_value_t = 60.0)]
+        limit: f64,
+    },
     /// Underground temperature curves (ocean, continent, orogen), as PNG and a table.
     Geotherm {
         /// World whose `[geotherm]` is used (default parameters otherwise).
@@ -105,6 +113,7 @@ fn main() -> anyhow::Result<()> {
             columns,
             depth,
         } => stats(&World::load(&world)?, columns, depth)?,
+        Command::Depths { world, limit } => depths(&World::load(&world)?, limit)?,
         Command::Geotherm { world, out } => {
             let g = match world {
                 Some(p) => World::load(&p)?.config.geotherm,
@@ -184,6 +193,81 @@ fn stats(world: &World, columns: usize, depth: i32) -> anyhow::Result<()> {
             blocks.def(*id).name,
             *n as f64 / rock.max(1) as f64 * 100.0,
             if *id >= builtin { "  (ore)" } else { "" }
+        );
+    }
+    Ok(())
+}
+
+/// Per deposit type: depth of the top and bottom of its bodies below the rock surface, and
+/// the rock temperature there, from the actual crust and surface temperature of each column.
+fn depths(world: &World, limit: f64) -> anyhow::Result<()> {
+    let terrain = Terrain::from_world(world, VoxelConfig::default())?;
+    let temp = SurfaceTemperature::from_world(world);
+    let catalog = world
+        .catalog()?
+        .ok_or_else(|| anyhow::anyhow!("world without deposit catalogue"))?;
+    let bodies = world.bodies()?;
+    println!(
+        "{:<16} {:>6} {:>12} {:>12} {:>11} {:>11} {:>9} {:>10}",
+        "type",
+        "bodies",
+        "top min (m)",
+        "base max (m)",
+        "T top min",
+        "T base max",
+        "top med T",
+        format!("top <{limit:.0}C"),
+    );
+    let mut failures = Vec::new();
+    for (kind, d) in catalog.deposits.iter().enumerate() {
+        // (top depth, base depth, top temperature, base temperature)
+        let mut rows: Vec<(f64, f64, f64, f64)> = bodies
+            .iter()
+            .filter(|b| usize::from(b.kind) == kind)
+            .map(|b| {
+                let top = terrain.height(b.x, b.z);
+                let ti = top.floor() as i32;
+                let water_top = f64::from(terrain.water_top(b.x, b.z));
+                let moho = f64::from(terrain.moho_y(b.x, b.z, ti));
+                let c = f64::from(b.c);
+                let (d0, d1) = if b.shape.follows_surface() {
+                    (b.y - c, b.y + c)
+                } else {
+                    let (lo, hi) = b.y_range();
+                    (top - hi, top - lo)
+                };
+                let (d0, d1) = (d0.max(0.0), d1.max(0.0));
+                let t = |d: f64| temp.rock(b.x, b.z, top, water_top, moho, d);
+                (d0, d1, t(d0), t(d1))
+            })
+            .collect();
+        if rows.is_empty() {
+            println!("{:<16} {:>6}", d.name, 0);
+            continue;
+        }
+        let n = rows.len();
+        let top_min = rows.iter().map(|r| r.0).fold(f64::MAX, f64::min);
+        let base_max = rows.iter().map(|r| r.1).fold(0.0, f64::max);
+        let t_top_min = rows.iter().map(|r| r.2).fold(f64::MAX, f64::min);
+        let t_base_max = rows.iter().map(|r| r.3).fold(f64::MIN, f64::max);
+        rows.sort_by(|a, b| a.2.total_cmp(&b.2));
+        let median = rows[n / 2].2;
+        let cool = rows.iter().filter(|r| r.2 < limit).count() as f64 / n as f64;
+        println!(
+            "{:<16} {n:>6} {top_min:>12.0} {base_max:>12.0} {t_top_min:>9.0} C {t_base_max:>9.0} C {median:>7.0} C {:>9.0} %",
+            d.name,
+            cool * 100.0
+        );
+        if cool < 0.5 {
+            failures.push(d.name.clone());
+        }
+    }
+    if failures.is_empty() {
+        println!("every type has most of its bodies starting below {limit:.0} C");
+    } else {
+        println!(
+            "types with most bodies starting beyond {limit:.0} C: {}",
+            failures.join(", ")
         );
     }
     Ok(())

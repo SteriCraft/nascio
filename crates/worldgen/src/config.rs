@@ -10,7 +10,7 @@ use nascio_core::{AtmosphereConfig, GeothermConfig};
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a change alters generated output for a given config.
-pub const GENERATOR_VERSION: u32 = 9;
+pub const GENERATOR_VERSION: u32 = 10;
 
 /// Full-resolution cell size of the tectonic grid, in metres (spec §1.4).
 pub const TECTONIC_CELL_M: u32 = 160;

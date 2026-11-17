@@ -34,15 +34,20 @@ pub enum Context {
     Platform,
     Basin,
     MarineShelf,
+    /// Oceanic crust next to a continent, away from trenches and arcs: the sediment wedge of
+    /// a passive margin.
+    PassiveMargin,
     Humid,
     Arid,
     Laterite,
+    /// Hot and wet climate on land, whatever the slope (laterite also needs flat ground).
+    Tropical,
     RiverSource,
     Coast,
 }
 
 /// Number of contexts.
-pub const CONTEXTS: usize = 18;
+pub const CONTEXTS: usize = 20;
 
 impl Context {
     pub const ALL: [Context; CONTEXTS] = [
@@ -59,9 +64,11 @@ impl Context {
         Context::Platform,
         Context::Basin,
         Context::MarineShelf,
+        Context::PassiveMargin,
         Context::Humid,
         Context::Arid,
         Context::Laterite,
+        Context::Tropical,
         Context::RiverSource,
         Context::Coast,
     ];
@@ -81,9 +88,11 @@ impl Context {
             Context::Platform => "platform",
             Context::Basin => "basin",
             Context::MarineShelf => "marine_shelf",
+            Context::PassiveMargin => "passive_margin",
             Context::Humid => "humid",
             Context::Arid => "arid",
             Context::Laterite => "laterite",
+            Context::Tropical => "tropical",
             Context::RiverSource => "river_source",
             Context::Coast => "coast",
         }
@@ -114,7 +123,8 @@ pub mod setting {
     pub const PLATFORM: u8 = 9;
     pub const BASIN: u8 = 10;
     pub const MARINE_SHELF: u8 = 11;
-    pub const COUNT: usize = 12;
+    pub const PASSIVE_MARGIN: u8 = 12;
+    pub const COUNT: usize = 13;
 
     pub const NAMES: [&str; COUNT] = [
         "ocean",
@@ -129,11 +139,12 @@ pub mod setting {
         "platform",
         "sedimentary basin",
         "marine shelf",
+        "passive margin",
     ];
 
     /// Whether the basement of this setting is oceanic crust.
     pub fn oceanic(code: u8) -> bool {
-        matches!(code, OCEAN | RIDGE | TRENCH)
+        matches!(code, OCEAN | RIDGE | TRENCH | PASSIVE_MARGIN)
     }
 }
 
@@ -147,8 +158,14 @@ pub struct GeologyConfig {
     pub basin_high_m: f64,
     /// Share of `sediment_max_m` in the deepest continental basins.
     pub basin_fill: f64,
-    /// Share of `sediment_max_m` on continental shelves and passive margins.
+    /// Share of `sediment_max_m` on continental shelves.
     pub shelf_fill: f64,
+    /// Share of `sediment_max_m` at the foot of a passive margin (the wedge thins seawards).
+    pub margin_fill: f64,
+    /// Width of a passive margin, from the continental crust towards the ocean, m.
+    pub passive_margin_m: f64,
+    /// No passive margin within this distance of a trench or a volcanic arc (active margin), m.
+    pub active_margin_m: f64,
     /// Share of `sediment_max_m` in rift grabens.
     pub rift_fill: f64,
     /// Cratons keep this share of the basin cover (thin platform cover).
@@ -185,6 +202,9 @@ impl Default for GeologyConfig {
             basin_high_m: 400.0,
             basin_fill: 0.8,
             shelf_fill: 0.7,
+            margin_fill: 0.45,
+            passive_margin_m: 6_000.0,
+            active_margin_m: 5_000.0,
             rift_fill: 0.9,
             craton_cover: 0.35,
             pelagic_m_per_ma: 0.4,
@@ -211,9 +231,12 @@ impl GeologyConfig {
             && self.regolith_m >= 0.0
             && self.laterite_m >= 0.0
             && self.placer_reach_m > 0.0
-            && self.cover_noise_m > 0.0)
+            && self.cover_noise_m > 0.0
+            && self.passive_margin_m > 0.0
+            && self.active_margin_m >= 0.0
+            && (0.0..=1.0).contains(&self.margin_fill))
         {
-            return Err("sediment_max_m, basin_min_m, placer_reach_m, cover_noise_m must be > 0, regolith_m and laterite_m >= 0".into());
+            return Err("sediment_max_m, basin_min_m, placer_reach_m, cover_noise_m, passive_margin_m must be > 0, regolith_m, laterite_m, active_margin_m >= 0, margin_fill in [0, 1]".into());
         }
         if !(range(self.laterite_temperature_c)
             && range(self.laterite_precipitation_mm)
@@ -262,6 +285,16 @@ impl GeologyOutput {
             Layer::from_f32("placer_source", "share", &self.river_source),
         ]
     }
+}
+
+/// Distance (m, octagonal chamfer, periodic) from each cell of a `res × res` grid to the
+/// nearest cell of `source` (1e12 when there is none).
+pub fn distance_to(source: &[bool], res: usize, cell: f64) -> Vec<f64> {
+    const FAR: f64 = 1e12;
+    let mut h: Vec<f64> = source.iter().map(|&s| if s { 0.0 } else { -FAR }).collect();
+    let raisable: Vec<bool> = source.iter().map(|&s| !s).collect();
+    crate::seafloor::limit_slope(&mut h, res, res, cell, 1.0, &raisable);
+    h.into_iter().map(|v| -v).collect()
 }
 
 #[inline]
@@ -337,6 +370,28 @@ pub fn run(
         .collect();
     let mut cont = cont_raw.clone();
     crate::tectonics::box_blur(&mut cont, res, res, 1);
+    // Passive margins: oceanic crust near a continent, far from trenches and arcs.
+    let continental: Vec<bool> = cont_raw.iter().map(|&c| c > 0.5).collect();
+    let to_continent = distance_to(&continental, res, cell);
+    let active: Vec<bool> = tect
+        .history_flags
+        .data()
+        .iter()
+        .map(|&f| f & (flags::TRENCH | flags::ARC) != 0)
+        .collect();
+    let to_active = distance_to(&active, res, cell);
+    let passive: Vec<f64> = (0..n)
+        .map(|k| {
+            if continental[k] {
+                return 0.0;
+            }
+            (1.0 - smoothstep(
+                0.4 * g.passive_margin_m,
+                g.passive_margin_m,
+                to_continent[k],
+            )) * smoothstep(0.6 * g.active_margin_m, g.active_margin_m, to_active[k])
+        })
+        .collect();
     // Regional (smoothed) tectonic elevation: lowlands make basins.
     let mut regional: Vec<f32> = tect.elevation.data().to_vec();
     for _ in 0..2 {
@@ -352,7 +407,7 @@ pub fn run(
     let precip = &clim.precipitation.x0;
 
     // Sediments, weathering, climate contexts.
-    let per_cell: Vec<(f64, f64, f64, f64, f64)> = (0..n)
+    let per_cell: Vec<(f64, f64, f64, f64, f64, f64)> = (0..n)
         .into_par_iter()
         .map(|k| {
             let (i, j) = (k % res, k / res);
@@ -368,7 +423,13 @@ pub fn run(
                 let shelf = if sea { g.shelf_fill } else { 0.0 };
                 basin.max(shelf).max(g.rift_fill * w(&rift)) * g.sediment_max_m
             } else {
-                (g.pelagic_m_per_ma * age).min(g.pelagic_max_m)
+                // The margin wedge thins seawards; the pelagic cover elsewhere.
+                let wedge = g.margin_fill
+                    * passive[k]
+                    * (1.0 - 0.6 * smoothstep(0.0, g.passive_margin_m, to_continent[k]));
+                (g.pelagic_m_per_ma * age)
+                    .min(g.pelagic_max_m)
+                    .max(wedge * g.sediment_max_m)
             };
             // Deltas and fans: what erosion deposited.
             let deposited = (elev[k] - f64::from(tect.elevation.data()[k])).max(0.0);
@@ -386,7 +447,7 @@ pub fn run(
             let t = f64::from(*temp.get(i as i64, j as i64));
             let p = f64::from(*precip.get(i as i64, j as i64));
             let flat = 1.0 - smoothstep(0.08, 0.3, slope);
-            let laterite = if sea {
+            let tropical = if sea {
                 0.0
             } else {
                 smoothstep(g.laterite_temperature_c[0], g.laterite_temperature_c[1], t)
@@ -395,14 +456,16 @@ pub fn run(
                         g.laterite_precipitation_mm[1],
                         p,
                     )
-                    * flat
             };
+            let laterite = tropical * flat;
             let weathering = if sea {
                 0.0
             } else {
-                g.regolith_m * (1.0 - smoothstep(0.15, 0.6, slope)) + g.laterite_m * laterite
+                // Tropical saprolite also holds on steeper slopes.
+                let (s0, s1) = (0.15 + 0.2 * tropical, 0.6 + 0.3 * tropical);
+                g.regolith_m * (1.0 - smoothstep(s0, s1, slope)) + g.laterite_m * laterite
             };
-            (s, weathering, laterite, p, craton)
+            (s, weathering, laterite, p, craton, tropical)
         })
         .collect();
     let mut sediment: Vec<f32> = per_cell.iter().map(|v| v.0 as f32).collect();
@@ -428,7 +491,7 @@ pub fn run(
 
     let weights: Vec<[f32; CONTEXTS]> = (0..n)
         .map(|k| {
-            let (_, _, lat, p, craton) = per_cell[k];
+            let (_, _, lat, p, craton, tropical) = per_cell[k];
             let c = f64::from(cont[k]);
             let sea = sea_share[k];
             let o = f64::from(orogen[k]);
@@ -450,9 +513,15 @@ pub fn run(
             let free = (1.0 - o) * (1.0 - a);
             set(Context::Craton, craton * free);
             set(Context::Platform, (c - craton).max(0.0) * free);
+            // Offshore basins too: the shelves (continental crust) and the passive margins.
             set(
                 Context::Basin,
-                c * smoothstep(g.basin_min_m, 2.0 * g.basin_min_m, f64::from(sediment[k])),
+                c.max(passive[k])
+                    * smoothstep(g.basin_min_m, 2.0 * g.basin_min_m, f64::from(sediment[k])),
+            );
+            set(
+                Context::PassiveMargin,
+                passive[k] * smoothstep(0.3, 0.7, sea),
             );
             let water = (-elev[k]).max(0.0);
             set(
@@ -465,6 +534,7 @@ pub fn run(
                 1.0 - smoothstep(g.arid_mm[0], g.arid_mm[1], p),
             );
             set(Context::Laterite, lat);
+            set(Context::Tropical, tropical);
             set(Context::RiverSource, f64::from(river_ctx[k]));
             set(Context::Coast, f64::from(coast[k]));
             w
@@ -493,6 +563,8 @@ pub fn run(
                     setting::RIDGE
                 } else if at(Context::Trench) >= 0.5 {
                     setting::TRENCH
+                } else if at(Context::PassiveMargin) >= 0.5 {
+                    setting::PASSIVE_MARGIN
                 } else {
                     setting::OCEAN
                 }

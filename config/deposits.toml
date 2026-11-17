@@ -12,9 +12,11 @@
 #               (aucun bloc : carte seulement, forme "trap")
 #   cap         couche d'un autre bloc au toit d'une couche : { block, color, fraction, density }
 #   contexts    poids par contexte : ocean, ridge, trench, arc, orogen, rift, hotspot, ophiolite,
-#               ultramafic, craton, platform, basin, marine_shelf, humid, arid, laterite,
-#               river_source, coast. Poids d'une cellule = Σ poids × contexte
-#   requires    contextes requis (le poids est multiplié par chacun)
+#               ultramafic, craton, platform, basin (à terre et en mer), marine_shelf,
+#               passive_margin, humid, arid, laterite, tropical, river_source, coast.
+#               Poids d'une cellule = Σ poids × contexte
+#   requires    contextes requis (le poids est multiplié par chacun) ; "a|b" : le plus grand
+#               des deux
 #   shape       vein (filon), stock (amas porphyrique), lens (lentille), layer (couche),
 #               blanket (manteau d'altération), placer, trap (piège, carte seulement)
 #   host        pour une couche : "sediment" (défaut) ou "basement"
@@ -25,6 +27,8 @@
 #               hauteur)
 #   grade       part des blocs minéralisés au cœur du corps (0..1)
 #   abundance   corps par 100 km² de contexte de poids 1 (rareté)
+#   max_temperature_c  facultatif : roche la plus chaude où le corps peut commencer (°C) ; la
+#               plage de profondeur se resserre au-dessus de cet isotherme de la colonne
 #   elements    à titre indicatif : éléments obtenus après raffinage (sous-produits compris)
 
 # --- Arcs volcaniques ---
@@ -204,6 +208,8 @@ size_m = [500, 2500]
 thickness_m = [10, 40]
 grade = 1.0
 abundance = 5
+# Fenêtre à huile : au-delà, l'huile craque en gaz.
+max_temperature_c = 120
 elements = ["hydrocarbons"]
 
 [[deposit]]
@@ -217,6 +223,7 @@ size_m = [500, 3000]
 thickness_m = [10, 40]
 grade = 1.0
 abundance = 4
+max_temperature_c = 200
 elements = ["CH4"]
 
 # --- Plateaux marins, marges passives ---
@@ -270,8 +277,9 @@ name = "laterite_nickel"
 label = "Laterite nickel"
 map_color = [90, 170, 120]
 blocks = [{ block = "garnierite", color = [92, 150, 96], density = 2600 }]
-contexts = { laterite = 1.0 }
-requires = ["ultramafic"]
+# Ultrabasiques (ophiolites) ou basaltes des points chauds, sous climat tropical.
+contexts = { tropical = 1.0 }
+requires = ["ultramafic|hotspot"]
 shape = "blanket"
 depth_m = [2, 12]
 size_m = [200, 700]

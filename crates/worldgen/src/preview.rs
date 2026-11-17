@@ -674,11 +674,30 @@ pub fn colorize(world: &World, name: &str) -> Option<Vec<Color>> {
                     if name == "deposits" {
                         return colors.get(code - 1).map_or(base, |c| image::Rgb(*c));
                     }
-                    let k = (code - 1) / 2;
-                    let trap = code.is_multiple_of(2);
-                    colors.get(k).map_or(base, |c| {
-                        lerp_color(base, image::Rgb(*c), if trap { 1.0 } else { 0.3 })
-                    })
+                    // Bits: province `1 << 2k`, trap `1 << (2k + 1)`. Several types overlap:
+                    // diagonal stripes cycle through them, so none hides another.
+                    let on = |bit: usize| -> Vec<image::Rgb<u8>> {
+                        colors
+                            .iter()
+                            .enumerate()
+                            .filter(|(k, _)| code & (1 << (2 * k + bit)) != 0)
+                            .map(|(_, c)| image::Rgb(*c))
+                            .collect()
+                    };
+                    let (x, y) = (i % layer.width, i / layer.width);
+                    let stripe = (x + y) / 4;
+                    let pick = |v: &[image::Rgb<u8>]| v[stripe % v.len()];
+                    let traps = on(1);
+                    if !traps.is_empty() {
+                        return pick(&traps);
+                    }
+                    let provinces = on(0);
+                    if provinces.is_empty() {
+                        base
+                    } else {
+                        let strength = if provinces.len() > 1 { 0.5 } else { 0.3 };
+                        lerp_color(base, pick(&provinces), strength)
+                    }
                 })
                 .collect()
         }
@@ -690,7 +709,7 @@ pub fn colorize(world: &World, name: &str) -> Option<Vec<Color>> {
 /// Colours of the geological settings ([`crate::geology::setting`]).
 const SETTING_COLORS: [&str; crate::geology::setting::COUNT] = [
     "#c9dbea", "#e6a0a0", "#7f9fbf", "#d0703c", "#8c4a8c", "#e0c040", "#c03030", "#3c7a4a",
-    "#8a7a6a", "#c8b89a", "#e8d48a", "#9ccfc0",
+    "#8a7a6a", "#c8b89a", "#e8d48a", "#9ccfc0", "#9fb4cf",
 ];
 
 const SEDIMENT_STOPS: [(f64, &str); 5] = [
@@ -729,6 +748,9 @@ pub fn world_legend(world: &World, name: &str) -> Vec<(Color, String)> {
                     ));
                     v.push((c, format!("{} trap", d.label.to_lowercase())));
                 }
+            }
+            if name == "traps" && v.len() > 2 {
+                v.push((hex(SURFACE), "stripes: provinces overlap".to_string()));
             }
             v
         }

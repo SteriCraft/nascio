@@ -21,6 +21,7 @@ use crate::geology::{CONTEXTS, Context, GeologyOutput};
 use crate::grid::PeriodicGrid;
 use crate::rng::{mix64, stage_rng};
 use crate::world_io::Layer;
+use nascio_core::GeothermConfig;
 use nascio_core::consts::WORLD_SIZE_F64;
 use nascio_core::torus;
 
@@ -32,6 +33,8 @@ pub const CATALOG_PATH: &str = "config/deposits.toml";
 pub const TILE_M: f64 = 2_000.0;
 /// Tiles per axis.
 pub const TILES: usize = 50;
+/// Map-only types fit the bits of the `traps` layer (two bits each).
+pub const MAX_TRAP_TYPES: usize = 4;
 
 /// Body shapes known to the code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +143,10 @@ pub struct DepositType {
     pub thickness_m: [f64; 2],
     pub grade: f64,
     pub abundance: f64,
+    /// Hottest rock the body may start in, °C (e.g. the oil window): the depth range of a body
+    /// shrinks above that isotherm of its column (`[geotherm]`). None: no limit.
+    #[serde(default)]
+    pub max_temperature_c: Option<f64>,
     #[serde(default)]
     pub elements: Vec<String>,
 }
@@ -160,9 +167,14 @@ impl DepositType {
 
     fn validate(&self) -> anyhow::Result<()> {
         let n = &self.name;
-        for c in self.contexts.keys().chain(&self.requires) {
+        for c in self
+            .contexts
+            .keys()
+            .map(String::as_str)
+            .chain(self.requires.iter().flat_map(|r| r.split('|')))
+        {
             anyhow::ensure!(
-                Context::from_name(c).is_some(),
+                Context::from_name(c.trim()).is_some(),
                 "deposit {n}: unknown context {c}"
             );
         }
@@ -174,6 +186,10 @@ impl DepositType {
         anyhow::ensure!(
             self.size_m[0] > 0.0 && self.size_m[1] <= 4_000.0 && self.thickness_m[1] > 0.0,
             "deposit {n}: sizes must lie in (0, 4000] m and thicknesses be > 0"
+        );
+        anyhow::ensure!(
+            self.max_temperature_c.is_none_or(|t| t > 0.0),
+            "deposit {n}: max_temperature_c must be > 0"
         );
         anyhow::ensure!(
             self.grade > 0.0 && self.grade <= 1.0 && self.abundance >= 0.0,
@@ -202,11 +218,17 @@ impl DepositType {
         Ok(())
     }
 
-    /// Weight of this type for the context weights `w` of a cell.
+    /// Weight of this type for the context weights `w` of a cell: `Σ weight × context`, times
+    /// each requirement (`"a|b"`: the larger of `a` and `b`).
     pub fn weight(&self, w: &[f32; CONTEXTS]) -> f64 {
-        let get = |name: &str| Context::from_name(name).map_or(0.0, |c| f64::from(w[c.index()]));
+        let get =
+            |name: &str| Context::from_name(name.trim()).map_or(0.0, |c| f64::from(w[c.index()]));
         let sum: f64 = self.contexts.iter().map(|(c, k)| k * get(c)).sum();
-        let req: f64 = self.requires.iter().map(|c| get(c)).product();
+        let req: f64 = self
+            .requires
+            .iter()
+            .map(|r| r.split('|').map(get).fold(0.0, f64::max))
+            .product();
         (sum * req).max(0.0)
     }
 }
@@ -235,6 +257,10 @@ impl Catalog {
             );
         }
         anyhow::ensure!(c.deposits.len() < 127, "at most 126 deposit types");
+        anyhow::ensure!(
+            c.deposits.iter().filter(|d| d.shape == Shape::Trap).count() <= MAX_TRAP_TYPES,
+            "at most {MAX_TRAP_TYPES} map-only (trap) types"
+        );
         Ok(c)
     }
 
@@ -455,10 +481,34 @@ pub fn bodies_from_bytes(bytes: &[u8]) -> anyhow::Result<Vec<Body>> {
         .collect()
 }
 
+/// What sets the rock temperature of a column (spec §4.6): the Moho, the mean annual air
+/// temperature and the geotherm.
+#[derive(Clone, Copy)]
+pub struct Heat<'a> {
+    /// Moho depth below sea level, m (tectonic grid).
+    pub moho_depth: &'a PeriodicGrid<f32>,
+    /// Mean annual air temperature, °C.
+    pub air_c: &'a PeriodicGrid<f32>,
+    pub geotherm: GeothermConfig,
+}
+
+impl Heat<'_> {
+    /// Depth below the rock surface `top` (m) of column `(x, z)` where the rock reaches `t` °C.
+    pub fn depth_of(&self, x: f64, z: f64, top: f64, t: f64) -> f64 {
+        let water = (-top).max(0.0);
+        let ts = self
+            .geotherm
+            .surface_c(self.air_c.sample_bilinear(x, z), water);
+        let crust = (top + self.moho_depth.sample_bilinear(x, z)).max(50.0);
+        self.geotherm.depth_of(ts, crust, t)
+    }
+}
+
 /// Everything the placement reads.
 struct Inputs<'a> {
     geo: &'a GeologyOutput,
     ero: &'a ErosionOutput,
+    heat: Heat<'a>,
     res: usize,
     cell: f64,
 }
@@ -593,7 +643,7 @@ fn tile_bodies(seed: u64, kind: usize, d: &DepositType, t: usize, inp: &Inputs) 
         }
         let size = uniform(&mut rng, d.size_m);
         let thick = uniform(&mut rng, d.thickness_m);
-        let depth = uniform(&mut rng, d.depth_m);
+        let mut depth = uniform(&mut rng, d.depth_m);
         let aspect = 0.45 + 0.55 * rng.random::<f64>();
         let mut yaw = rng.random::<f64>() * std::f64::consts::TAU;
         let dip = (45.0 + 40.0 * rng.random::<f64>()).to_radians();
@@ -614,6 +664,18 @@ fn tile_bodies(seed: u64, kind: usize, d: &DepositType, t: usize, inp: &Inputs) 
             Shape::Placer => (size / 2.0, size / 2.0 * (0.12 + 0.1 * aspect), thick / 2.0),
         };
         let surface = inp.surface(x, z);
+        if let Some(t_max) = d.max_temperature_c
+            && !d.shape.follows_surface()
+        {
+            // Same draw, range shrunk to the rock cooler than `t_max` (top of the body).
+            let limit = inp.heat.depth_of(x, z, surface, t_max) + c;
+            if limit <= d.depth_m[0] {
+                continue;
+            }
+            let hi = d.depth_m[1].min(limit);
+            let span = (d.depth_m[1] - d.depth_m[0]).max(1e-9);
+            depth = d.depth_m[0] + (depth - d.depth_m[0]) / span * (hi - d.depth_m[0]);
+        }
         let y = match d.shape {
             Shape::Layer if d.host == Host::Sediment => {
                 // Inside the sedimentary cover.
@@ -688,7 +750,8 @@ pub struct DepositsOutput {
     pub bodies: Vec<Body>,
     /// Dominant deposit (type index + 1) per tectonic cell, 0 = none.
     pub dominant: PeriodicGrid<u8>,
-    /// Map-only types: `2k + 1` province, `2k + 2` trap (k: rank among the map-only types).
+    /// Map-only types, as bits: `1 << 2k` province, `1 << (2k + 1)` trap of the `k`-th map-only
+    /// type (provinces and traps of several types overlap).
     pub traps: PeriodicGrid<u8>,
     pub report: DepositsReport,
 }
@@ -703,7 +766,7 @@ impl DepositsOutput {
             ),
             Layer::from_u8(
                 "traps",
-                "2k+1 province, 2k+2 trap of the k-th map-only type",
+                "bits: 1<<2k province, 1<<(2k+1) trap of the k-th map-only type",
                 &self.traps,
             ),
         ]
@@ -716,6 +779,7 @@ pub fn run(
     catalog: &Catalog,
     geo: &GeologyOutput,
     ero: &ErosionOutput,
+    heat: Heat<'_>,
     progress: &crate::progress::Progress,
 ) -> DepositsOutput {
     let res = geo.setting.width();
@@ -723,6 +787,7 @@ pub fn run(
     let inp = Inputs {
         geo,
         ero,
+        heat,
         res,
         cell,
     };
@@ -758,10 +823,9 @@ pub fn run(
         let w = &geo.weights[k];
         for (d, rank) in catalog.deposits.iter().zip(&trap_rank) {
             if let Some(r) = rank
-                && *t == 0
                 && d.weight(w) >= 0.3
             {
-                *t = 2 * r + 1;
+                *t |= 1 << (2 * r);
             }
         }
     }
@@ -782,7 +846,7 @@ pub fn run(
                 let k = geo.setting.index(ci + di, cj + dj);
                 if b.shape == Shape::Trap {
                     if let Some(rk) = trap_rank[usize::from(b.kind)] {
-                        traps[k] = 2 * rk + 2;
+                        traps[k] |= 1 << (2 * rk + 1);
                     }
                 } else {
                     *score[k].entry(b.kind).or_default() += vol;
@@ -1001,6 +1065,32 @@ abundance = 1
             grade: 0.5,
             seed: 7,
         }
+    }
+
+    #[test]
+    fn alternative_requirements_take_the_larger_weight() {
+        let text = r#"[[deposit]]
+name = "x"
+label = "X"
+map_color = [1, 2, 3]
+contexts = { tropical = 1.0 }
+requires = ["ultramafic|hotspot"]
+shape = "blanket"
+blocks = [{ block = "xo", color = [1, 1, 1] }]
+depth_m = [1, 2]
+size_m = [10, 20]
+thickness_m = [1, 2]
+grade = 0.5
+abundance = 1
+"#;
+        let c = Catalog::parse(text).unwrap();
+        let mut w = [0f32; CONTEXTS];
+        w[Context::Tropical.index()] = 1.0;
+        assert_eq!(c.deposits[0].weight(&w), 0.0);
+        w[Context::Ultramafic.index()] = 0.5;
+        w[Context::Hotspot.index()] = 0.8;
+        assert!((c.deposits[0].weight(&w) - 0.8).abs() < 1e-6);
+        assert!(Catalog::parse(&text.replace("hotspot\"", "nowhere\"")).is_err());
     }
 
     #[test]

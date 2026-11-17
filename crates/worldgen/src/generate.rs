@@ -105,7 +105,12 @@ pub fn generate_full_with(
     timed("geology", start);
     progress.begin(Stage::Deposits);
     let start = std::time::Instant::now();
-    let dep = deposits::run(cfg.seed, catalog, &geo, &ero, progress);
+    let heat = deposits::Heat {
+        moho_depth: &out.moho_depth,
+        air_c: &clim.temperature.x0,
+        geotherm: cfg.geotherm,
+    };
+    let dep = deposits::run(cfg.seed, catalog, &geo, &ero, heat, progress);
     timed("deposits", start);
     let mut layers = out.layers();
     layers.extend(ero.layers());

@@ -193,10 +193,12 @@ Classification à partir des harmoniques de température et de précipitations, 
 | `arc`, `orogen`, `rift`, `hotspot`, `ophiolite` | marques de l'historique tectonique |
 | `ultramafic` | ophiolites, et dans une moindre mesure les basaltes des points chauds |
 | `craton`, `platform` | croûte continentale ancienne ou plus jeune, hors orogène et hors arc |
-| `basin` | couverture sédimentaire épaisse sur un continent |
-| `marine_shelf` | plateau et marge passive, sous une mer peu profonde |
+| `basin` | couverture sédimentaire épaisse : bassin continental, plateau marin ou marge passive |
+| `marine_shelf` | plateau continental (croûte continentale) sous une mer peu profonde |
+| `passive_margin` | croûte océanique à moins de 6 km d'un continent et à plus de 5 km d'une fosse ou d'un arc *(config)* |
 | `humid`, `arid` | climat actuel, faute de paléoclimat |
 | `laterite` | climat tropical humide sur une pente faible |
+| `tropical` | climat tropical humide, quelle que soit la pente |
 | `river_source` | lit de rivière à l'aval d'un orogène ou d'un arc |
 | `coast` | plages et rivages |
 
@@ -204,9 +206,10 @@ Sorties : `geo_context` (contexte dominant), `sediment_thickness` (m), `weatheri
 
 **Colonne verticale** (de haut en bas) :
 1. **Sol** de 0 à 3 m, selon le biome et la pente. On trouve du **sable de quartz** sur les plages, les déserts chauds et les fonds marins peu profonds, et du **gravier** sur le lit des rivières.
-2. **Altérites** : régolithe, ou latérite en climat tropical humide. Épaisseur `weathering_depth` *(config)*, nulle sur les fortes pentes.
+2. **Altérites** : régolithe, ou latérite en climat tropical humide. Épaisseur `weathering_depth` *(config)*, nulle sur les fortes pentes ; sous climat tropical, le régolithe (saprolite) tient sur des pentes plus fortes.
 3. **Couverture sédimentaire**, d'épaisseur `sediment_thickness`, **jusqu'à environ 500 m** *(config)* :
-   - épaisse dans les bassins (plaines continentales basses), les rifts, les deltas et cônes de dépôt (dépôts de l'érosion), et sur les plateaux et marges passives ;
+   - épaisse dans les bassins (plaines continentales basses), les rifts, les deltas et cônes de dépôt (dépôts de l'érosion), et sur les plateaux ;
+   - sur les marges passives, un coin sédimentaire qui s'amincit vers le large : 45 % de l'épaisseur maximale au pied du continent, 40 % de cela au bord de la marge *(config `margin_fill`)* ;
    - mince sur les cratons et quasi nulle sur les orogènes ;
    - sur l'océan, les sédiments pélagiques s'épaississent avec l'âge de la croûte.
 
@@ -236,8 +239,9 @@ Les limites entre contextes sont déformées par un bruit périodique : elles ne
 
 Chaque type de gisement décrit :
 - le bloc et ses proportions (un mélange est possible, ainsi qu'un « toit » d'un autre bloc pour les couches) ;
-- les contextes et leurs poids, et les contextes requis (multiplicatifs) ;
+- les contextes et leurs poids, et les contextes requis (multiplicatifs ; `"a|b"` prend le plus grand des deux) ;
 - la forme, la plage de profondeur, la taille, la teneur et la rareté ;
+- une température maximale facultative (`max_temperature_c`) : la plage de profondeur d'un corps se resserre au-dessus de cet isotherme de sa colonne (même tirage aléatoire, sans effet sur le déterminisme). Elle sert de fenêtre à huile : 120 °C pour le pétrole, 200 °C pour le gaz ;
 - à titre indicatif, les éléments obtenus après raffinage.
 
 Le catalogue est **copié dans le monde** à la génération et son hachage entre dans l'empreinte : modifier le fichier ne change jamais un monde existant. Les blocs sont désignés **par leur nom**. Leurs identifiants `u16` sont attribués à la génération et enregistrés avec le monde (`blocks.toml`), en attendant le format de sauvegarde des blocs.
@@ -260,9 +264,11 @@ Placement : le monde est découpé en **tuiles de 2 km** (2 km divise 100 km). C
 - Les tailles restent à l'échelle du jeu (non divisées par 10).
 - Rareté visée : environ 0,1 % du volume de roche des 500 premiers mètres sous un continent. Les métaux précieux sont environ dix fois plus rares que le fer, le charbon ou le sel.
 
-Sorties : `deposits.bin` (les corps), couches `deposits` (gisement dominant) et `traps` (provinces et pièges des types « carte seulement », pétrole et gaz pour l'instant).
+Sorties : `deposits.bin` (les corps), couches `deposits` (gisement dominant) et `traps` (provinces et pièges des types « carte seulement », pétrole et gaz pour l'instant, au plus quatre types). `traps` est un champ de bits (province `1 << 2k`, piège `1 << (2k + 1)` du k-ième type) : les provinces de plusieurs types se superposent, la carte les montre en hachures alternées.
 
-Le contexte dominant (`geo_context`) suit l'ordre ophiolite, point chaud, **orogène, puis arc** (un arc pris dans une collision est un orogène), rift, puis les contextes océaniques ou continentaux. Les abondances du catalogue sont calées sur la mesure : 0,11 % de blocs de minerai dans les 500 premiers mètres sous les continents de la graine 42.
+Le contexte dominant (`geo_context`) suit l'ordre ophiolite, point chaud, **orogène, puis arc** (un arc pris dans une collision est un orogène), rift, puis les contextes océaniques (dorsale, fosse, **marge passive**, océan) ou continentaux. Les abondances du catalogue sont calées sur la mesure : 0,11 % de blocs de minerai dans les 500 premiers mètres sous les continents de la graine 42.
+
+**Profondeur et température** : aucun type ne doit se trouver exclusivement dans une roche à plus de 60 °C. L'outil `geology depths <monde>` mesure, pour chaque type, la profondeur du sommet et de la base des corps et la température de la roche à ces profondeurs, avec la croûte et la température de surface réelles de chaque colonne. Il signale les types dont la majorité des corps commencent au-delà de 60 °C.
 
 Première liste (à affiner avec le gameplay) :
 
@@ -272,9 +278,9 @@ Première liste (à affiner avec le gameplay) :
 | Vieux cratons continentaux | fer rubané (magnétite, hématite) |
 | Orogène de collision, granites | étain (cassitérite), tungstène (wolframite), or filonien |
 | Ophiolites, roches ultrabasiques | chromite, nickel (pentlandite, avec cobalt), platine (avec palladium) |
-| Bassins sédimentaires | plomb-zinc (galène avec argent, sphalérite), charbon, sel gemme (avec potasse en toit), **pétrole et gaz (carte seulement)** |
+| Bassins sédimentaires (à terre, sur les plateaux et sur les marges passives) | plomb-zinc (galène avec argent, sphalérite), charbon, sel gemme (avec potasse en toit), **pétrole et gaz (carte seulement)** |
 | Plateaux marins et marges passives | manganèse (couche), phosphate (couche) |
-| Latérites tropicales | bauxite (aluminium), nickel latéritique (garniérite, avec cobalt) |
+| Latérites tropicales | bauxite (aluminium), nickel latéritique (garniérite, avec cobalt) sur les ophiolites ou les basaltes des points chauds |
 | Rivières en aval des massifs riches | placers d'or et d'étain |
 | Plages | placers côtiers d'ilménite (titane) |
 | Points chauds, basaltes | soufre, obsidienne |
@@ -314,7 +320,7 @@ Pendant la génération, une **fenêtre de progression** (visualiseur, `--genera
 - Graticule de latitude et de longitude : les lignes de latitude sont espacées selon `sin φ`.
 - Curseurs de jour de l'année et d'heure, avec superposition **jour/nuit** calculée par pixel à partir de `e_vis`, et couches climatiques évaluées à cet instant.
 - Infobulle sous le curseur : x, z, φ, λ et les valeurs des couches.
-- **Coupe verticale** : un trait tracé sur la carte (clic droit, glisser) ouvre une coupe 2D du sous-sol le long de ce trait. Elle montre les roches de la colonne, le Moho, les isothermes du sous-sol et les gisements. L'outil `geology` du crate voxel exporte la même coupe en PNG (`cargo run -p nascio-voxel --release --bin geology -- section <monde> --from x,z --to x,z --out f.png`) ; il mesure aussi les parts de roches et de minerais (`stats`) et trace les courbes de température du sous-sol (`geotherm`).
+- **Coupe verticale** : un trait tracé sur la carte (clic droit, glisser) ouvre une coupe 2D du sous-sol le long de ce trait. Elle montre les roches de la colonne, le Moho, les isothermes du sous-sol et les gisements. L'outil `geology` du crate voxel exporte la même coupe en PNG (`cargo run -p nascio-voxel --release --bin geology -- section <monde> --from x,z --to x,z --out f.png`) ; il mesure aussi les parts de roches et de minerais (`stats`), la profondeur et la température des gisements (`depths`) et trace les courbes de température du sous-sol (`geotherm`).
 - Couches `geo_context`, `sediment_thickness`, `weathering_depth`, `laterite`, `placer_source`, `deposits` (gisement dominant) et `traps`, avec leurs légendes (celles des gisements viennent du catalogue copié dans le monde).
 - Un clic choisit le **point d'apparition** (cellule surlignée) ; un bouton ou un double clic y passe en 3D.
 
