@@ -21,7 +21,7 @@ use nascio_core::consts::{CHUNK_SIZE, CHUNKS_PER_AXIS, WORLD_SIZE_F64};
 use nascio_core::math::smoothstep;
 use nascio_core::torus::wrap_f64;
 use nascio_voxel::Terrain;
-use nascio_voxel::mesh::MeshData;
+use nascio_voxel::mesh::{MATERIAL_GROUND, MATERIAL_WATER, MeshData};
 
 use crate::curvature::{CurvedMaterial, visible_range};
 use crate::fly::{Anchor, FlyCam, FlySettings, SharedTerrain, Streamer, Workers, to_bevy_mesh};
@@ -328,13 +328,15 @@ fn build_level(
             let px = f64::from(center.0) - half + i as f64 * s;
             let pz = f64::from(center.1) - half + j as f64 * s;
             let frozen = raw < wl && terrain.water_frozen(&terrain.climate(px, pz));
+            let mut material = [MATERIAL_GROUND, 1.0];
             let color = if frozen {
                 let c = blocks.linear(blocks.ids.ice.unwrap_or(blocks.ids.water));
                 [c[0], c[1], c[2], 1.0]
             } else if raw < wl {
                 let k = 1.15 - 0.75 * smoothstep(0.0, 400.0, f64::from(wl - raw)) as f32;
-                // Alpha < 1 tags water for the shader (the material is opaque).
-                [water[0] * k, water[1] * k, water[2] * k, 0.5]
+                // Opaque water: the colour above already darkens it with the depth.
+                material = [MATERIAL_WATER, 1.0];
+                [water[0] * k, water[1] * k, water[2] * k, 1.0]
             } else {
                 let rdx = f64::from(h.at(i + 1, j) - h.at(i - 1, j)) / (2.0 * s);
                 let rdz = f64::from(h.at(i, j + 1) - h.at(i, j - 1)) / (2.0 * s);
@@ -359,6 +361,7 @@ fn build_level(
             m.normals.push(normal);
             normals.push(normal);
             m.colors.push(color);
+            m.material.push(material);
         }
     }
     let v = |i: i64, j: i64| (i + j * (n + 1)) as u32;
@@ -379,7 +382,7 @@ fn build_level(
             ] {
                 // Water is flat: no crack to hide, and a skirt would show through the
                 // translucent chunk water next to the hole.
-                let wet = |e: u32| m.colors[e as usize][3] < 1.0;
+                let wet = |e: u32| m.material[e as usize][0] == MATERIAL_WATER;
                 if emitted(ni, nj) || (wet(e0) && wet(e1)) {
                     continue;
                 }
@@ -387,7 +390,9 @@ fn build_level(
                 for e in [e0, e1] {
                     let p = m.positions[e as usize];
                     let col = m.colors[e as usize];
+                    let material = m.material[e as usize];
                     m.positions.push([p[0], p[1] - skirt, p[2]]);
+                    m.material.push(material);
                     m.normals.push(normals[e as usize]);
                     m.colors
                         .push([col[0] * 0.7, col[1] * 0.7, col[2] * 0.7, col[3]]);

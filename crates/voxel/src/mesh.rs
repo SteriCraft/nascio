@@ -26,6 +26,22 @@ pub fn water_alpha(depth: u8) -> f32 {
     (1.0 - (1.0 - WATER_ALPHA) * (-d / WATER_DEPTH_SCALE).exp()).min(WATER_ALPHA_DEEP)
 }
 
+/// Albedo factor of chunk water of opacity `alpha`: from 0.95 over light rivers to 0.5 over a
+/// nearly opaque sea whose floor may not be loaded, towards the deep-water tone of the horizon
+/// (material channel `y`, [`MeshData::material`]).
+pub fn water_shade(alpha: f32) -> f32 {
+    let deep = ((alpha - WATER_ALPHA) / (WATER_ALPHA_DEEP - WATER_ALPHA)).clamp(0.0, 1.0);
+    0.95 + (0.5 - 0.95) * deep
+}
+
+/// Kinds of surface in the material channel (`x` of [`MeshData::material`]); `curvature.wesl`
+/// has the same constants (checked by a test in the viewer). Vertex alphas are true opacities.
+pub const MATERIAL_GROUND: f32 = 0.0;
+/// Water: sun glint, no snow, albedo times `y`.
+pub const MATERIAL_WATER: f32 = 1.0;
+/// Foliage: opaque, its sides keep their green under the seasonal snow.
+pub const MATERIAL_FOLIAGE: f32 = 2.0;
+
 /// Vertex arrays of one mesh.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MeshData {
@@ -33,6 +49,10 @@ pub struct MeshData {
     pub normals: Vec<[f32; 3]>,
     /// Linear RGBA.
     pub colors: Vec<[f32; 4]>,
+    /// Material channel (UV0 for the renderer): `x` the kind ([`MATERIAL_WATER`]…), `y` the
+    /// albedo factor of water ([`water_shade`]), 1 elsewhere (audit R3, F4: no tags in the
+    /// alpha).
+    pub material: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
 }
 
@@ -50,12 +70,14 @@ impl MeshData {
         corners: [[f32; 3]; 4],
         normal: [f32; 3],
         colors: [[f32; 4]; 4],
+        material: [f32; 2],
         flip: bool,
     ) {
         let base = self.positions.len() as u32;
         self.positions.extend_from_slice(&corners);
         self.normals.extend_from_slice(&[normal; 4]);
         self.colors.extend_from_slice(&colors);
+        self.material.extend_from_slice(&[material; 4]);
         if flip {
             self.indices.extend_from_slice(&[
                 base + 1,
@@ -110,10 +132,6 @@ struct Face {
     foliage: bool,
     ao: [u8; 4],
 }
-
-/// Vertex alpha of foliage faces: opaque material, but the shader keeps their sides green
-/// under the seasonal snow (water is below 0.99, other faces 1).
-pub const FOLIAGE_ALPHA: f32 = 0.995;
 
 /// Thickness of a [`Matter::Layer`] block, m.
 pub const LAYER_H: f32 = 0.125;
@@ -377,12 +395,13 @@ fn emit(
             }
         }
     }
-    let alpha = if f.water {
-        water_alpha(f.depth)
+    let alpha = if f.water { water_alpha(f.depth) } else { 1.0 };
+    let material = if f.water {
+        [MATERIAL_WATER, water_shade(alpha)]
     } else if f.foliage {
-        FOLIAGE_ALPHA
+        [MATERIAL_FOLIAGE, 1.0]
     } else {
-        1.0
+        [MATERIAL_GROUND, 1.0]
     };
     let mut colors = [0usize, 1, 2, 3].map(|k| {
         let rgb = tint.map_or(rgb, |t| t.at(corners[k][0], corners[k][2]));
@@ -402,7 +421,7 @@ fn emit(
     } else {
         &mut out.opaque
     };
-    target.push_quad(corners, normal, colors, flip);
+    target.push_quad(corners, normal, colors, material, flip);
 }
 
 #[cfg(test)]

@@ -208,6 +208,9 @@ pub struct CurvaturePlugin;
 
 impl Plugin for CurvaturePlugin {
     fn build(&self, app: &mut App) {
+        // Shared modules imported by curvature.wesl and sky.wesl (audit R2).
+        bevy::shader::load_shader_library!(app, "atmosphere.wesl");
+        bevy::shader::load_shader_library!(app, "sun.wesl");
         embedded_asset!(app, "curvature.wesl");
         embedded_asset!(app, "curvature_prepass.wesl");
         app.add_plugins(MaterialPlugin::<CurvedMaterial>::default());
@@ -327,5 +330,22 @@ mod tests {
         assert_eq!(c.radius(), None);
         let c = RenderConfig::from_toml("").unwrap();
         assert_eq!(c.radius(), Some(DEFAULT_RADIUS_M));
+    }
+
+    /// The material kinds of the shader are the mesher's (audit F4).
+    #[test]
+    fn shader_material_kinds_match_the_mesher() {
+        use nascio_voxel::mesh::{MATERIAL_FOLIAGE, MATERIAL_GROUND, MATERIAL_WATER};
+        let src = include_str!("curvature.wesl");
+        for (name, v) in [
+            ("GROUND", MATERIAL_GROUND),
+            ("WATER", MATERIAL_WATER),
+            ("FOLIAGE", MATERIAL_FOLIAGE),
+        ] {
+            let line = format!("const MATERIAL_{name}: f32 = {v:.1};");
+            assert!(src.contains(&line), "missing {line}");
+        }
+        // No alpha tag left.
+        assert!(!src.contains("0.99"));
     }
 }

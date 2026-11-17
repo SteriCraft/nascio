@@ -404,6 +404,7 @@ pub fn to_bevy_mesh(m: MeshData) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, m.positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, m.normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, m.colors)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, m.material)
     .with_inserted_indices(Indices::U32(m.indices))
 }
 

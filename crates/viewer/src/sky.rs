@@ -836,27 +836,119 @@ mod tests {
         }
     }
 
-    /// The `atmosphere` block of `src`, between its markers.
-    fn atmosphere_block(src: &str) -> &str {
-        let a = src.find("// <atmosphere>").expect("start marker");
-        let b = src.find("// </atmosphere>").expect("end marker");
-        &src[a..b]
-    }
-
     #[test]
-    fn sky_and_relief_share_one_atmosphere() {
-        let sky = atmosphere_block(include_str!("sky.wesl"));
-        let relief = atmosphere_block(include_str!("curvature.wesl"));
-        assert_eq!(sky, relief, "the atmosphere blocks differ");
-        // The Rust copies of the constants match the shaders.
+    fn rust_constants_match_the_shared_atmosphere() {
+        let air = include_str!("atmosphere.wesl");
         for line in [
             format!("const AIR_H: f32 = {AIR_H:.1};"),
             format!("const AIR_TAU: f32 = {AIR_TAU:.1};"),
             format!("const AIR_CLOUD_LOW: f32 = {AIR_CLOUD_LOW:.1};"),
             format!("const AIR_CLOUD_HIGH: f32 = {AIR_CLOUD_HIGH:.1};"),
         ] {
-            assert!(sky.contains(&line), "missing {line}");
+            assert!(air.contains(&line), "missing {line}");
         }
+        // Both shaders import the module instead of copying it.
+        for src in [include_str!("sky.wesl"), include_str!("curvature.wesl")] {
+            assert!(src.contains("import nascio_viewer::atmosphere::"));
+            assert!(src.contains("import nascio_viewer::sun::"));
+            assert!(!src.contains("fn air_colour") && !src.contains("fn local_sun"));
+        }
+    }
+
+    /// Line-by-line port of `local_sun` (sun.wesl), in f32 like the GPU: `(dir, e_vis, s)`.
+    fn local_sun_port(
+        dx: f32,
+        z_world: f32,
+        hour: f32,
+        dec: f32,
+        seam: [f32; 3],
+    ) -> ([f32; 3], f32, f32) {
+        let ss = |a: f32, b: f32, x: f32| {
+            let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        const WORLD: f32 = 100_000.0;
+        let z = z_world - (z_world / WORLD).floor() * WORLD;
+        let sin_phi = ((50_000.0 - z) / 50_000.0).clamp(-1.0, 1.0);
+        let cos_phi = (1.0 - sin_phi * sin_phi).max(0.0).sqrt();
+        let s = z.min(WORLD - z);
+        let w = ss(0.0, seam[0], s);
+        let (sd, cd) = ((dec * w).sin(), (dec * w).cos());
+        let h = hour + std::f32::consts::TAU * dx / WORLD;
+        let (sh, ch) = (h.sin(), h.cos());
+        let up = (sin_phi * sd + cos_phi * cd * ch).clamp(-1.0, 1.0);
+        let east = -cd * sh;
+        let north = sd * cos_phi - cd * ch * sin_phi;
+        let mut dir = [east, up, -north];
+        let mut e_vis = up.asin();
+        let r = 1.0 - ss(seam[1], seam[2], s);
+        if r > 0.0 {
+            e_vis -= r
+                * (std::f32::consts::FRAC_PI_2 - sin_phi.abs().asin()
+                    + 0.409_105_18 * w
+                    + 4f32.to_radians());
+            let len = east.hypot(north).max(1e-6);
+            let c = e_vis.cos();
+            dir = [c * east / len, e_vis.sin(), c * -north / len];
+        }
+        (dir, e_vis, s)
+    }
+
+    /// FNV-1a of a text, to pin the WGSL that `local_sun_port` mirrors.
+    fn fnv(text: &str) -> u64 {
+        text.bytes()
+            .filter(|&b| b != b'\r')
+            .fold(0xcbf2_9ce4_8422_2325, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+            })
+    }
+
+    /// The shaders' sun (via its port) is the sun of `nascio_core::astro`, everywhere: open
+    /// world, both sides of the seam, the twilight band and the season fade (audit R2).
+    #[test]
+    fn shader_sun_matches_core_astro() {
+        let src = include_str!("sun.wesl");
+        let f = &src[src.find("fn local_sun(").expect("local_sun")..];
+        assert_eq!(
+            fnv(f),
+            512_486_291_789_113_737,
+            "sun.wesl changed: update local_sun_port to match, then this hash"
+        );
+        let astro = nascio_core::astro::AstroConfig::default();
+        let seam = [
+            astro.s_fade as f32,
+            astro.s_dark as f32,
+            astro.s_light as f32,
+        ];
+        let mut worst = (0.0f64, 0.0f64);
+        for day in [0.0, 80.0, 172.0, 266.0, 355.0] {
+            let dec = nascio_core::astro::declination(day);
+            for hour in [-2.9f64, -1.2, 0.0, 0.7, 2.4] {
+                for z in [
+                    0.0, 30.0, 150.0, 400.0, 1_000.0, 2_500.0, 6_000.0, 20_000.0, 50_000.0,
+                    71_234.0, 97_500.0, 99_100.0, 99_870.0, 99_990.0,
+                ] {
+                    for dx in [-900.0f64, 0.0, 650.0] {
+                        let h = hour + TAU * dx / 100_000.0;
+                        let want = astro.sun_at(day, h, z);
+                        let wd = want.direction();
+                        let (d, e_vis, s) =
+                            local_sun_port(dx as f32, z as f32, hour as f32, dec as f32, seam);
+                        assert!((f64::from(s) - nascio_core::geo::seam_distance(z)).abs() < 0.01);
+                        let de = (f64::from(e_vis) - want.visible_elevation).abs();
+                        let dd = (0..3)
+                            .map(|k| (f64::from(d[k]) - wd[k]).abs())
+                            .fold(0.0, f64::max);
+                        worst = (worst.0.max(de), worst.1.max(dd));
+                    }
+                }
+            }
+        }
+        // f32 on the GPU: well under a hundredth of a degree.
+        assert!(
+            worst.0 < 1e-4 && worst.1 < 1e-4,
+            "worst |Δe_vis|, |Δdir|: {worst:?}"
+        );
     }
 
     #[test]
