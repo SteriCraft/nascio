@@ -33,6 +33,10 @@ pub struct ColumnIds {
     pub andesite: BlockId,
     pub granulite: BlockId,
     pub peridotite: BlockId,
+    /// Surface blocks of M6, `None` in older registries.
+    pub ice: Option<BlockId>,
+    pub snow: Option<BlockId>,
+    pub snow_layer: Option<BlockId>,
 }
 
 /// The registry with what meshing needs per id (matter, linear colour).
@@ -73,6 +77,9 @@ impl Blocks {
             andesite: id("andesite")?,
             granulite: id("granulite")?,
             peridotite: id("peridotite")?,
+            ice: registry.id("ice"),
+            snow: registry.id("snow"),
+            snow_layer: registry.id("snow_layer"),
         };
         let matter = registry.blocks.iter().map(|b| b.matter).collect();
         let linear = registry

@@ -324,7 +324,14 @@ fn build_level(
             let len = (dx * dx + 1.0 + dz * dz).sqrt();
             let normal = [(-dx / len) as f32, (1.0 / len) as f32, (-dz / len) as f32];
             let wl = h.water(i, j);
-            let color = if raw < wl {
+            let px = f64::from(center.0) - half + i as f64 * s;
+            let pz = f64::from(center.1) - half + j as f64 * s;
+            let frozen =
+                raw < wl && terrain.water_frozen(&terrain.climate(px, pz), wl.round() as i32 - 1);
+            let color = if frozen {
+                let c = blocks.linear(blocks.ids.ice.unwrap_or(blocks.ids.water));
+                [c[0], c[1], c[2], 1.0]
+            } else if raw < wl {
                 let k = 1.15 - 0.75 * smoothstep(0.0, 400.0, f64::from(wl - raw)) as f32;
                 // Alpha < 1 tags water for the shader (the material is opaque).
                 [water[0] * k, water[1] * k, water[2] * k, 0.5]
@@ -341,7 +348,7 @@ fn build_level(
                     top,
                     rdx.hypot(rdz),
                 );
-                let c = blocks.linear(block);
+                let c = terrain.surface_color(block, px, pz, f64::from(raw));
                 [c[0], c[1], c[2], 1.0]
             };
             m.positions.push([
@@ -598,7 +605,11 @@ pub fn ground_colors(terrain: &Terrain, res: usize) -> Vec<u8> {
                 let z = (j as f64 + 0.5) * cell;
                 let h = terrain.height_lod(x, z, cell);
                 let wl = terrain.water_level(x, z);
-                let c = if h < wl {
+                let frozen =
+                    h < wl && terrain.water_frozen(&terrain.climate(x, z), wl.round() as i32 - 1);
+                let c = if frozen {
+                    blocks.linear(blocks.ids.ice.unwrap_or(blocks.ids.water))
+                } else if h < wl {
                     let k = 1.15 - 0.75 * smoothstep(0.0, 400.0, wl - h) as f32;
                     [water[0] * k, water[1] * k, water[2] * k]
                 } else {
@@ -613,7 +624,7 @@ pub fn ground_colors(terrain: &Terrain, res: usize) -> Vec<u8> {
                         top,
                         dx.hypot(dz) / (2.0 * cell),
                     );
-                    blocks.linear(block)
+                    terrain.surface_color(block, x, z, h)
                 };
                 row.extend_from_slice(&[srgb(c[0]), srgb(c[1]), srgb(c[2]), 255]);
             }

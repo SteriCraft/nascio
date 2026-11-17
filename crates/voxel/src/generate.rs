@@ -147,7 +147,10 @@ impl ColumnSet {
     pub fn chunk_range(&self, underground: i32) -> std::ops::RangeInclusive<i32> {
         let (lo, hi) = self.top_range();
         let bottom = lo.div_euclid(CHUNK_SIZE) - underground;
-        let top = hi.max(self.water_range().1 - 1).div_euclid(CHUNK_SIZE);
+        // `hi + 1`: the snow cover sits above the top block.
+        let top = (hi + 1)
+            .max(self.water_range().1 - 1)
+            .div_euclid(CHUNK_SIZE);
         bottom..=top
     }
 
@@ -158,7 +161,7 @@ impl ColumnSet {
         let (lo, hi) = (cy * CHUNK_SIZE - 1, cy * CHUNK_SIZE + CHUNK_SIZE);
         let (lo_water, hi_water) = self.water_range();
         let all_solid = hi <= lo_top;
-        let all_fluid_or_air = lo > hi_top && (hi < lo_water || lo >= hi_water);
+        let all_fluid_or_air = lo > hi_top + 1 && (hi < lo_water || lo >= hi_water);
         !(all_solid || all_fluid_or_air)
     }
 
@@ -179,11 +182,16 @@ impl ColumnSet {
         let top = self.top(x, z);
         let ids = &terrain.blocks().ids;
         if y > top {
-            return if y < self.water_top(x, z) {
-                ids.water
-            } else {
-                AIR
-            };
+            let water_top = self.water_top(x, z);
+            if y < water_top {
+                return terrain.water_block(self.geo(x, z), y, water_top);
+            }
+            if y == top + 1
+                && let Some(l) = terrain.snow_layer(self.geo(x, z), top, self.slope(x, z))
+            {
+                return l;
+            }
+            return AIR;
         }
         let moho = self.moho(x, z);
         if y < moho {
@@ -287,7 +295,12 @@ mod tests {
             for cy in col.chunk_range(3) {
                 if !col.may_have_faces(cy) {
                     assert!(
-                        crate::mesh::mesh_chunk(&col.padded_chunk(&t, cy), t.blocks()).is_empty()
+                        crate::mesh::mesh_chunk(
+                            &col.padded_chunk(&t, cy),
+                            t.blocks(),
+                            &crate::ChunkTint::NONE
+                        )
+                        .is_empty()
                     );
                 }
             }
@@ -323,7 +336,12 @@ mod tests {
                 }
                 if !col.may_have_faces(cy) {
                     assert!(
-                        crate::mesh::mesh_chunk(&col.padded_chunk(&t, cy), t.blocks()).is_empty()
+                        crate::mesh::mesh_chunk(
+                            &col.padded_chunk(&t, cy),
+                            t.blocks(),
+                            &crate::ChunkTint::NONE
+                        )
+                        .is_empty()
                     );
                 }
             }

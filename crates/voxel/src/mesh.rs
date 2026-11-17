@@ -6,6 +6,7 @@
 
 use crate::block::{AIR, BlockId, Blocks, Matter};
 use crate::chunk::{N, PaddedChunk};
+use crate::terrain::ChunkTint;
 
 /// Brightness factor per occlusion level (0 = fully occluded corner, 3 = open).
 const AO_CURVE: [f32; 4] = [0.45, 0.65, 0.82, 1.0];
@@ -75,7 +76,8 @@ impl ChunkMesh {
 #[inline]
 fn face(blocks: &Blocks, block: BlockId, neighbour: BlockId) -> Option<bool> {
     match (blocks.matter(block), blocks.matter(neighbour)) {
-        (Matter::Solid, Matter::Empty | Matter::Fluid) => Some(false),
+        (Matter::Solid, Matter::Empty | Matter::Fluid | Matter::Layer) => Some(false),
+        (Matter::Layer, Matter::Empty | Matter::Fluid) => Some(false),
         (Matter::Fluid, Matter::Empty) => Some(true),
         _ => None,
     }
@@ -86,11 +88,16 @@ fn face(blocks: &Blocks, block: BlockId, neighbour: BlockId) -> Option<bool> {
 struct Face {
     block: BlockId,
     water: bool,
+    /// Thin layer (snow cover): drawn `LAYER_H` thick at the bottom of its cell.
+    layer: bool,
     ao: [u8; 4],
 }
 
-/// Greedy mesh of the inner 32³ of a padded chunk.
-pub fn mesh_chunk(p: &PaddedChunk, blocks: &Blocks) -> ChunkMesh {
+/// Thickness of a [`Matter::Layer`] block, m.
+pub const LAYER_H: f32 = 0.125;
+
+/// Greedy mesh of the inner 32³ of a padded chunk, grass tinted by `tint`.
+pub fn mesh_chunk(p: &PaddedChunk, blocks: &Blocks, tint: &ChunkTint) -> ChunkMesh {
     let mut out = ChunkMesh::default();
     if p.is_uniform(AIR) || p.blocks.iter().all(|&b| blocks.is_solid(b)) {
         return out;
@@ -121,7 +128,12 @@ pub fn mesh_chunk(p: &PaddedChunk, blocks: &Blocks) -> ChunkMesh {
                                 } else {
                                     corner_ao(p, blocks, nb, u, v)
                                 };
-                                Face { block, water, ao }
+                                Face {
+                                    block,
+                                    water,
+                                    layer: blocks.matter(block) == Matter::Layer,
+                                    ao,
+                                }
                             });
                     }
                 }
@@ -155,6 +167,7 @@ pub fn mesh_chunk(p: &PaddedChunk, blocks: &Blocks) -> ChunkMesh {
                         emit(
                             &mut out,
                             blocks.linear(f.block),
+                            (tint.grass == Some(f.block)).then_some(tint),
                             f,
                             d,
                             u,
@@ -196,6 +209,7 @@ fn corner_ao(p: &PaddedChunk, blocks: &Blocks, nb: [i32; 3], u: usize, v: usize)
 fn emit(
     out: &mut ChunkMesh,
     rgb: [f32; 3],
+    tint: Option<&ChunkTint>,
     f: Face,
     d: usize,
     u: usize,
@@ -218,10 +232,21 @@ fn emit(
         corner(a + w, b + h),
         corner(a, b + h),
     ];
+    if f.layer {
+        // The top of a layer is `LAYER_H` above its cell's floor; layers never stack, so a
+        // side quad is one block high.
+        let floor = corners.iter().map(|c| c[1]).fold(f32::INFINITY, f32::min);
+        for c in &mut corners {
+            if c[1] > floor || (d == 1 && sign > 0) {
+                c[1] += LAYER_H - 1.0;
+            }
+        }
+    }
     let alpha = if f.water { WATER_ALPHA } else { 1.0 };
-    let mut colors = f.ao.map(|o| {
-        let k = AO_CURVE[usize::from(o)];
-        [rgb[0] * k, rgb[1] * k, rgb[2] * k, alpha]
+    let mut colors = [0usize, 1, 2, 3].map(|k| {
+        let rgb = tint.map_or(rgb, |t| t.at(corners[k][0], corners[k][2]));
+        let a = AO_CURVE[usize::from(f.ao[k])];
+        [rgb[0] * a, rgb[1] * a, rgb[2] * a, alpha]
     });
     // Anisotropy fix: split along the diagonal joining the brighter pair.
     let flip = u16::from(f.ao[0]) + u16::from(f.ao[2]) < u16::from(f.ao[1]) + u16::from(f.ao[3]);
@@ -268,7 +293,7 @@ mod tests {
     fn flat_ground_is_one_quad() {
         let (b, stone, _) = ids();
         let p = padded(|_, y, _| if y < 10 { stone } else { AIR });
-        let m = mesh_chunk(&p, &b);
+        let m = mesh_chunk(&p, &b, &ChunkTint::NONE);
         assert_eq!(m.opaque.quad_count(), 1);
         assert!(m.water.is_empty());
         assert_eq!(m.opaque.normals[0], [0.0, 1.0, 0.0]);
@@ -279,7 +304,7 @@ mod tests {
     fn single_block_has_six_faces_facing_out() {
         let (b, stone, _) = ids();
         let p = padded(|x, y, z| if (x, y, z) == (4, 5, 6) { stone } else { AIR });
-        let m = mesh_chunk(&p, &b);
+        let m = mesh_chunk(&p, &b, &ChunkTint::NONE);
         assert_eq!(m.opaque.quad_count(), 6);
         // Each triangle's winding must agree with its normal (counter-clockwise front).
         for t in m.opaque.indices.chunks(3) {
@@ -304,7 +329,7 @@ mod tests {
             3..20 => water,
             _ => AIR,
         });
-        let m = mesh_chunk(&p, &b);
+        let m = mesh_chunk(&p, &b, &ChunkTint::NONE);
         assert_eq!(m.water.quad_count(), 1);
         assert_eq!(m.opaque.quad_count(), 1);
         assert!(m.water.positions.iter().all(|p| p[1] == 20.0));
@@ -313,8 +338,8 @@ mod tests {
     #[test]
     fn buried_and_empty_chunks_have_no_mesh() {
         let (b, stone, _) = ids();
-        assert!(mesh_chunk(&padded(|_, _, _| stone), &b).is_empty());
-        assert!(mesh_chunk(&padded(|_, _, _| AIR), &b).is_empty());
+        assert!(mesh_chunk(&padded(|_, _, _| stone), &b, &ChunkTint::NONE).is_empty());
+        assert!(mesh_chunk(&padded(|_, _, _| AIR), &b, &ChunkTint::NONE).is_empty());
     }
 
     #[test]
@@ -324,7 +349,7 @@ mod tests {
         let total: usize = col
             .chunk_range(1)
             .map(|cy| {
-                mesh_chunk(&col.padded_chunk(&t, cy), t.blocks())
+                mesh_chunk(&col.padded_chunk(&t, cy), t.blocks(), &ChunkTint::NONE)
                     .opaque
                     .quad_count()
             })

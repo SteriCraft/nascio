@@ -17,7 +17,8 @@ use nascio_worldgen::erosion::upsample::{Detail, baked_min_spacing, ruggedness};
 use nascio_worldgen::grid::PeriodicGrid;
 use nascio_worldgen::world_io::{Layer, World};
 
-use crate::block::{BlockId, Blocks};
+use crate::block::{BlockId, Blocks, srgb_to_linear};
+use crate::climate::{ColumnClimate, SurfaceClimate};
 use crate::geology::{Class, ColumnGeo, Geology};
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +46,32 @@ pub struct VoxelConfig {
     pub underground_chunks: i32,
     /// The crust keeps at least this thickness of stone above the magma, m.
     pub min_crust_m: i32,
+    /// Glaciers where the warmest month at the surface is below this (and on the ice biome), °C.
+    pub glacier_warm_c: f64,
+    /// A glacier is snow-covered (accumulation) where its warmest month is below this, bare
+    /// ice above, °C.
+    pub glacier_snow_c: f64,
+    /// Snow thickness on the accumulation zone of glaciers, m.
+    pub glacier_snow_m: i32,
+    /// Ice thickness on flat ground and at the bare-rock slope (`rock_slope`), m.
+    pub ice_max_m: f64,
+    pub ice_min_m: f64,
+    /// Thin snow cover (`snow_layer`) off the glaciers where the warmest month is below this, °C.
+    pub snow_layer_warm_c: f64,
+    /// Sea and lake water carries permanent ice where its warmest month is below this, °C.
+    pub water_ice_warm_c: f64,
+    /// Thickness of sea and lake ice, m.
+    pub water_ice_m: i32,
+    /// Grass colours (sRGB) of a wet, a dry and a cold climate, blended by the climate.
+    pub grass_wet: [u8; 3],
+    pub grass_dry: [u8; 3],
+    pub grass_cold: [u8; 3],
+    /// Annual precipitation of fully wet and fully dry grass, mm.
+    pub grass_wet_mm: f64,
+    pub grass_dry_mm: f64,
+    /// Annual mean temperature (at the surface) of fully warm and fully cold grass, °C.
+    pub grass_warm_c: f64,
+    pub grass_cold_c: f64,
     /// Soil of each biome (`[[voxel.soils]]`); biomes not listed use `temperate forest`.
     pub soils: Vec<BiomeSoil>,
 }
@@ -67,16 +94,16 @@ fn default_soils() -> Vec<BiomeSoil> {
         // Land cells of the ocean biome (coastal strips above the sea): beach sand.
         ("ocean", "sand", "sand", 3),
         ("lake", "mud", "mud", 2),
-        // Bare ground until the ice of the glaciers (M6, step 2).
+        // Under the glacier ice, and bare where too steep for ice.
         ("ice cap / glacier", "gravel", "gravel", 1),
         ("tundra", "moss", "dirt", 1),
         ("boreal forest", "podzol", "dirt", 2),
         ("temperate forest", "grass", "dirt", 3),
-        ("mediterranean", "dry_grass", "dirt", 2),
-        ("steppe", "dry_grass", "dirt", 3),
+        ("mediterranean", "grass", "dirt", 2),
+        ("steppe", "grass", "dirt", 3),
         ("hot desert", "sand", "sand", 3),
         ("cold desert", "gravel", "gravel", 1),
-        ("savanna", "dry_grass", "red_soil", 3),
+        ("savanna", "grass", "red_soil", 3),
         ("tropical rainforest", "grass", "red_soil", 3),
         ("mangrove", "mud", "mud", 3),
         ("marsh", "mud", "mud", 2),
@@ -140,6 +167,21 @@ impl Default for VoxelConfig {
             gravel_depth_m: 2,
             underground_chunks: 2,
             min_crust_m: 50,
+            glacier_warm_c: 0.0,
+            glacier_snow_c: -3.0,
+            glacier_snow_m: 2,
+            ice_max_m: 12.0,
+            ice_min_m: 2.0,
+            snow_layer_warm_c: 2.0,
+            water_ice_warm_c: 0.5,
+            water_ice_m: 2,
+            grass_wet: [64, 134, 44],
+            grass_dry: [168, 158, 82],
+            grass_cold: [112, 124, 74],
+            grass_wet_mm: 1_200.0,
+            grass_dry_mm: 300.0,
+            grass_warm_c: 10.0,
+            grass_cold_c: -2.0,
             soils: default_soils(),
         }
     }
@@ -177,6 +219,41 @@ pub struct Terrain {
     geology: Option<Geology>,
     /// Soil by biome code.
     soils: [Soil; biomes::code::COUNT],
+    /// Surface climate (`None`: worlds made before M4, temperate everywhere).
+    climate: Option<SurfaceClimate>,
+}
+
+/// Grass tint of the four corners of a chunk column, for meshing: bilinear inside the chunk,
+/// so neighbouring chunks share their edge colours.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChunkTint {
+    /// The tinted block (grass), `None`: no tint.
+    pub grass: Option<BlockId>,
+    /// Linear RGB at local `(0, 0)`, `(32, 0)`, `(0, 32)`, `(32, 32)`.
+    pub corners: [[f32; 3]; 4],
+}
+
+impl ChunkTint {
+    pub const NONE: Self = Self {
+        grass: None,
+        corners: [[1.0; 3]; 4],
+    };
+
+    /// Colour at local horizontal position `(x, z)` in `[0, 32]`.
+    pub fn at(&self, x: f32, z: f32) -> [f32; 3] {
+        let (u, v) = (x / 32.0, z / 32.0);
+        let c = &self.corners;
+        std::array::from_fn(|k| {
+            let a = c[0][k] + (c[1][k] - c[0][k]) * u;
+            let b = c[2][k] + (c[3][k] - c[2][k]) * u;
+            a + (b - a) * v
+        })
+    }
+}
+
+fn smoothstep(e0: f64, e1: f64, x: f64) -> f64 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// Radius (cells) of the box blur applied three times to the Moho: the tectonic grid changes
@@ -241,7 +318,7 @@ impl Terrain {
         };
         let blocks = Blocks::new(world.blocks()?)?;
         let geology = Geology::from_world(world, &blocks)?;
-        Ok(Self::new(
+        let mut t = Self::new(
             world.config.seed,
             &world.config.erosion,
             &tectonic,
@@ -255,7 +332,9 @@ impl Terrain {
                 .layer("moho_depth")
                 .map(|l| smooth(&grid_f32(l), MOHO_SMOOTH_CELLS)),
         )
-        .with_geology(blocks, geology))
+        .with_geology(blocks, geology);
+        t.climate = SurfaceClimate::from_world(world, &t.elevation);
+        Ok(t)
     }
 
     /// Sets the block registry and the geology.
@@ -274,11 +353,126 @@ impl Terrain {
         self.geology.as_ref()
     }
 
-    /// Geology of the column at `(x, z)` (default without geology).
+    /// Geology and climate of the column at `(x, z)` (defaults without them).
     pub fn column_geo(&self, x: f64, z: f64) -> ColumnGeo {
-        self.geology
+        let mut c = self
+            .geology
             .as_ref()
-            .map_or_else(ColumnGeo::default, |g| g.column(x, z))
+            .map_or_else(ColumnGeo::default, |g| g.column(x, z));
+        c.climate = self.climate(x, z);
+        c
+    }
+
+    /// Surface climate at `(x, z)`.
+    pub fn climate(&self, x: f64, z: f64) -> ColumnClimate {
+        self.climate
+            .as_ref()
+            .map_or_else(ColumnClimate::default, |c| c.column(x, z))
+    }
+
+    fn lapse(&self) -> f64 {
+        self.climate.as_ref().map_or(0.0065, |c| c.lapse)
+    }
+
+    /// Warmest-month temperature at height `y` of a column, °C.
+    pub fn t_warm(&self, c: &ColumnClimate, y: i32) -> f64 {
+        f64::from(c.t_warm_sl) - self.lapse() * f64::from(y.max(0))
+    }
+
+    /// Glacier of a column whose top solid block is at `top`: `(ice thickness, snow on top)`.
+    fn glacier(&self, col: &ColumnGeo, top: i32, slope: f64) -> Option<(i32, i32)> {
+        let c = &self.cfg;
+        self.blocks.ids.ice?;
+        if top <= c.beach_high_m || slope > c.rock_slope {
+            return None;
+        }
+        let tw = self.t_warm(&col.climate, top);
+        let ice_biome = self.geology.is_some() && col.biome == biomes::code::ICE;
+        if !(tw < c.glacier_warm_c || ice_biome) {
+            return None;
+        }
+        let ice = (c.ice_max_m + (c.ice_min_m - c.ice_max_m) * slope / c.rock_slope).round() as i32;
+        let ice = ice.max(1);
+        let snow = if self.blocks.ids.snow.is_some() && tw < c.glacier_snow_c {
+            c.glacier_snow_m.clamp(0, ice)
+        } else {
+            0
+        };
+        Some((ice, snow))
+    }
+
+    /// Thin snow cover in the air cell above the top block `top` of a column, if any.
+    pub fn snow_layer(&self, col: &ColumnGeo, top: i32, slope: f64) -> Option<BlockId> {
+        let id = self.blocks.ids.snow_layer?;
+        if self.glacier(col, top, slope).is_some() {
+            return None;
+        }
+        (self.t_warm(&col.climate, top + 1) < self.cfg.snow_layer_warm_c).then_some(id)
+    }
+
+    /// Whether sea or lake water whose highest block is `level` carries permanent ice.
+    pub fn water_frozen(&self, c: &ColumnClimate, level: i32) -> bool {
+        self.blocks.ids.ice.is_some() && self.t_warm(c, level) < self.cfg.water_ice_warm_c
+    }
+
+    /// Block at height `y` in the water of a column (`top < y < water_top`): water, or ice in
+    /// its top `water_ice_m` blocks where it freezes.
+    #[inline]
+    pub fn water_block(&self, col: &ColumnGeo, y: i32, water_top: i32) -> BlockId {
+        let ids = &self.blocks.ids;
+        match ids.ice {
+            Some(ice)
+                if y >= water_top - self.cfg.water_ice_m
+                    && self.water_frozen(&col.climate, water_top - 1) =>
+            {
+                ice
+            }
+            _ => ids.water,
+        }
+    }
+
+    /// Grass colour (linear RGB) at `(x, z)` whose surface is at height `h`.
+    pub fn grass_color(&self, x: f64, z: f64, h: f64) -> [f32; 3] {
+        let c = &self.cfg;
+        let k = self.climate(x, z);
+        let t = f64::from(k.t_mean_sl) - self.lapse() * h.max(0.0);
+        let dry = smoothstep(c.grass_wet_mm, c.grass_dry_mm, f64::from(k.precip)) as f32;
+        let cold = smoothstep(c.grass_warm_c, c.grass_cold_c, t) as f32;
+        let lin = |rgb: [u8; 3]| rgb.map(|v| srgb_to_linear(f32::from(v) / 255.0));
+        let (wet, dryc, coldc) = (lin(c.grass_wet), lin(c.grass_dry), lin(c.grass_cold));
+        std::array::from_fn(|i| {
+            let base = wet[i] + (dryc[i] - wet[i]) * dry;
+            base + (coldc[i] - base) * cold
+        })
+    }
+
+    /// Display colour (linear RGB) of `block` at the top of column `(x, z)` of height `h`:
+    /// its registry colour, the climate tint for grass.
+    pub fn surface_color(&self, block: BlockId, x: f64, z: f64, h: f64) -> [f32; 3] {
+        if block == self.blocks.ids.grass {
+            self.grass_color(x, z, h)
+        } else {
+            self.blocks.linear(block)
+        }
+    }
+
+    /// Grass tint of chunk column `(cx, cz)` for [`crate::mesh_chunk`].
+    pub fn chunk_tint(&self, cx: i32, cz: i32) -> ChunkTint {
+        let size = f64::from(nascio_core::consts::CHUNK_SIZE);
+        let corner = |dx: f64, dz: f64| {
+            let x = (f64::from(cx) + dx) * size;
+            let z = (f64::from(cz) + dz) * size;
+            self.grass_color(x, z, self.height(x, z))
+        };
+        ChunkTint {
+            grass: Some(self.blocks.ids.grass),
+            corners: [
+                corner(0.0, 0.0),
+                corner(1.0, 0.0),
+                corner(0.0, 1.0),
+                corner(1.0, 1.0),
+            ],
+        }
     }
 
     /// Sets the Moho depth grid (m below sea level, positive downwards).
@@ -331,6 +525,7 @@ impl Terrain {
         });
         let blocks = Blocks::builtin();
         Self {
+            climate: None,
             soils: resolve_soils(&cfg, &blocks),
             cfg,
             elevation,
@@ -465,7 +660,21 @@ impl Terrain {
         depth: i32,
     ) -> (BlockId, Class) {
         let ids = &self.blocks.ids;
-        let soil = self.soil(col, top, slope);
+        let mut soil = self.soil(col, top, slope);
+        if let Some((ice, snow)) = self.glacier(col, top, slope) {
+            // Ice and snow hold no ore (class `Soil`); the soil under them is gone.
+            if depth < snow
+                && let Some(b) = ids.snow
+            {
+                return (b, Class::Soil);
+            }
+            if depth < ice
+                && let Some(b) = ids.ice
+            {
+                return (b, Class::Soil);
+            }
+            soil.depth = 0;
+        }
         let soil_depth = soil.depth;
         if depth < soil_depth {
             return (if depth == 0 { soil.top } else { soil.under }, soil.class);
@@ -495,9 +704,13 @@ impl Terrain {
         (g.basement_block(ids, col, fx, fz, u), Class::Basement)
     }
 
-    /// Top block of column `(x, z)` (world block coordinates) without ore (horizon colours).
+    /// Top block of column `(x, z)` (world block coordinates) without ore, snow cover
+    /// included (horizon colours).
     pub fn top_block(&self, x: i32, z: i32, top: i32, slope: f64) -> BlockId {
         let col = self.column_geo(f64::from(x) + 0.5, f64::from(z) + 0.5);
+        if let Some(l) = self.snow_layer(&col, top, slope) {
+            return l;
+        }
         self.rock_block(&col, x, z, top, slope, i32::MIN / 2, 0).0
     }
 }

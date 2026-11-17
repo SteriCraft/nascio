@@ -102,6 +102,15 @@ Chaque jalon se termine par une revue avec l'auteur. On ne passe pas au jalon su
 - Biomes et climat dans les chunks (sol, végétation provisoire, neige, glace), eau des rivières et des lacs.
 - Préparation pour le serveur : implémentation du stockage des deltas (`generate ⊕ delta`), mesures de performance (chunks par seconde).
 
+**Plan validé (2026-11-17)**. Une étape à la fois ; à la fin de chaque étape, un court rapport, puis l'auteur vérifie dans le visualiseur. Les vérifications approfondies se font à la fin du jalon et à l'audit.
+1. **Sol selon le biome** — fait. L'herbe est un seul bloc partout : sa couleur varie selon le climat, avec des transitions en dégradé (même une fois texturée).
+2. **Neige et glace permanentes** — fait : bloc `ice` (teinté de bleu) pour les glaciers et la banquise (mer et lacs) ; bloc `snow` (blanc) pour la neige permanente ; une **surcouche de neige** fine qui peut s'accumuler (à la manière de Minecraft). La neige saisonnière reste un effet de rendu jusqu'à la météo.
+3. **Eau des rivières** : tracé lissé le long de `flow_direction` (distances par `torus::delta`), chenal creusé (largeur et profondeur des couches), surface de l'eau qui ne remonte jamais vers l'aval, paliers sur les fortes pentes, raccord avec les lacs et la mer. De l'eau à partir d'environ 1,5 m de large ; vers l'aval, un ruisseau garde au moins la plus petite largeur atteinte jusqu'à son lac ou à la mer. Mêmes blocs d'eau que la mer, transparents et teintés de bleu, plus sombres et plus opaques avec la profondeur. Pas d'animation ni d'écoulement.
+4. **Végétation provisoire** : un seul modèle d'arbre fixe, de type « sapin », quel que soit le biome ; des cactus de 3 blocs dans le désert chaud. Points de départ des troncs procéduraux et déterministes (hachage des coordonnées du monde), densité selon le biome ; un arbre peut déborder sur le chunk voisin. Une liste d'arbres par biome est prévue, à remplir plus tard (étape « Végétation » dédiée).
+5. **Stockage des deltas** : `DeltaStore` (blocs modifiés en valeur absolue, structure triée, palette au-delà d'un seuil), fichiers de région dans `world-<seed>/deltas/` avec la version du générateur et l'empreinte du monde ; outil de pose et de destruction dans le visualiseur (futur « god mode »).
+6. **Performance** : binaire `chunkbench` (génération, maillage, 1 et N cœurs). Pas de cible fixée.
+7. **Vérification et clôture** : vues de dessus en PNG, captures, `generator_version`, spec, décisions.
+
 ## Audit — Revue complète avant la phase « Serveur et réseau »
 Audit complet du projet par Fable, à partir des derniers benchmarks du PC Windows (RTX 5060) et du portable Linux de référence (RTX 3050 Mobile). Il couvre :
 - le déterminisme et le respect des invariants de `CLAUDE.md` (tore, coordonnées entières, RNG, bruit périodique) ;

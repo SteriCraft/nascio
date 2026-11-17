@@ -44,6 +44,8 @@ pub struct ColumnGeo {
     pub river: bool,
     /// Biome code ([`biomes::code`]) at the warped position.
     pub biome: u8,
+    /// Surface climate (set by [`crate::Terrain::column_geo`]).
+    pub climate: crate::climate::ColumnClimate,
     pub arid: bool,
 }
 
@@ -182,6 +184,7 @@ impl Geology {
                 .biome
                 .as_ref()
                 .map_or(biomes::code::TEMPERATE_FOREST, |b| near(b, wx, wz)),
+            climate: Default::default(),
             arid: self
                 .precipitation
                 .as_ref()

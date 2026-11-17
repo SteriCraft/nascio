@@ -4,6 +4,7 @@
 
 pub mod block;
 pub mod chunk;
+pub mod climate;
 pub mod generate;
 pub mod geology;
 pub mod mesh;
@@ -13,4 +14,4 @@ pub mod terrain;
 pub use chunk::{Chunk, ChunkDeltas, NoDeltas, PaddedChunk};
 pub use generate::{ColumnSet, chunk_at, generate_chunk};
 pub use mesh::{ChunkMesh, MeshData, mesh_chunk};
-pub use terrain::{Terrain, VoxelConfig};
+pub use terrain::{ChunkTint, Terrain, VoxelConfig};

@@ -421,13 +421,18 @@ pub fn stream_chunks(
                     let tx = s.tx.clone();
                     workers.pool.spawn(move || {
                         let col = ColumnSet::new(&terrain, key.0, key.1);
+                        let tint = terrain.chunk_tint(key.0, key.1);
                         let meshes = col
                             .chunk_range(underground)
                             .filter(|&cy| col.may_have_faces(cy))
                             .map(|cy| {
                                 (
                                     cy,
-                                    mesh_chunk(&col.padded_chunk(&terrain, cy), terrain.blocks()),
+                                    mesh_chunk(
+                                        &col.padded_chunk(&terrain, cy),
+                                        terrain.blocks(),
+                                        &tint,
+                                    ),
                                 )
                             })
                             .filter(|(_, m)| !m.is_empty())

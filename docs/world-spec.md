@@ -205,7 +205,7 @@ Classification à partir des harmoniques de température et de précipitations, 
 Sorties : `geo_context` (contexte dominant), `sediment_thickness` (m), `weathering_depth` (m) et `laterite` (0 à 1).
 
 **Colonne verticale** (de haut en bas) :
-1. **Sol** de 0 à 3 m, selon le biome et la pente. On trouve du **sable de quartz** sur les plages, les déserts chauds et les fonds marins peu profonds, et du **gravier** sur le lit des rivières. Chaque biome a un bloc de surface posé sur un bloc de sol, sur une épaisseur donnée *(config `[[voxel.soils]]`)* : herbe sur terre (forêt tempérée), herbe sèche (méditerranéen, steppe ; sur sol rouge en savane), mousse (toundra), podzol (forêt boréale), herbe sur sol rouge (forêt tropicale), vase (mangrove, marais, fonds de lac), gravier (désert froid), sable (désert chaud, bandes côtières). L'épaisseur diminue avec la pente jusqu'à la roche nue.
+1. **Sol** de 0 à 3 m, selon le biome et la pente. On trouve du **sable de quartz** sur les plages, les déserts chauds et les fonds marins peu profonds, et du **gravier** sur le lit des rivières. Chaque biome a un bloc de surface posé sur un bloc de sol, sur une épaisseur donnée *(config `[[voxel.soils]]`)* : herbe sur terre (forêt tempérée, méditerranéen, steppe), herbe sur sol rouge (savane, forêt tropicale), mousse (toundra), podzol (forêt boréale), vase (mangrove, marais, fonds de lac), gravier (désert froid), sable (désert chaud, bandes côtières). L'épaisseur diminue avec la pente jusqu'à la roche nue. L'herbe est un seul bloc partout : sa couleur suit le climat (précipitations et température moyenne annuelles, en dégradé continu), dans les chunks comme dans l'horizon.
 2. **Altérites** : régolithe, ou latérite en climat tropical humide. Épaisseur `weathering_depth` *(config)*, nulle sur les fortes pentes ; sous climat tropical, le régolithe (saprolite) tient sur des pentes plus fortes.
 3. **Couverture sédimentaire**, d'épaisseur `sediment_thickness`, **jusqu'à environ 500 m** *(config)* :
    - épaisse dans les bassins (plaines continentales basses), les rifts, les deltas et cônes de dépôt (dépôts de l'érosion), et sur les plateaux ;
@@ -290,7 +290,12 @@ Première liste (à affiner avec le gameplay) :
 ## 5. Génération des chunks (`nascio-voxel`)
 - `generate_chunk(world: &WorldMacro, pos: ChunkPos) -> Chunk` est une fonction **pure et déterministe**.
 - L'altitude de surface vient de l'interpolation bicubique périodique de la grille de 32 m, plus un bruit de détail périodique dont l'amplitude dépend du contexte (rugueux en montagne, doux en plaine).
-- Le contenu vertical suit la colonne géologique du §4.6. L'eau va jusqu'à y = 0 pour les océans, et jusqu'au niveau des lacs et des rivières. Glace et neige dépendent du climat.
+- Le contenu vertical suit la colonne géologique du §4.6. L'eau va jusqu'à y = 0 pour les océans, et jusqu'au niveau des lacs et des rivières.
+- **Glace et neige permanentes** *(config `[voxel]`)*, selon la température du mois le plus chaud ramenée à la hauteur du bloc par le gradient vertical :
+  - **glacier** (biome glace, ou mois le plus chaud sous 0 °C) : bloc `ice` sur 12 m à plat et 2 m à la pente de la roche nue, sous 2 m de `snow` là où le mois le plus chaud reste sous −3 °C (zone d'accumulation) ; glace à nu au-dessus (zone d'ablation) ;
+  - **surcouche de neige** (`snow_layer`, 1/8 de bloc, dans la cellule d'air au-dessus du sol) hors glacier, là où le mois le plus chaud reste sous 2 °C ;
+  - **banquise** : 2 m de glace au sommet de la mer ou d'un lac dont le mois le plus chaud reste sous 0,5 °C.
+  La neige saisonnière reste un effet de rendu jusqu'à la météo.
 - **Bruit périodique** : bruit de gradient sur réseau, avec un espacement de réseau qui **divise 100 000** (16, 20, 25, 32, 40, 50, 80, 100, 125, 160, 200, 250, 400, 500, 625, 800, 1 000…). Le hachage des nœuds se fait modulo `100 000 / espacement`.
 - Les identifiants de bloc sont des `u16`, avec un registre de blocs (nom, couleur provisoire, propriétés physiques de base). Les blocs sont désignés par leur nom ; les identifiants sont attribués à la génération du monde (blocs de la colonne, puis blocs du catalogue des gisements) et enregistrés dans `blocks.toml`.
 - Les grottes, les structures et le stockage des modifications des joueurs viendront plus tard. On prévoit seulement l'interface : `Chunk = generate(pos) ⊕ delta(pos)`.
