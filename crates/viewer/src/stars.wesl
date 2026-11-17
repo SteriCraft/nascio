@@ -28,6 +28,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     var c = vec3<f32>(1.0);
 @if(VERTEX_COLORS)
     c = in.color.rgb;
+    // Round points: a soft radial profile over the quad (uv from -1 to 1), not squares.
+    var r2 = 0.0;
+@if(VERTEX_UVS_A)
+    r2 = dot(in.uv, in.uv);
+    if r2 >= 1.0 {
+        discard;
+    }
+    c *= 2.2 * exp(-5.0 * r2) * (1.0 - smoothstep(0.6, 1.0, r2));
     // Additive (premultiplied blending with a zero alpha), tone mapped like the sky.
     var out = vec4<f32>(c * stars.u.x, 0.0);
 @if(TONEMAP_IN_SHADER) {

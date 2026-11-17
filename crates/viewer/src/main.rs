@@ -69,6 +69,9 @@ struct Args {
     /// Disable the horizon.
     #[arg(long)]
     no_horizon: bool,
+    /// Force the weather cloud cover everywhere, 0 to 1 (captures; default: the climate).
+    #[arg(long)]
+    clouds: Option<f64>,
     /// Capture the window once the scene is loaded, then quit.
     #[arg(long)]
     screenshot: Option<PathBuf>,
@@ -228,6 +231,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         curvature_radius_m: render_cfg.radius(),
         shadows: !args.no_shadows,
         vsync: !args.no_vsync,
+        fixed_clouds: args.clouds.map(|c| c.clamp(0.0, 1.0)),
         ..default()
     };
 
@@ -256,7 +260,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         },
         ..default()
     };
-    if bench_file.is_some() {
+    if bench_file.is_some() || args.screenshot.is_some() {
         // Exactly 1920x1080 physical pixels whatever the desktop scaling.
         window.resolution =
             bevy::window::WindowResolution::new(1920, 1080).with_scale_factor_override(1.0);
@@ -290,7 +294,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     .init_resource::<fly::UiCapture>()
     .init_resource::<fly::HudState>()
     .init_resource::<horizon::HorizonStats>()
-    .add_systems(Startup, (setup, sky::setup_sky))
+    .add_systems(Startup, (setup, sky::setup_sky).chain())
     .add_systems(
         EguiPrimaryContextPass,
         (
@@ -358,8 +362,12 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
     mut buffers: ResMut<Assets<bevy::render::storage::ShaderBuffer>>,
     mut materials: ResMut<Assets<curvature::CurvedMaterial>>,
+    terrain: Res<fly::SharedTerrain>,
 ) {
     let maps = sky::ClimateMaps::new(&source.0, &mut images);
+    let ground = sky::GroundAlbedo::new(&terrain.0, &mut images);
+    let ground_handle = ground.0.clone();
+    commands.insert_resource(ground);
     let climate = maps.texture.clone();
     let frame = curvature::CurvedFrame::new(&mut buffers);
     let frame_handle = frame.0.clone();
@@ -405,6 +413,7 @@ fn setup(
         },
         frame_handle.clone(),
         climate.clone(),
+        ground_handle.clone(),
     ));
     let water = materials.add(curvature::material(
         StandardMaterial {
@@ -417,6 +426,7 @@ fn setup(
         },
         frame_handle.clone(),
         climate.clone(),
+        ground_handle.clone(),
     ));
     commands.insert_resource(fly::TerrainMaterials { opaque, water });
     let horizon = materials.add(curvature::material(
@@ -431,6 +441,7 @@ fn setup(
         },
         frame_handle.clone(),
         climate.clone(),
+        ground_handle.clone(),
     ));
     commands.insert_resource(horizon::HorizonMaterial(horizon));
 }

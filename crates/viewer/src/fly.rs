@@ -63,6 +63,8 @@ pub struct FlySettings {
     pub star_mag_limit: f64,
     /// Vertical sync of the window (`--no-vsync` turns it off at start).
     pub vsync: bool,
+    /// Weather cloud cover forced everywhere (`--clouds`, captures); `None` follows the climate.
+    pub fixed_clouds: Option<f64>,
 }
 
 impl Default for FlySettings {
@@ -77,6 +79,7 @@ impl Default for FlySettings {
             curvature_radius_m: crate::curvature::RenderConfig::default().radius(),
             star_mag_limit: crate::stars::DEFAULT_LIMIT,
             vsync: true,
+            fixed_clouds: None,
         }
     }
 }

@@ -573,6 +573,55 @@ pub fn update_horizon(
 }
 
 /// The level-0 hole must contain every chunk the view distance can show.
+/// Colours of the world's surface on a `res × res` periodic grid, as seen from far: the
+/// horizon's colours (top block, water darkened with depth), RGBA8 sRGB, row-major in `z`.
+pub fn ground_colors(terrain: &Terrain, res: usize) -> Vec<u8> {
+    use rayon::prelude::*;
+    let cell = WORLD_SIZE_F64 / res as f64;
+    let blocks = terrain.blocks();
+    let water = blocks.linear(blocks.ids.water);
+    let srgb = |c: f32| -> u8 {
+        let c = c.clamp(0.0, 1.0);
+        let v = if c <= 0.003_130_8 {
+            12.92 * c
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        };
+        (v * 255.0).round() as u8
+    };
+    (0..res)
+        .into_par_iter()
+        .flat_map_iter(|j| {
+            let mut row = Vec::with_capacity(res * 4);
+            for i in 0..res {
+                let x = (i as f64 + 0.5) * cell;
+                let z = (j as f64 + 0.5) * cell;
+                let h = terrain.height_lod(x, z, cell);
+                let wl = terrain.water_level(x, z);
+                let c = if h < wl {
+                    let k = 1.15 - 0.75 * smoothstep(0.0, 400.0, wl - h) as f32;
+                    [water[0] * k, water[1] * k, water[2] * k]
+                } else {
+                    let dx = terrain.height_lod(x + cell, z, cell)
+                        - terrain.height_lod(x - cell, z, cell);
+                    let dz = terrain.height_lod(x, z + cell, cell)
+                        - terrain.height_lod(x, z - cell, cell);
+                    let top = (h.floor() as i32).max(terrain.config().beach_high_m + 1);
+                    let block = terrain.top_block(
+                        nascio_core::torus::wrap(x.floor() as i32),
+                        nascio_core::torus::wrap(z.floor() as i32),
+                        top,
+                        dx.hypot(dz) / (2.0 * cell),
+                    );
+                    blocks.linear(block)
+                };
+                row.extend_from_slice(&[srgb(c[0]), srgb(c[1]), srgb(c[2]), 255]);
+            }
+            row
+        })
+        .collect()
+}
+
 pub fn check_layout(cfg: &HorizonConfig) {
     let reach = cfg.half_extent(0) - cfg.snap() / 2.0 - f64::from(CHUNK_SIZE);
     assert!(

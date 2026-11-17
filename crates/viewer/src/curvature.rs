@@ -152,6 +152,10 @@ pub struct Curvature {
     #[texture(101)]
     #[sampler(102)]
     pub climate: Handle<Image>,
+    /// Colour of the world's surface (see [`crate::sky::GroundAlbedo`]).
+    #[texture(103)]
+    #[sampler(104)]
+    pub ground: Handle<Image>,
 }
 
 impl MaterialExtension for Curvature {
@@ -176,15 +180,20 @@ impl MaterialExtension for Curvature {
     }
 }
 
-/// A curved material for `base`, reading `frame` and sampling `climate`.
+/// A curved material for `base`, reading `frame` and sampling `climate` and `ground`.
 pub fn material(
     base: StandardMaterial,
     frame: Handle<ShaderBuffer>,
     climate: Handle<Image>,
+    ground: Handle<Image>,
 ) -> CurvedMaterial {
     CurvedMaterial {
         base,
-        extension: Curvature { frame, climate },
+        extension: Curvature {
+            frame,
+            climate,
+            ground,
+        },
     }
 }
 
@@ -272,7 +281,12 @@ pub fn sync_curved(
             d[2] as f32,
             p.visible_elevation as f32,
         ),
-        haze: Vec4::new(sky.cloud as f32, end * 0.8, end, 0.0),
+        haze: Vec4::new(
+            sky.cloud as f32,
+            end * 0.8,
+            end,
+            settings.fixed_clouds.map_or(-1.0, |c| c as f32),
+        ),
     };
     if let Some(mut b) = buffers.get_mut(&frame.0) {
         *b = ShaderBuffer::new(u.floats(), RenderAssetUsages::default());

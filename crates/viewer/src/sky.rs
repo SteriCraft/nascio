@@ -349,7 +349,12 @@ pub fn update_sky_state(
         hour_angle: h,
         declination: nascio_core::astro::declination(day),
         sun: Some(sun),
-        cloud: astro.cloud_cover(seam_distance(z), maps.cloud_at(cam.pos.x, z, day)),
+        cloud: astro.cloud_cover(
+            seam_distance(z),
+            settings
+                .fixed_clouds
+                .unwrap_or_else(|| maps.cloud_at(cam.pos.x, z, day)),
+        ),
         sidereal,
         moon_dir,
         moon_lit: moon_illumination(elongation),
@@ -438,6 +443,45 @@ pub struct SkyMaterial {
     #[texture(1)]
     #[sampler(2)]
     pub moon_map: Option<Handle<Image>>,
+    /// Colour of the world's surface ([`GroundAlbedo`]).
+    #[texture(3)]
+    #[sampler(4)]
+    pub ground: Option<Handle<Image>>,
+}
+
+/// Colour of the world's surface seen from far (the horizon's colours on a periodic
+/// texture), for the ground beyond the relief meshes in the shared `atmosphere` block.
+#[derive(Resource, Clone)]
+pub struct GroundAlbedo(pub Handle<Image>);
+
+/// Side of the [`GroundAlbedo`] texture, texels (195 m each).
+const GROUND_RES: usize = 512;
+
+impl GroundAlbedo {
+    /// Builds the texture from the terrain (sRGB, repeat sampler).
+    pub fn new(terrain: &nascio_voxel::Terrain, images: &mut Assets<Image>) -> Self {
+        let res = GROUND_RES;
+        let bytes = crate::horizon::ground_colors(terrain, res);
+        let mut image = Image::new(
+            Extent3d {
+                width: res as u32,
+                height: res as u32,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            bytes,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::default(),
+        );
+        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: ImageAddressMode::Repeat,
+            address_mode_v: ImageAddressMode::Repeat,
+            mag_filter: ImageFilterMode::Linear,
+            min_filter: ImageFilterMode::Linear,
+            ..default()
+        });
+        Self(images.add(image))
+    }
 }
 
 /// Moon map shipped with the viewer.
@@ -549,6 +593,7 @@ fn dome_mesh(radius: f32) -> Mesh {
 fn star_mesh(catalogue: &[crate::stars::Star], limit: f64) -> Mesh {
     let mut pos = Vec::new();
     let mut colors = Vec::new();
+    let mut uvs = Vec::new();
     let mut idx = Vec::new();
     for s in catalogue.iter().filter(|s| s.vmag <= limit) {
         let n = Vec3::new(
@@ -568,6 +613,8 @@ fn star_mesh(catalogue: &[crate::stars::Star], limit: f64) -> Mesh {
         for (du, dv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
             pos.push((n * STAR_RADIUS + (u * du + v * dv) * size).to_array());
             colors.push([b * tint[0], b * tint[1], b * tint[2], 1.0]);
+            // Corner in the quad: the shader draws a round point.
+            uvs.push([du, dv]);
         }
         // Both windings: seen from inside whatever the culling convention (as the dome).
         idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -579,6 +626,7 @@ fn star_mesh(catalogue: &[crate::stars::Star], limit: f64) -> Mesh {
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, pos)
     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
     .with_inserted_indices(Indices::U32(idx))
 }
 
@@ -613,12 +661,14 @@ pub fn setup_sky(
     mut sky_materials: ResMut<Assets<SkyMaterial>>,
     mut star_materials: ResMut<Assets<StarMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    ground: Res<GroundAlbedo>,
 ) {
     let moon_map = load_moon_map(&mut images);
     commands.spawn((
         Mesh3d(meshes.add(dome_mesh(DOME_RADIUS))),
         MeshMaterial3d(sky_materials.add(SkyMaterial {
             moon_map,
+            ground: Some(ground.0.clone()),
             ..default()
         })),
         Transform::default(),

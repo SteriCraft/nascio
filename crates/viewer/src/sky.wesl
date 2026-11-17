@@ -40,6 +40,9 @@ struct Sky {
 // Moon albedo map, equirectangular, longitude 0 in the middle, east to the right.
 @group(constants::MATERIAL_BIND_GROUP) @binding(1) var moon_tex: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(2) var moon_smp: sampler;
+// Colour of the world's surface (repeat sampler), for the ground beyond the relief.
+@group(constants::MATERIAL_BIND_GROUP) @binding(3) var ground_tex: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(4) var ground_smp: sampler;
 
 const WORLD: f32 = 100000.0;
 const TAU: f32 = 6.2831855;
@@ -59,6 +62,15 @@ const DEG: f32 = 0.017453292;
 const AIR_H: f32 = 8000.0;
 // Optical depth of the vertical column of air at sea level.
 const AIR_TAU: f32 = 0.3;
+// Clear sky: saturation and gain applied before the tone mapping, so the tone-mapped sky
+// keeps the blue of the untone-mapped M4 dome (the haze uses the same colour: no seam).
+const AIR_SATURATION: f32 = 1.3;
+const AIR_SATURATION_ZENITH: f32 = 1.9;
+const AIR_GAIN: f32 = 1.6;
+// The textured ground seen beyond the relief fades out between 80 % and 100 % of half the
+// world (never the same place twice across the torus) into this mean albedo.
+const AIR_WORLD: f32 = 100000.0;
+const AIR_FAR_ALBEDO: vec3<f32> = vec3<f32>(0.05, 0.09, 0.13);
 const AIR_DEG: f32 = 0.017453292;
 // The camera leaves the cloud deck between these heights (m).
 const AIR_CLOUD_LOW: f32 = 3000.0;
@@ -75,6 +87,9 @@ struct Air {
     h: f32,
     // k = 1 / (2 R_vis), 0 when flat.
     k: f32,
+    // Camera world x and z (m, wrapped).
+    wx: f32,
+    wz: f32,
 }
 
 fn air_density(h: f32) -> f32 {
@@ -115,17 +130,27 @@ fn air_colour(a: Air, d: vec3<f32>, up: f32) -> vec3<f32> {
     // Twilight glow on the sun's side.
     let sun_side = max(dot(normalize(d.xz + vec2<f32>(1e-6)), normalize(a.sun.xz + vec2<f32>(1e-6))), 0.0);
     hor = mix(hor, vec3<f32>(0.95, 0.48, 0.22), night_k * (1.0 - day_k) * pow(sun_side, 3.0));
-    let col = mix(hor, zen, pow(clamp(up, 0.0, 1.0), 0.45));
+    let height = pow(clamp(up, 0.0, 1.0), 0.45);
+    var col = mix(hor, zen, height);
+    let lum = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let saturation = mix(AIR_SATURATION, AIR_SATURATION_ZENITH, height);
+    col = max(vec3<f32>(lum) + (col - vec3<f32>(lum)) * saturation, vec3<f32>(0.0)) * AIR_GAIN;
     // Overcast: grey, lit by the diffuse light of e_vis (§2.7: grey day, black night).
     let sky_light = smoothstep(-6.0 * AIR_DEG, 10.0 * AIR_DEG, a.e);
     let grey = vec3<f32>(0.5, 0.52, 0.56) * (0.012 + 0.988 * sky_light);
     return mix(col, grey, air_cloud(a));
 }
 
-// The ground far below, beyond the relief meshes: dark, mostly ocean.
-fn air_ground(a: Air) -> vec3<f32> {
-    let light = smoothstep(-4.0 * AIR_DEG, 12.0 * AIR_DEG, a.e);
-    return vec3<f32>(0.035, 0.06, 0.09) * (0.02 + 0.98 * light);
+// The ground seen beyond the relief meshes, `x` m away (horizontally) along `d`: the colour
+// of the world's surface (`ground_tex`, declared by each shader), lit by the sun at the camera.
+fn air_ground(a: Air, d: vec3<f32>, x: f32) -> vec3<f32> {
+    let dir = d.xz / max(length(d.xz), 1e-5);
+    let p = vec2<f32>(a.wx, a.wz) + dir * x;
+    let albedo = textureSampleLevel(ground_tex, ground_smp, p / AIR_WORLD, 0.0).rgb;
+    let base = mix(albedo, AIR_FAR_ALBEDO, smoothstep(0.4 * AIR_WORLD, 0.5 * AIR_WORLD, x));
+    let sky = smoothstep(-6.0 * AIR_DEG, 10.0 * AIR_DEG, a.e);
+    let direct = smoothstep(0.0, 10.0 * AIR_DEG, a.e) * max(a.sun.y, 0.0);
+    return base * (0.02 + 0.2 * sky + 0.9 * direct * (1.0 - 0.8 * air_cloud(a)));
 }
 
 // Horizontal distance at which the ray of slope `t` (< 0) meets the displayed ground, or −1.
@@ -165,7 +190,7 @@ fn atmosphere(a: Air, d: vec3<f32>) -> vec3<f32> {
     let m0 = air_horizontal_mass(a.k);
     let x_hit = air_ground_hit(a, t);
     if x_hit >= 0.0 {
-        return air_haze(a, d, x_hit * sqrt(1.0 + t * t), 0.0, air_ground(a));
+        return air_haze(a, d, x_hit * sqrt(1.0 + t * t), 0.0, air_ground(a, d, x_hit));
     }
     var tau: f32;
     var tau_ref: f32;
@@ -280,7 +305,7 @@ fn finish(col: vec3<f32>) -> vec4<f32> {
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let d = normalize(in.world_position.xyz - view.world_position.xyz);
     let e = sky.sun.w;
-    let air = Air(sky.sun.xyz, e, sky.sun_geo.w, sky.cam.z, sky.cam.w);
+    let air = Air(sky.sun.xyz, e, sky.sun_geo.w, sky.cam.z, sky.cam.w, sky.cam.x, sky.cam.y);
     let day_k = smoothstep(-2.0 * DEG, 15.0 * DEG, e);
     var col = atmosphere(air, d);
     // The planet hides the sun, the Moon and the aurorae below the limb.
