@@ -21,10 +21,16 @@ use nascio_worldgen::world_io::{Layer, World};
 use crate::block::{BlockId, Blocks, srgb_to_linear};
 use crate::climate::{ColumnClimate, SurfaceClimate};
 use crate::geology::{Class, ColumnGeo, Geology};
-use crate::rivers::{RiverHit, RiverParams, Rivers};
+use crate::rivers::{Gauge, RiverHit, RiverParams, Rivers};
 use crate::vegetation::{BiomePlants, Part, Plant, PlantKind, cell_draw, default_vegetation};
 use nascio_core::consts::WORLD_SIZE;
+use nascio_worldgen::erosion::flow::NO_DIR;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+
+/// The ice biome (permanent snow, or a warmest month below its threshold) is looked up only
+/// where the warmest month is below the glacier threshold plus this margin, °C.
+const ICE_BIOME_MARGIN_C: f64 = 8.0;
 
 /// Tunable parameters of chunk generation (`[voxel]` in TOML). The relief itself (detail noise
 /// amplitudes) is configured by `[erosion]` in `world.toml`.
@@ -52,6 +58,38 @@ pub struct VoxelConfig {
     pub river_bank_m: f64,
     /// Smoothing passes of the river trace.
     pub river_smooth_passes: usize,
+    /// River gauge: `game` (width and depth by Strahler order) or `physical` (world layers).
+    pub river_gauge: Gauge,
+    /// Game gauge: rivers carry water from this Strahler order of the drainage network on.
+    pub river_min_order: u8,
+    /// Game gauge: channel width by Strahler order (`river_min_order`, then +1…; the last
+    /// for higher orders), m.
+    pub river_order_width_m: Vec<f64>,
+    /// Game gauge: depth at the channel centre by Strahler order, m.
+    pub river_order_depth_m: Vec<f64>,
+    /// Meander wavelength, in channel widths.
+    pub river_meander_wavelength: f64,
+    /// Meanders: largest heading deviation of the sine-generated curve, degrees.
+    pub river_meander_angle_deg: f64,
+    /// Meander amplitude at most this many channel widths.
+    pub river_meander_max_amplitude: f64,
+    /// Full meanders below this river gradient, none above `river_meander_steep` (m/m).
+    pub river_meander_flat: f64,
+    pub river_meander_steep: f64,
+    /// Beyond the banks the ground stays within this slope of the water level (m/m)…
+    pub river_valley_slope: f64,
+    /// …up to this height above or below it, m.
+    pub river_valley_height_m: f64,
+    /// Weathered rock thins out on block slopes between these values (m/m).
+    pub weathering_slope: [f64; 2],
+    /// Weathered rock thins out between these surface heights, m…
+    pub weathering_alt_m: [f64; 2],
+    /// …down to this fraction of its thickness.
+    pub weathering_alt_keep: f64,
+    /// Sea and lake ice: the freezing threshold varies by up to this much, °C (noise)…
+    pub water_ice_dither_c: f64,
+    /// …over this wavelength, m.
+    pub water_ice_dither_m: f64,
     /// Chunks generated below the lowest surface of a column.
     pub underground_chunks: i32,
     /// The crust keeps at least this thickness of stone above the magma, m.
@@ -191,6 +229,22 @@ impl Default for VoxelConfig {
             river_min_width_m: 1.5,
             river_bank_m: 2.0,
             river_smooth_passes: 2,
+            river_gauge: Gauge::Game,
+            river_min_order: 4,
+            river_order_width_m: vec![3.0, 6.0, 12.0, 24.0, 40.0],
+            river_order_depth_m: vec![1.0, 1.5, 2.5, 4.0, 5.0],
+            river_meander_wavelength: 12.0,
+            river_meander_angle_deg: 70.0,
+            river_meander_max_amplitude: 3.0,
+            river_meander_flat: 0.015,
+            river_meander_steep: 0.08,
+            river_valley_slope: 0.6,
+            river_valley_height_m: 16.0,
+            weathering_slope: [0.4, 1.0],
+            weathering_alt_m: [2_200.0, 3_200.0],
+            weathering_alt_keep: 0.25,
+            water_ice_dither_c: 1.5,
+            water_ice_dither_m: 300.0,
             underground_chunks: 2,
             min_crust_m: 50,
             glacier_warm_c: 0.0,
@@ -220,6 +274,26 @@ impl Default for VoxelConfig {
 }
 
 impl VoxelConfig {
+    /// Parameters of the river water.
+    pub fn river_params(&self) -> RiverParams {
+        RiverParams {
+            min_width_m: self.river_min_width_m,
+            bank_m: self.river_bank_m,
+            smooth_passes: self.river_smooth_passes,
+            gauge: self.river_gauge,
+            min_order: self.river_min_order,
+            order_width_m: self.river_order_width_m.clone(),
+            order_depth_m: self.river_order_depth_m.clone(),
+            meander_wavelength: self.river_meander_wavelength,
+            meander_angle_deg: self.river_meander_angle_deg,
+            meander_max_amplitude: self.river_meander_max_amplitude,
+            meander_flat: self.river_meander_flat,
+            meander_steep: self.river_meander_steep,
+            valley_slope: self.river_valley_slope,
+            valley_height_m: self.river_valley_height_m,
+        }
+    }
+
     pub fn from_toml(s: &str) -> anyhow::Result<Self> {
         #[derive(Deserialize)]
         struct File {
@@ -276,6 +350,8 @@ pub struct Terrain {
     plants: [(f64, Vec<PlantKind>); biomes::code::COUNT],
     /// Hash salt of the vegetation cells.
     plant_salt: u64,
+    /// Noise of the sea and lake freezing threshold.
+    ice_noise: nascio_worldgen::noise::Fbm,
 }
 
 /// Grass tint of the four corners of a chunk column, for meshing: bilinear inside the chunk,
@@ -398,6 +474,26 @@ impl Terrain {
             world.layer("river_depth"),
         ) {
             (Some(d), Some(w), Some(dp)) if d.width == t.elevation.width() => {
+                // Cells under permanent ice carry no river water.
+                // (Land cells only; the costly biome lookup only in cold places.)
+                let e = &t.elevation;
+                let frozen: Vec<bool> = (0..e.width() * e.height())
+                    .into_par_iter()
+                    .map(|k| {
+                        let h = f64::from(e.data()[k]);
+                        if d.data.get_f64(k) as u8 == NO_DIR || h <= 0.0 {
+                            return false;
+                        }
+                        let (x, z) = e.cell_center(k % e.width(), k / e.width());
+                        let c = t.climate.as_ref().map(|c| c.column(x, z));
+                        let tw = c.map_or(20.0, |c| f64::from(c.t_warm_sl)) - t.lapse() * h;
+                        tw < t.cfg.glacier_warm_c
+                            || (tw < t.cfg.glacier_warm_c + ICE_BIOME_MARGIN_C
+                                && t.geology
+                                    .as_ref()
+                                    .is_some_and(|g| g.biome(x, z) == biomes::code::ICE))
+                    })
+                    .collect();
                 let dir = PeriodicGrid::from_vec(
                     d.width,
                     d.height,
@@ -412,11 +508,8 @@ impl Terrain {
                     &grid_f32(dp),
                     &t.elevation,
                     t.lake_level.as_ref(),
-                    RiverParams {
-                        min_width_m: t.cfg.river_min_width_m,
-                        bank_m: t.cfg.river_bank_m,
-                        smooth_passes: t.cfg.river_smooth_passes,
-                    },
+                    &frozen,
+                    &t.cfg.river_params(),
                 ))
             }
             _ => None,
@@ -463,22 +556,32 @@ impl Terrain {
             c.biome = g.biome(x + r * (u(0) + u(16) - 1.0), z + r * (u(32) + u(48) - 1.0));
         }
         if self.rivers.is_some() {
-            c.river = self.river(x, z).is_some();
+            c.river = matches!(
+                self.river(x, z),
+                Some(RiverHit::Channel { .. } | RiverHit::Bank { .. })
+            );
         }
         c
     }
 
-    /// The river at `(x, z)` (column centre), if any.
+    /// The river at `(x, z)` (column centre), if any: none where the ground is already under
+    /// the sea or a lake (the trace ends at the shore).
     #[inline]
     pub fn river(&self, x: f64, z: f64) -> Option<RiverHit> {
-        self.rivers.as_ref()?.at(x, z)
+        let hit = self.rivers.as_ref()?.at(x, z)?;
+        (self.height_lod(x, z, 0.0) >= self.water_level(x, z) + 0.5).then_some(hit)
     }
 
     /// Surface climate at `(x, z)`.
     pub fn climate(&self, x: f64, z: f64) -> ColumnClimate {
-        self.climate
+        let mut c = self
+            .climate
             .as_ref()
-            .map_or_else(ColumnClimate::default, |c| c.column(x, z))
+            .map_or_else(ColumnClimate::default, |c| c.column(x, z));
+        // Dithered freezing threshold: ragged ice edges instead of an isotherm of the coarse
+        // climate grid (a straight line where the climate depends on latitude only).
+        c.t_warm_water += (self.cfg.water_ice_dither_c * self.ice_noise.sample(x, z)) as f32;
+        c
     }
 
     fn lapse(&self) -> f64 {
@@ -521,9 +624,10 @@ impl Terrain {
         (self.t_warm(&col.climate, top + 1) < self.cfg.snow_layer_warm_c).then_some(id)
     }
 
-    /// Whether sea or lake water whose highest block is `level` carries permanent ice.
-    pub fn water_frozen(&self, c: &ColumnClimate, level: i32) -> bool {
-        self.blocks.ids.ice.is_some() && self.t_warm(c, level) < self.cfg.water_ice_warm_c
+    /// Whether the water (sea, lake, river) of a column carries permanent ice: its warmest month,
+    /// dithered, is below `water_ice_warm_c`.
+    pub fn water_frozen(&self, c: &ColumnClimate) -> bool {
+        self.blocks.ids.ice.is_some() && f64::from(c.t_warm_water) < self.cfg.water_ice_warm_c
     }
 
     /// Block at height `y` in the water of a column (`top < y < water_top`): water, or ice in
@@ -533,8 +637,7 @@ impl Terrain {
         let ids = &self.blocks.ids;
         match ids.ice {
             Some(ice)
-                if y >= water_top - self.cfg.water_ice_m
-                    && self.water_frozen(&col.climate, water_top - 1) =>
+                if y >= water_top - self.cfg.water_ice_m && self.water_frozen(&col.climate) =>
             {
                 ice
             }
@@ -642,6 +745,12 @@ impl Terrain {
             soils: resolve_soils(&cfg, &blocks),
             plants: resolve_plants(&cfg),
             plant_salt: nascio_worldgen::rng::stage_u64(seed, "vegetation"),
+            ice_noise: nascio_worldgen::noise::Fbm::new(
+                nascio_worldgen::rng::stage_u64(seed, "water-ice-dither"),
+                cfg.water_ice_dither_m,
+                2,
+                0.5,
+            ),
             cfg,
             elevation,
             lake_level,
@@ -673,7 +782,11 @@ impl Terrain {
         let h = self.height_lod(x, z, 0.0);
         match self.river(x, z) {
             Some(RiverHit::Channel { bed, .. }) => h.min(f64::from(bed) + 0.5),
-            Some(RiverHit::Bank { top }) => h.max(f64::from(top) + 0.5),
+            Some(RiverHit::Bank { top }) => f64::from(top) + 0.5,
+            Some(RiverHit::Valley { top, d }) => {
+                let (b, s) = (f64::from(top) + 0.5, self.cfg.river_valley_slope);
+                h.clamp(b - s * d, b + s * d)
+            }
             None => h,
         }
     }
@@ -809,7 +922,21 @@ impl Terrain {
             return (ids.granite, Class::Basement);
         };
         let r = f64::from(depth - soil_depth);
-        let weathering = f64::from(col.weathering);
+        // Weathered rock thins out on steep blocks and at altitude; the dither turns the
+        // contour of the coarse layer into a ragged fringe (audit M7, anomaly c).
+        let c = &self.cfg;
+        let thin = (1.0 - smoothstep(c.weathering_slope[0], c.weathering_slope[1], slope))
+            * (1.0
+                - (1.0 - c.weathering_alt_keep)
+                    * smoothstep(c.weathering_alt_m[0], c.weathering_alt_m[1], f64::from(top)));
+        let u = (nascio_worldgen::rng::mix64(
+            self.plant_salt
+                ^ 0x3EA7_4E11
+                ^ ((u64::from(crate::geology::wrap(x) as u32) << 32)
+                    | u64::from(crate::geology::wrap(z) as u32)),
+        ) >> 11) as f64
+            / (1u64 << 53) as f64;
+        let weathering = f64::from(col.weathering) * thin + u;
         if r < weathering.floor() {
             let b = if col.laterite {
                 ids.laterite

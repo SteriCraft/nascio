@@ -72,16 +72,16 @@ const GOLDEN_CHUNKS: [&str; 24] = [
     "9ad3071cc973b6fa",
     "e90ec17f86136c22",
     "3e27c4fa72d20f0d",
-    "a33a47d68298c032",
-    "c4eac0f06bd23d44",
-    "1b18de932e3af686",
+    "4f627cafae03923b",
+    "ac1523a43963337e",
+    "2258b80962e90993",
     "334542625eb89145",
     "9b0cce629bcae363",
     "0445a6ba4cd05489",
-    "b4e98c2f53c9cea5",
+    "9eeaca15cd94daf1",
     "3026edee840c118f",
-    "54f85aa1c4bcb01f",
-    "1fd473f891c0ba41",
+    "1d8103c726c40387",
+    "04ee1c4d6cbe02ca",
     "8dcece9245b88d79",
     "7e4081ee18fb19b4",
     "d1cc3fd066723c94",
@@ -95,7 +95,7 @@ fn world_hash_is_the_reference() {
     let (w, _) = world();
     assert_eq!(
         (GENERATOR_VERSION, w.hash().as_str()),
-        (15, GOLDEN_WORLD),
+        (16, GOLDEN_WORLD),
         "world of seed 42 at 1/25 changed"
     );
 }
@@ -111,7 +111,7 @@ fn chunk_hashes_are_the_reference() {
         .collect();
     assert_eq!(
         (GENERATOR_VERSION, got.as_slice()),
-        (15, GOLDEN_CHUNKS.map(String::from).as_slice()),
+        (16, GOLDEN_CHUNKS.map(String::from).as_slice()),
         "chunks changed:\n{}",
         listing.join("\n")
     );
@@ -149,7 +149,7 @@ fn height_bits_are_the_reference() {
     let (_, t) = world();
     assert_eq!(
         (GENERATOR_VERSION, height_bits_hash(t).as_str()),
-        (15, "e7864faa4a66e8a0"),
+        (16, "e7864faa4a66e8a0"),
         "surface heights changed (bits)"
     );
 }

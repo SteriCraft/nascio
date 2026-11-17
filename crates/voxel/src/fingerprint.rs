@@ -129,8 +129,8 @@ mod tests {
         assert_eq!(
             got,
             (
-                15,
-                String::from("f19776169c7fa6eb2b59590f8cae8e7e9b0cdf7d662d3179dd4a9899387e952b")
+                16,
+                String::from("a1c646cf6579af67cac165f200589fb3899673fb26dfa9ce565c331ae9825fab")
             ),
             "VoxelConfig::default() changed: bump GENERATOR_VERSION and update this test"
         );

@@ -19,6 +19,7 @@ pub struct SurfaceClimate {
     pub lapse: f64,
     t_mean_sl: PeriodicGrid<f32>,
     t_warm_sl: PeriodicGrid<f32>,
+    t_warm_water: PeriodicGrid<f32>,
     precip: PeriodicGrid<f32>,
 }
 
@@ -29,6 +30,10 @@ pub struct ColumnClimate {
     pub t_mean_sl: f32,
     /// Warmest-month temperature reduced to sea level, °C.
     pub t_warm_sl: f32,
+    /// Warmest-month temperature of the water surface, °C: the climate cell's own value, not
+    /// lifted by the land of the cell (a sea cell next to mountains is not warmer; audit M7,
+    /// anomaly a). `Terrain::climate` adds the freezing dither.
+    pub t_warm_water: f32,
     /// Annual precipitation, mm.
     pub precip: f32,
 }
@@ -39,6 +44,7 @@ impl Default for ColumnClimate {
         Self {
             t_mean_sl: 12.0,
             t_warm_sl: 20.0,
+            t_warm_water: 20.0,
             precip: 900.0,
         }
     }
@@ -87,17 +93,20 @@ impl SurfaceClimate {
         let lift = |i: usize, j: usize| lapse * f64::from(*mean_h.get(i as i64, j as i64));
         let t_mean_sl =
             PeriodicGrid::from_fn(w, h, cell, |i, j| (harm(i, j).x0 + lift(i, j)) as f32);
-        let t_warm_sl = PeriodicGrid::from_fn(w, h, cell, |i, j| {
+        let t_warm_water = PeriodicGrid::from_fn(w, h, cell, |i, j| {
             let hm = harm(i, j);
-            let warm = (0..YEAR_SAMPLES)
+            (0..YEAR_SAMPLES)
                 .map(|k| hm.eval(365.0 * (k as f64 + 0.5) / YEAR_SAMPLES as f64))
-                .fold(f64::NEG_INFINITY, f64::max);
-            (warm + lift(i, j)) as f32
+                .fold(f64::NEG_INFINITY, f64::max) as f32
+        });
+        let t_warm_sl = PeriodicGrid::from_fn(w, h, cell, |i, j| {
+            (f64::from(*t_warm_water.get(i as i64, j as i64)) + lift(i, j)) as f32
         });
         Some(Self {
             lapse,
             t_mean_sl,
             t_warm_sl,
+            t_warm_water,
             precip,
         })
     }
@@ -107,6 +116,7 @@ impl SurfaceClimate {
         ColumnClimate {
             t_mean_sl: self.t_mean_sl.sample_bilinear(x, z) as f32,
             t_warm_sl: self.t_warm_sl.sample_bilinear(x, z) as f32,
+            t_warm_water: self.t_warm_water.sample_bilinear(x, z) as f32,
             precip: self.precip.sample_bilinear(x, z).max(0.0) as f32,
         }
     }

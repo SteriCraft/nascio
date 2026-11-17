@@ -327,8 +327,7 @@ fn build_level(
             let wl = h.water(i, j);
             let px = f64::from(center.0) - half + i as f64 * s;
             let pz = f64::from(center.1) - half + j as f64 * s;
-            let frozen =
-                raw < wl && terrain.water_frozen(&terrain.climate(px, pz), wl.round() as i32 - 1);
+            let frozen = raw < wl && terrain.water_frozen(&terrain.climate(px, pz));
             let color = if frozen {
                 let c = blocks.linear(blocks.ids.ice.unwrap_or(blocks.ids.water));
                 [c[0], c[1], c[2], 1.0]
@@ -606,8 +605,7 @@ pub fn ground_colors(terrain: &Terrain, res: usize) -> Vec<u8> {
                 let z = (j as f64 + 0.5) * cell;
                 let h = terrain.height_lod(x, z, cell);
                 let wl = terrain.water_level(x, z);
-                let frozen =
-                    h < wl && terrain.water_frozen(&terrain.climate(x, z), wl.round() as i32 - 1);
+                let frozen = h < wl && terrain.water_frozen(&terrain.climate(x, z));
                 let c = if frozen {
                     blocks.linear(blocks.ids.ice.unwrap_or(blocks.ids.water))
                 } else if h < wl {
