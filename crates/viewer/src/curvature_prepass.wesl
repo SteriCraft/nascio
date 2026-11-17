@@ -16,6 +16,8 @@ struct Curved {
     seam: vec4<f32>,
     light: vec4<f32>,
     snow: vec4<f32>,
+    air: vec4<f32>,
+    haze: vec4<f32>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<storage, read> curved: Curved;

@@ -14,6 +14,8 @@ import bevy_pbr::render::{
     forward_io::VertexOutput,
     mesh_view_bindings::view,
 };
+// Same tone mapping as the lit materials (the relief fades into this dome).
+@if(TONEMAP_IN_SHADER) import bevy_core_pipeline::tonemapping::tone_mapping;
 
 struct Sky {
     // xyz: towards the visible sun at the camera; w: e_vis at the camera (rad).
@@ -45,6 +47,143 @@ const PI: f32 = 3.1415927;
 const HALF_PI: f32 = 1.5707964;
 const OBLIQUITY: f32 = 0.40910518;
 const DEG: f32 = 0.017453292;
+
+// <atmosphere> Identical in sky.wesl and curvature.wesl (checked by a test in sky.rs).
+//
+// Air seen from the camera: an exponential atmosphere (scale height AIR_H) over the displayed
+// ground, lowered by k·d² like every mesh. A ray above the limb gathers the air it crosses,
+// from its lowest point (Chapman-like airmass); a ray below the limb ends on the ground. The
+// sky dome, the haze on the relief and the far edge of the relief all use these functions,
+// so the relief melts into the sky without a seam. Climbing, the column of air above the
+// camera thins: the blue fades to black and only a thin band stays on the limb, up to orbit.
+const AIR_H: f32 = 8000.0;
+// Optical depth of the vertical column of air at sea level.
+const AIR_TAU: f32 = 0.3;
+const AIR_DEG: f32 = 0.017453292;
+// The camera leaves the cloud deck between these heights (m).
+const AIR_CLOUD_LOW: f32 = 3000.0;
+const AIR_CLOUD_HIGH: f32 = 6000.0;
+
+struct Air {
+    // Towards the visible sun at the camera.
+    sun: vec3<f32>,
+    // e_vis at the camera (rad).
+    e: f32,
+    // Cloud cover at the camera.
+    cloud: f32,
+    // Camera height (m).
+    h: f32,
+    // k = 1 / (2 R_vis), 0 when flat.
+    k: f32,
+}
+
+fn air_density(h: f32) -> f32 {
+    return exp(-max(h, 0.0) / AIR_H);
+}
+
+// Mean density along a straight path between heights `a` and `b`.
+fn air_mean_density(a: f32, b: f32) -> f32 {
+    let lo = max(min(a, b), 0.0);
+    let hi = max(max(a, b), 0.0);
+    if hi - lo < 1.0 {
+        return air_density(0.5 * (lo + hi));
+    }
+    return AIR_H * (air_density(lo) - air_density(hi)) / (hi - lo);
+}
+
+// Airmass of a horizontal ray from sea level, √(π R / 2 H) with R = 1 / (2k).
+fn air_horizontal_mass(k: f32) -> f32 {
+    if k <= 0.0 {
+        return 40.0;
+    }
+    return min(sqrt(3.1415927 / (4.0 * k * AIR_H)), 40.0);
+}
+
+// Cloud cover seen from the camera: none above the cloud deck.
+fn air_cloud(a: Air) -> f32 {
+    return a.cloud * (1.0 - smoothstep(AIR_CLOUD_LOW, AIR_CLOUD_HIGH, a.h));
+}
+
+// Colour of opaque air towards `d`; `up` from 0 (horizontal) to 1 (zenith).
+fn air_colour(a: Air, d: vec3<f32>, up: f32) -> vec3<f32> {
+    let night_k = smoothstep(-18.0 * AIR_DEG, -4.0 * AIR_DEG, a.e);
+    let day_k = smoothstep(-2.0 * AIR_DEG, 15.0 * AIR_DEG, a.e);
+    let zen = mix(mix(vec3<f32>(0.002, 0.003, 0.009), vec3<f32>(0.05, 0.07, 0.2), night_k),
+                  vec3<f32>(0.15, 0.32, 0.72), day_k);
+    var hor = mix(mix(vec3<f32>(0.006, 0.008, 0.018), vec3<f32>(0.3, 0.25, 0.3), night_k),
+                  vec3<f32>(0.62, 0.74, 0.9), day_k);
+    // Twilight glow on the sun's side.
+    let sun_side = max(dot(normalize(d.xz + vec2<f32>(1e-6)), normalize(a.sun.xz + vec2<f32>(1e-6))), 0.0);
+    hor = mix(hor, vec3<f32>(0.95, 0.48, 0.22), night_k * (1.0 - day_k) * pow(sun_side, 3.0));
+    let col = mix(hor, zen, pow(clamp(up, 0.0, 1.0), 0.45));
+    // Overcast: grey, lit by the diffuse light of e_vis (§2.7: grey day, black night).
+    let sky_light = smoothstep(-6.0 * AIR_DEG, 10.0 * AIR_DEG, a.e);
+    let grey = vec3<f32>(0.5, 0.52, 0.56) * (0.012 + 0.988 * sky_light);
+    return mix(col, grey, air_cloud(a));
+}
+
+// The ground far below, beyond the relief meshes: dark, mostly ocean.
+fn air_ground(a: Air) -> vec3<f32> {
+    let light = smoothstep(-4.0 * AIR_DEG, 12.0 * AIR_DEG, a.e);
+    return vec3<f32>(0.035, 0.06, 0.09) * (0.02 + 0.98 * light);
+}
+
+// Horizontal distance at which the ray of slope `t` (< 0) meets the displayed ground, or −1.
+fn air_ground_hit(a: Air, t: f32) -> f32 {
+    let h = max(a.h, 0.0);
+    if t >= 0.0 {
+        return -1.0;
+    }
+    if a.k <= 0.0 {
+        return h / max(-t, 1e-6);
+    }
+    let disc = t * t - 4.0 * a.k * h;
+    if disc < 0.0 {
+        return -1.0;
+    }
+    return (-t - sqrt(disc)) / (2.0 * a.k);
+}
+
+// Whether `d` points below the limb (at the ground).
+fn air_below_limb(a: Air, d: vec3<f32>) -> bool {
+    return air_ground_hit(a, d.y / max(length(d.xz), 1e-5)) >= 0.0;
+}
+
+// Haze added to `colour` seen at `len` m (displayed) along `d`, at world height `hf`.
+fn air_haze(a: Air, d: vec3<f32>, len: f32, hf: f32, colour: vec3<f32>) -> vec3<f32> {
+    let tau = AIR_TAU * air_mean_density(a.h, hf) * len / AIR_H;
+    let full = 1.0 - exp(-AIR_TAU * air_horizontal_mass(a.k));
+    let haze = min((1.0 - exp(-tau)) / full, 1.2);
+    return colour * exp(-tau) + air_colour(a, d, max(d.y, 0.0)) * haze;
+}
+
+// Colour of the sky (or of the far ground) towards `d`, without the sun, Moon and aurorae.
+fn atmosphere(a: Air, d: vec3<f32>) -> vec3<f32> {
+    let horiz = max(length(d.xz), 1e-5);
+    let t = d.y / horiz;
+    let h = max(a.h, 0.0);
+    let m0 = air_horizontal_mass(a.k);
+    let x_hit = air_ground_hit(a, t);
+    if x_hit >= 0.0 {
+        return air_haze(a, d, x_hit * sqrt(1.0 + t * t), 0.0, air_ground(a));
+    }
+    var tau: f32;
+    var tau_ref: f32;
+    if t >= 0.0 {
+        let m = 1.0 / (d.y + 1.0 / m0);
+        tau = AIR_TAU * air_density(h) * m;
+        tau_ref = AIR_TAU * m;
+    } else {
+        // Down to the perigee and out again; the part above the camera is not crossed twice.
+        let hp = h - t * t / (4.0 * max(a.k, 1e-12));
+        tau = AIR_TAU * m0 * (2.0 * air_density(hp) - air_density(h));
+        tau_ref = AIR_TAU * m0;
+    }
+    // Relative to the same direction seen from sea level (the sky of the ground is unchanged).
+    let glow = min((1.0 - exp(-tau)) / (1.0 - exp(-tau_ref)), 1.2);
+    return air_colour(a, d, max(d.y, 0.0)) * glow;
+}
+// </atmosphere>
 
 // Visible sun elevation at a point `dx` m east of the camera, at world z (§2.4, §2.5).
 fn e_vis_at(dx: f32, z_world: f32) -> f32 {
@@ -129,39 +268,33 @@ fn aurora(d: vec3<f32>) -> vec3<f32> {
     return sum * sky.time.w * 0.35;
 }
 
+fn finish(col: vec3<f32>) -> vec4<f32> {
+    var out = vec4<f32>(col, 1.0);
+@if(TONEMAP_IN_SHADER) {
+    out = tone_mapping(out, view.color_grading);
+}
+    return out;
+}
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let d = normalize(in.world_position.xyz - view.world_position.xyz);
     let e = sky.sun.w;
-    let cloud = sky.sun_geo.w;
-
-    // Base gradient.
-    let night_k = smoothstep(-18.0 * DEG, -4.0 * DEG, e);
+    let air = Air(sky.sun.xyz, e, sky.sun_geo.w, sky.cam.z, sky.cam.w);
     let day_k = smoothstep(-2.0 * DEG, 15.0 * DEG, e);
-    let zen = mix(mix(vec3<f32>(0.002, 0.003, 0.009), vec3<f32>(0.05, 0.07, 0.2), night_k),
-                  vec3<f32>(0.15, 0.32, 0.72), day_k);
-    var hor = mix(mix(vec3<f32>(0.006, 0.008, 0.018), vec3<f32>(0.3, 0.25, 0.3), night_k),
-                  vec3<f32>(0.62, 0.74, 0.9), day_k);
-    // Twilight glow on the sun's side of the horizon.
-    let sun_side = max(dot(normalize(d.xz + vec2<f32>(1e-6)), normalize(sky.sun.xz + vec2<f32>(1e-6))), 0.0);
-    let twilight = night_k * (1.0 - day_k);
-    hor = mix(hor, vec3<f32>(0.95, 0.48, 0.22), twilight * pow(sun_side, 3.0));
-    let up = max(d.y, 0.0);
-    var col = mix(hor, zen, pow(up, 0.45));
-    if d.y < 0.0 {
-        col = hor * 0.8;
+    var col = atmosphere(air, d);
+    // The planet hides the sun, the Moon and the aurorae below the limb.
+    if air_below_limb(air, d) {
+        return finish(col);
     }
-
-    // Overcast: grey, lit by the diffuse light of e_vis (§2.7: grey day, black night).
-    let sky_light = smoothstep(-6.0 * DEG, 10.0 * DEG, e);
-    let grey = vec3<f32>(0.5, 0.52, 0.56) * (0.012 + 0.988 * sky_light);
-    col = mix(col, grey, cloud);
-    let clear = 1.0 - cloud;
+    let clear = 1.0 - air_cloud(air);
 
     // Sun disc and halo.
     let cs = dot(d, sky.sun.xyz);
     let disc = smoothstep(cos(0.7 * DEG), cos(0.5 * DEG), cs);
-    let halo = pow(max(cs, 0.0), 300.0) * 0.6 + pow(max(cs, 0.0), 12.0) * 0.08 * day_k;
+    // The wide halo is scattered by the air: it fades with height.
+    let halo = pow(max(cs, 0.0), 300.0) * 0.6
+        + pow(max(cs, 0.0), 12.0) * 0.08 * day_k * air_density(air.h);
     let sun_col = mix(vec3<f32>(1.0, 0.55, 0.3), vec3<f32>(1.0, 0.97, 0.9), smoothstep(0.0, 12.0 * DEG, e));
     col += sun_col * (disc * 12.0 + halo) * clear * step(-1.0 * DEG, e);
 
@@ -193,6 +326,6 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Aurorae are lost in a bright sky: only twilight and night skies show them.
-    col += aurora(d) * clear * (1.0 - 0.95 * day_k);
-    return vec4<f32>(col, 1.0);
+    col += aurora(d) * clear * (1.0 - 0.95 * day_k * air_density(air.h));
+    return finish(col);
 }

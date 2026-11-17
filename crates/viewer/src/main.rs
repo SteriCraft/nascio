@@ -18,7 +18,6 @@ mod stars;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy::window::PresentMode;
@@ -218,7 +217,8 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         yaw: args.yaw.to_radians(),
         pitch: args.pitch.to_radians(),
         speed: args.speed.clamp(fly::SPEED_MIN, fly::SPEED_MAX),
-        scripted: false,
+        // A capture ignores the keyboard and the mouse (reproducible pictures).
+        scripted: args.screenshot.is_some(),
     };
     let settings = FlySettings {
         view_distance_m: args.view_distance.clamp(fly::VIEW_MIN, fly::VIEW_MAX),
@@ -310,11 +310,10 @@ fn run(mut args: Args) -> anyhow::Result<()> {
                 fly::column_visibility,
                 fly::place_camera,
                 sky::update_sky_state,
-                sky::update_light_and_fog,
+                sky::update_light_and_clear,
                 sky::update_sky,
                 sky::update_star_limit,
                 curvature::sync_curved,
-                update_fog,
             )
                 .chain()
                 .run_if(in_state(Mode::Fly)),
@@ -376,14 +375,6 @@ fn setup(
             far: 60_000.0,
             ..default()
         }),
-        DistanceFog {
-            color: Color::srgb(0.45, 0.64, 0.9),
-            falloff: FogFalloff::Linear {
-                start: 400.0,
-                end: 520.0,
-            },
-            ..default()
-        },
         fly::FlyCamera,
     ));
     commands.spawn((
@@ -408,6 +399,8 @@ fn setup(
             base_color: Color::WHITE,
             perceptual_roughness: 0.95,
             reflectance: 0.15,
+            // The curved materials add their own haze (same air as the sky dome).
+            fog_enabled: false,
             ..default()
         },
         frame_handle.clone(),
@@ -419,6 +412,7 @@ fn setup(
             perceptual_roughness: 0.15,
             reflectance: 0.4,
             alpha_mode: AlphaMode::Blend,
+            fog_enabled: false,
             ..default()
         },
         frame_handle.clone(),
@@ -432,31 +426,13 @@ fn setup(
             reflectance: 0.15,
             double_sided: true,
             cull_mode: None,
+            fog_enabled: false,
             ..default()
         },
         frame_handle.clone(),
         climate.clone(),
     ));
     commands.insert_resource(horizon::HorizonMaterial(horizon));
-}
-
-/// Fog hides the chunk edge (or, with the horizon, the far end of the world).
-fn update_fog(
-    settings: Res<FlySettings>,
-    stats: Res<horizon::HorizonStats>,
-    mut fog: Query<&mut DistanceFog>,
-) {
-    let end = if settings.horizon && stats.extent_m > 0.0 {
-        stats.extent_m as f32 * 0.95
-    } else {
-        settings.view_distance_m
-    };
-    if let Ok(mut f) = fog.single_mut() {
-        f.falloff = FogFalloff::Linear {
-            start: end * 0.35,
-            end,
-        };
-    }
 }
 
 /// Map and 3D share one camera: the 3D scene is hidden behind the map. Entering the 3D mode,

@@ -7,11 +7,15 @@
 //!   harmonics at the current date into a world-wide texture (red: clouds, green: snow, blue:
 //!   temperature, alpha: mean height of the climate cell, for the snow line), sampled per pixel
 //!   by the curved materials (`curvature.wesl`) and refreshed every few game hours.
-//! - The sky dome (`sky.wesl`): gradient, sun and Moon discs, aurorae, overcast deck.
-//! - The stars: one mesh of small quads in equatorial coordinates, rotated to the local sky
-//!   every frame (§2.8), faded by daylight and clouds.
+//! - The sky dome (`sky.wesl`): the air seen from the camera (shared with the relief's haze,
+//!   see [`AIR_H`]), sun and Moon discs, aurorae, overcast deck.
+//! - The stars (`stars.wesl`): one mesh of small quads in equatorial coordinates, rotated to
+//!   the local sky every frame (§2.8), faded by daylight (thinned with height) and clouds,
+//!   hidden below the limb.
 //! - The directional light only casts shadows near the camera (the curved materials light
-//!   every pixel with its own sun); fog and clear colours follow the sky at the camera.
+//!   every pixel with its own sun); the clear colour follows the sky at the camera. There is
+//!   no distance fog: the curved materials add the haze of the same air as the dome.
+//! - Climbing, the dome and the stars grow with the height so the relief stays inside them.
 
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
@@ -20,7 +24,7 @@ use bevy::camera::visibility::NoFrustumCulling;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::pbr::{DistanceFog, Material};
+use bevy::pbr::Material;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat,
@@ -39,10 +43,50 @@ use nascio_worldgen::world_io::World;
 use crate::fly::{FlyCam, FlyCamera, FlySettings, Sun, WorldInfo};
 
 const SHADER: &str = "embedded://nascio_viewer/sky.wesl";
-/// Radius of the sky dome, m (inside the far plane, beyond the horizon).
+const STARS_SHADER: &str = "embedded://nascio_viewer/stars.wesl";
+/// Radius of the sky dome near the ground, m (beyond the horizon); it grows with the height.
 const DOME_RADIUS: f32 = 54_000.0;
-/// Radius of the star sphere, m.
+/// Radius of the star sphere near the ground, m (inside the dome).
 const STAR_RADIUS: f32 = 50_000.0;
+/// The dome and the stars grow by this much per metre of camera height.
+const DOME_GROWTH: f32 = 2.5;
+
+/// Scale height of the air, m (as `AIR_H` in the shaders' shared `atmosphere` block).
+pub const AIR_H: f64 = 8_000.0;
+/// Optical depth of the vertical column of air at sea level (`AIR_TAU`).
+pub const AIR_TAU: f64 = 0.3;
+/// The camera leaves the cloud deck between these heights, m (`AIR_CLOUD_LOW`, `_HIGH`).
+pub const AIR_CLOUD_LOW: f64 = 3_000.0;
+pub const AIR_CLOUD_HIGH: f64 = 6_000.0;
+
+/// Relative density of the air at height `h`.
+pub fn air_density(h: f64) -> f64 {
+    (-h.max(0.0) / AIR_H).exp()
+}
+
+/// Brightness of the zenith sky at height `h` relative to sea level (as `atmosphere` in the
+/// shaders, looking straight up), for a display radius with `k = 1 / (2 R)`.
+pub fn zenith_glow(h: f64, k: f64) -> f64 {
+    let m0 = if k > 0.0 {
+        (PI / (4.0 * k * AIR_H)).sqrt().min(40.0)
+    } else {
+        40.0
+    };
+    let m = 1.0 / (1.0 + 1.0 / m0);
+    (1.0 - (-AIR_TAU * air_density(h) * m).exp()) / (1.0 - (-AIR_TAU * m).exp())
+}
+
+/// Cloud cover seen from height `h`: none above the cloud deck.
+pub fn cloud_seen(cloud: f64, h: f64) -> f64 {
+    cloud * (1.0 - nascio_core::math::smoothstep(AIR_CLOUD_LOW, AIR_CLOUD_HIGH, h))
+}
+
+/// Visibility of the stars: at night, or by day once the air above the camera is thin enough
+/// (they fade in between about 10 and 30 km), never through the clouds.
+pub fn star_visibility(night: f64, h: f64, k: f64, cloud: f64) -> f64 {
+    let space = 1.0 - nascio_core::math::smoothstep(0.02, 0.3, zenith_glow(h, k));
+    night.max(space) * (1.0 - cloud_seen(cloud, h))
+}
 /// Climate texture refresh, game days.
 const CLIMATE_REFRESH_DAYS: f64 = 0.05;
 /// Altitude of the base of the aurora curtains, m.
@@ -70,7 +114,7 @@ pub struct SkyState {
 }
 
 impl SkyState {
-    fn sun(&self) -> SunPosition {
+    pub fn sun(&self) -> SunPosition {
         self.sun.unwrap_or(SunPosition {
             elevation: -FRAC_PI_2,
             azimuth: 0.0,
@@ -347,12 +391,11 @@ pub fn horizon_color(e_vis: f64, cloud: f64) -> [f32; 3] {
     [c[0] as f32, c[1] as f32, c[2] as f32]
 }
 
-/// Sun light (shadows only), fog and clear colours.
-pub fn update_light_and_fog(
+/// Sun light (shadows only) and clear colour.
+pub fn update_light_and_clear(
     sky: Res<SkyState>,
     settings: Res<FlySettings>,
     mut sun: Query<(&mut Transform, &mut DirectionalLight), With<Sun>>,
-    mut fog: Query<&mut DistanceFog>,
     mut clear: ResMut<ClearColor>,
 ) {
     let p = sky.sun();
@@ -368,11 +411,7 @@ pub fn update_light_and_fog(
             (12_000.0 * light_intensity(p.visible_elevation) * (1.0 - 0.8 * sky.cloud)) as f32;
     }
     let c = horizon_color(p.visible_elevation, sky.cloud);
-    let color = Color::linear_rgb(c[0], c[1], c[2]);
-    clear.0 = color;
-    if let Ok(mut f) = fog.single_mut() {
-        f.color = color;
-    }
+    clear.0 = Color::linear_rgb(c[0], c[1], c[2]);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -445,8 +484,27 @@ pub struct SkyDome;
 #[derive(Component)]
 pub struct StarField;
 
+/// Material of the stars (`stars.wesl`): vertex colours added to the sky, hidden below the
+/// limb.
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
+pub struct StarMaterial {
+    /// x: visibility; y: camera height (m); z: `k = 1 / (2 R_vis)`; w: unused.
+    #[uniform(0)]
+    pub u: Vec4,
+}
+
+impl Material for StarMaterial {
+    fn fragment_shader() -> ShaderRef {
+        STARS_SHADER.into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Add
+    }
+}
+
 #[derive(Resource)]
-pub struct StarMaterial(pub Handle<StandardMaterial>);
+pub struct StarHandle(pub Handle<StarMaterial>);
 
 /// A sphere seen from inside (triangles wound inwards).
 fn dome_mesh(radius: f32) -> Mesh {
@@ -511,7 +569,9 @@ fn star_mesh(catalogue: &[crate::stars::Star], limit: f64) -> Mesh {
             pos.push((n * STAR_RADIUS + (u * du + v * dv) * size).to_array());
             colors.push([b * tint[0], b * tint[1], b * tint[2], 1.0]);
         }
+        // Both windings: seen from inside whatever the culling convention (as the dome).
         idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        idx.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
     }
     Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -551,7 +611,7 @@ pub fn setup_sky(
     settings: Res<FlySettings>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut sky_materials: ResMut<Assets<SkyMaterial>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut star_materials: ResMut<Assets<StarMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let moon_map = load_moon_map(&mut images);
@@ -567,15 +627,8 @@ pub fn setup_sky(
         NotShadowReceiver,
         SkyDome,
     ));
-    let stars = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 1.0, 1.0, 0.0),
-        unlit: true,
-        alpha_mode: AlphaMode::Add,
-        fog_enabled: false,
-        cull_mode: None,
-        ..default()
-    });
-    commands.insert_resource(StarMaterial(stars.clone()));
+    let stars = star_materials.add(StarMaterial::default());
+    commands.insert_resource(StarHandle(stars.clone()));
     let catalogue = crate::stars::load();
     let limit = settings.star_mag_limit;
     let mesh = meshes.add(star_mesh(&catalogue, limit));
@@ -616,9 +669,9 @@ pub fn update_sky(
     camera: CameraQuery,
     mut dome: DomeQuery,
     mut stars: StarQuery,
-    star_mat: Option<Res<StarMaterial>>,
+    star_mat: Option<Res<StarHandle>>,
     mut sky_materials: ResMut<Assets<SkyMaterial>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut star_materials: ResMut<Assets<StarMaterial>>,
 ) {
     let Ok(cam_t) = camera.single() else {
         return;
@@ -628,8 +681,11 @@ pub fn update_sky(
     let v = |d: [f64; 3]| Vec3::new(d[0] as f32, d[1] as f32, d[2] as f32);
     let sun_geo = nascio_core::astro::direction(p.elevation, p.azimuth);
     let k = settings.curvature_radius_m.map_or(0.0, |r| 0.5 / r) as f32;
+    // High up, the relief is far below: the dome and the stars grow to stay beyond it.
+    let grow = 1.0 + DOME_GROWTH * (cam.pos.y.max(0.0) as f32) / DOME_RADIUS;
     if let Ok((mut t, m)) = dome.single_mut() {
         t.translation = cam_t.translation;
+        t.scale = Vec3::splat(grow);
         if let Some(mut mat) = sky_materials.get_mut(&m.0) {
             mat.u = SkyUniform {
                 sun: v(p.direction()).extend(p.visible_elevation as f32),
@@ -676,15 +732,17 @@ pub fn update_sky(
     if let Ok(mut t) = stars.single_mut() {
         t.translation = cam_t.translation;
         t.rotation = Quat::from_mat3(&rot);
+        t.scale = Vec3::splat(grow);
     }
     if let Some(sm) = star_mat
-        && let Some(mut m) = materials.get_mut(&sm.0)
+        && let Some(mut m) = star_materials.get_mut(&sm.0)
     {
-        // Visible at night (§2.8), never through the clouds (weight 1 − c).
+        // Visible at night (§2.8) or above most of the air, never through the clouds.
         let night = aurora_night_factor(p.visible_elevation);
-        let vis = (night * (1.0 - sky.cloud)) as f32;
-        if (m.base_color.alpha() - vis).abs() > 1e-3 {
-            m.base_color = Color::srgba(1.0, 1.0, 1.0, vis);
+        let vis = star_visibility(night, cam.pos.y, f64::from(k), sky.cloud) as f32;
+        let u = Vec4::new(vis, cam.pos.y as f32, k, 0.0);
+        if (m.u - u).abs().max_element() > 1e-3 {
+            m.u = u;
         }
     }
 }
@@ -694,8 +752,12 @@ pub struct SkyPlugin;
 impl Plugin for SkyPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "sky.wesl");
-        app.add_plugins(MaterialPlugin::<SkyMaterial>::default())
-            .init_resource::<SkyState>();
+        bevy::asset::embedded_asset!(app, "stars.wesl");
+        app.add_plugins((
+            MaterialPlugin::<SkyMaterial>::default(),
+            MaterialPlugin::<StarMaterial>::default(),
+        ))
+        .init_resource::<SkyState>();
     }
 }
 
@@ -722,6 +784,55 @@ mod tests {
             }
             prev = c;
         }
+    }
+
+    /// The `atmosphere` block of `src`, between its markers.
+    fn atmosphere_block(src: &str) -> &str {
+        let a = src.find("// <atmosphere>").expect("start marker");
+        let b = src.find("// </atmosphere>").expect("end marker");
+        &src[a..b]
+    }
+
+    #[test]
+    fn sky_and_relief_share_one_atmosphere() {
+        let sky = atmosphere_block(include_str!("sky.wesl"));
+        let relief = atmosphere_block(include_str!("curvature.wesl"));
+        assert_eq!(sky, relief, "the atmosphere blocks differ");
+        // The Rust copies of the constants match the shaders.
+        for line in [
+            format!("const AIR_H: f32 = {AIR_H:.1};"),
+            format!("const AIR_TAU: f32 = {AIR_TAU:.1};"),
+            format!("const AIR_CLOUD_LOW: f32 = {AIR_CLOUD_LOW:.1};"),
+            format!("const AIR_CLOUD_HIGH: f32 = {AIR_CLOUD_HIGH:.1};"),
+        ] {
+            assert!(sky.contains(&line), "missing {line}");
+        }
+    }
+
+    #[test]
+    fn blue_fades_and_stars_appear_with_height() {
+        let k = 0.5 / crate::curvature::DEFAULT_RADIUS_M;
+        assert!((zenith_glow(0.0, k) - 1.0).abs() < 1e-12);
+        let g: Vec<f64> = [5_000.0, 20_000.0, 100_000.0]
+            .iter()
+            .map(|&h| zenith_glow(h, k))
+            .collect();
+        assert!(g[0] > 0.4 && g[0] < 0.7, "5 km: {}", g[0]);
+        assert!(g[1] < 0.15, "20 km: {}", g[1]);
+        assert!(g[2] < 1e-4, "100 km: {}", g[2]);
+        // By day: no stars on the ground nor at 5 km, fading in at 20 km, all at 100 km.
+        let day = |h: f64| star_visibility(0.0, h, k, 0.0);
+        assert_eq!(day(0.0), 0.0);
+        assert_eq!(day(5_000.0), 0.0);
+        assert!(
+            day(20_000.0) > 0.1 && day(20_000.0) < 0.9,
+            "{}",
+            day(20_000.0)
+        );
+        assert!(day(100_000.0) > 0.99);
+        // Clouds hide them from below the deck only.
+        assert_eq!(star_visibility(1.0, 100.0, k, 1.0), 0.0);
+        assert!(star_visibility(1.0, 10_000.0, k, 1.0) > 0.99);
     }
 
     #[test]

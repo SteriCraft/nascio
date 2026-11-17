@@ -112,14 +112,21 @@ pub struct CurvedUniform {
     pub light: Vec4,
     /// x: camera world height (m); y: lapse rate (°C/m); z: snow cover per °C; w: unused.
     pub snow: Vec4,
+    /// xyz: towards the visible sun at the camera; w: e_vis at the camera (rad).
+    pub air: Vec4,
+    /// x: cloud cover at the camera; y, z: horizontal distances where the relief starts and
+    /// ends fading into the sky (m); w: unused.
+    pub haze: Vec4,
 }
 
 impl CurvedUniform {
     fn floats(&self) -> Vec<f32> {
-        [self.drop, self.sun, self.seam, self.light, self.snow]
-            .iter()
-            .flat_map(|v| v.to_array())
-            .collect()
+        [
+            self.drop, self.sun, self.seam, self.light, self.snow, self.air, self.haze,
+        ]
+        .iter()
+        .flat_map(|v| v.to_array())
+        .collect()
     }
 }
 
@@ -198,13 +205,25 @@ impl Plugin for CurvaturePlugin {
     }
 }
 
+/// Horizontal distance at which the relief has faded into the sky: the end of the horizon (or
+/// of the chunks without it), m.
+pub fn relief_end(settings: &FlySettings, horizon_extent_m: f64) -> f32 {
+    if settings.horizon && horizon_extent_m > 0.0 {
+        horizon_extent_m as f32 * 0.95
+    } else {
+        settings.view_distance_m
+    }
+}
+
 /// Pushes the radius, the camera and the sky to the curved materials' buffer, once per frame.
+#[allow(clippy::too_many_arguments)]
 pub fn sync_curved(
     settings: Res<FlySettings>,
     cam: Res<crate::fly::FlyCam>,
     camera: Query<&Transform, With<crate::fly::FlyCamera>>,
     sky: Res<crate::sky::SkyState>,
     info: Res<crate::fly::WorldInfo>,
+    horizon: Res<crate::horizon::HorizonStats>,
     frame: Res<CurvedFrame>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
 ) {
@@ -212,6 +231,9 @@ pub fn sync_curved(
         return;
     };
     let a = info.astro;
+    let p = sky.sun();
+    let d = p.direction();
+    let end = relief_end(&settings, horizon.extent_m);
     let u = CurvedUniform {
         drop: Vec4::new(
             coefficient(settings.curvature_radius_m),
@@ -244,6 +266,13 @@ pub fn sync_curved(
             SNOW_PER_DEGREE,
             0.0,
         ),
+        air: Vec4::new(
+            d[0] as f32,
+            d[1] as f32,
+            d[2] as f32,
+            p.visible_elevation as f32,
+        ),
+        haze: Vec4::new(sky.cloud as f32, end * 0.8, end, 0.0),
     };
     if let Some(mut b) = buffers.get_mut(&frame.0) {
         *b = ShaderBuffer::new(u.floats(), RenderAssetUsages::default());
