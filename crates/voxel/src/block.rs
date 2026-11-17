@@ -1,11 +1,11 @@
 //! Block registry of a world (spec §5). Block ids are `u16`, assigned at generation and stored
-//! with the world (`blocks.toml`, see [`nascio_worldgen::blocks`]); code refers to blocks by
+//! with the world (`blocks.toml`, see [`nascio_world::blocks`]); code refers to blocks by
 //! name. Colours are provisional until textures exist.
 
 // Rendering only (colours, previews): platform maths is fine here.
 #![allow(clippy::disallowed_methods)]
 
-pub use nascio_worldgen::blocks::{BlockDef, BlockRegistry, Matter};
+pub use nascio_world::blocks::{BlockDef, BlockRegistry, Matter};
 
 /// A block id.
 pub type BlockId = u16;
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(b.def(b.ids.granite).name, "granite");
         assert!(b.is_solid(b.ids.granite) && !b.is_solid(b.ids.water) && !b.is_solid(AIR));
         assert_eq!(b.matter(b.ids.water), Matter::Fluid);
-        let cat = nascio_worldgen::deposits::Catalog::default_catalog();
+        let cat = nascio_world::deposits::Catalog::default_catalog();
         let full = Blocks::new(BlockRegistry::with_catalog(&cat).unwrap()).unwrap();
         assert_eq!(full.ids, b.ids);
         assert!(full.len() > b.len());

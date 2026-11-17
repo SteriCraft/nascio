@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use nascio_core::GeothermConfig;
 use nascio_core::consts::WORLD_SIZE_F64;
+use nascio_tools::section::{SectionSpec, SurfaceTemperature, render};
 use nascio_voxel::geology::Class;
-use nascio_voxel::section::{SectionSpec, SurfaceTemperature, render};
 use nascio_voxel::{Terrain, VoxelConfig};
 use nascio_worldgen::geology::setting;
 use nascio_worldgen::plot::{Canvas, rgb, text_width};
@@ -130,9 +130,7 @@ fn main() -> anyhow::Result<()> {
 
 fn stats(world: &World, columns: usize, depth: i32) -> anyhow::Result<()> {
     let terrain = Terrain::from_world(world, VoxelConfig::default())?;
-    let g = terrain
-        .geology()
-        .ok_or_else(|| anyhow::anyhow!("world without geology"))?;
+    let g = terrain.geology();
     let blocks = terrain.blocks();
     let builtin = nascio_worldgen::blocks::BUILTIN.len() as u16;
     let mut per_block: BTreeMap<u16, u64> = BTreeMap::new();

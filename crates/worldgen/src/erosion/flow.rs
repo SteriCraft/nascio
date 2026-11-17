@@ -10,20 +10,7 @@ use std::collections::{BinaryHeap, VecDeque};
 
 use rayon::prelude::*;
 
-/// D8 neighbour offsets `(di, dj)`, in a fixed order; the index is the flow direction code.
-pub const D8: [(i64, i64); 8] = [
-    (1, 0),
-    (1, 1),
-    (0, 1),
-    (-1, 1),
-    (-1, 0),
-    (-1, -1),
-    (0, -1),
-    (1, -1),
-];
-
-/// Flow direction code of a base level (sea or sink: no receiver).
-pub const NO_DIR: u8 = 255;
+pub use nascio_world::erosion::flow::{D8, NO_DIR};
 
 /// Shape of a square periodic grid.
 #[derive(Clone, Copy, Debug, PartialEq)]

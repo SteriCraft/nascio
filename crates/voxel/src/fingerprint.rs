@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::bail;
-use nascio_worldgen::world_io::World;
+use nascio_world::world_io::World;
 
 use crate::terrain::VoxelConfig;
 
@@ -119,7 +119,7 @@ pub fn fingerprint(world_hash: &str, voxel: &VoxelConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nascio_worldgen::config::GENERATOR_VERSION;
+    use nascio_world::config::GENERATOR_VERSION;
 
     /// Changing `VoxelConfig::default()` changes the chunks: bump `GENERATOR_VERSION`, then
     /// update this pair.

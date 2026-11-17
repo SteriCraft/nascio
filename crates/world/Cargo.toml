@@ -1,0 +1,23 @@
+[package]
+name = "nascio-world"
+description = "World data shared by the generator and the chunk server: config, grids, noise, world files, blocks, deposits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+nascio-core.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+toml.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

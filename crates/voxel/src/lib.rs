@@ -11,7 +11,6 @@ pub mod generate;
 pub mod geology;
 pub mod mesh;
 pub mod rivers;
-pub mod section;
 pub mod terrain;
 pub mod vegetation;
 

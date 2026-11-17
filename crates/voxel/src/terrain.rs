@@ -5,18 +5,17 @@
 //! per chunk at full resolution). The detail noise is the one of `nascio-worldgen`
 //! ([`Detail`]): the fine grid already contains the octaves at least two cells wide, the chunks
 //! add only the finer ones, with the amplitude of the context (ruggedness, coast, sea floor).
-//! Worlds made before M3 have only `elevation_tectonic`: it is used instead, with every octave.
+//! Every layer of a complete world is required: worlds made before M5 are refused.
 //!
 //! Water: the sea fills every column up to `y = 0`; a lake fills the columns of its cells up
 //! to its surface.
 
-use anyhow::Context;
+use anyhow::{Context, ensure};
 use nascio_core::fmath::DetMath;
-use nascio_worldgen::biomes;
-use nascio_worldgen::erosion::ErosionConfig;
-use nascio_worldgen::erosion::upsample::{Detail, baked_min_spacing, ruggedness};
-use nascio_worldgen::grid::PeriodicGrid;
-use nascio_worldgen::world_io::{Layer, World};
+use nascio_world::biomes;
+use nascio_world::erosion::upsample::{Detail, baked_min_spacing, ruggedness};
+use nascio_world::grid::PeriodicGrid;
+use nascio_world::world_io::{Layer, World};
 
 use crate::block::{BlockId, Blocks, srgb_to_linear};
 use crate::climate::{ColumnClimate, SurfaceClimate};
@@ -24,7 +23,7 @@ use crate::geology::{Class, ColumnGeo, Geology, RockNoise};
 use crate::rivers::{Gauge, RiverHit, RiverParams, Rivers};
 use crate::vegetation::{BiomePlants, Part, Plant, PlantKind, cell_draw, default_vegetation};
 use nascio_core::consts::WORLD_SIZE;
-use nascio_worldgen::erosion::flow::NO_DIR;
+use nascio_world::erosion::flow::NO_DIR;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -143,7 +142,7 @@ pub struct VoxelConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BiomeSoil {
-    /// Biome name, as in `nascio_worldgen::biomes::NAMES`.
+    /// Biome name, as in `nascio_world::biomes::NAMES`.
     pub biome: String,
     pub top: String,
     pub under: String,
@@ -339,31 +338,30 @@ pub struct Terrain {
     cfg: VoxelConfig,
     elevation: PeriodicGrid<f32>,
     /// Lake surface per elevation cell, `-∞` where there is no lake.
-    lake_level: Option<PeriodicGrid<f32>>,
+    lake_level: PeriodicGrid<f32>,
     /// 0 (flat) to 1 (most rugged), per tectonic cell.
     ruggedness: PeriodicGrid<f32>,
     detail: Detail,
     /// Octaves at least this wide are already in `elevation`.
     baked_spacing: f64,
-    /// Depth of the Moho below sea level (m, positive downwards), per tectonic cell; `None`:
-    /// no magma.
-    moho: Option<PeriodicGrid<f32>>,
+    /// Depth of the Moho below sea level (m, positive downwards), per tectonic cell.
+    moho: PeriodicGrid<f32>,
     /// Block registry of the world.
     blocks: Blocks,
-    /// Rock column and ore bodies (`None`: worlds made before M5, granite down to the Moho).
-    geology: Option<Geology>,
+    /// Rock column and ore bodies.
+    geology: Geology,
     /// Soil by biome code.
     soils: [Soil; biomes::code::COUNT],
-    /// Surface climate (`None`: worlds made before M4, temperate everywhere).
-    climate: Option<SurfaceClimate>,
-    /// River water (`None`: worlds made before M4).
-    rivers: Option<Rivers>,
+    /// Surface climate.
+    climate: SurfaceClimate,
+    /// River water.
+    rivers: Rivers,
     /// Plants by biome code.
     plants: [(f64, Vec<PlantKind>); biomes::code::COUNT],
     /// Hash salt of the vegetation cells.
     plant_salt: u64,
     /// Noise of the sea and lake freezing threshold.
-    ice_noise: nascio_worldgen::noise::Fbm,
+    ice_noise: nascio_world::noise::Fbm,
 }
 
 /// Grass tint of the four corners of a chunk column, for meshing: bilinear inside the chunk,
@@ -443,140 +441,136 @@ fn grid_f32(layer: &Layer) -> PeriodicGrid<f32> {
     PeriodicGrid::from_vec(layer.width, layer.height, layer.cell_m, data)
 }
 
+/// Lake surface per elevation cell from the lake depth, `-∞` where there is no lake.
+fn lake_level(elevation: &PeriodicGrid<f32>, depth: &PeriodicGrid<f32>) -> PeriodicGrid<f32> {
+    PeriodicGrid::from_fn(depth.width(), depth.height(), depth.cell_size(), |i, j| {
+        let d = *depth.get(i as i64, j as i64);
+        if d > 0.0 {
+            elevation.get(i as i64, j as i64) + d
+        } else {
+            f32::NEG_INFINITY
+        }
+    })
+}
+
 impl Terrain {
     /// Builds the terrain of a generated world.
     pub fn from_world(world: &World, cfg: VoxelConfig) -> anyhow::Result<Self> {
-        let tectonic = grid_f32(
+        let layer = |name: &str| {
             world
-                .layer("elevation_tectonic")
-                .context("world has no elevation_tectonic layer")?,
-        );
-        let flags = world
-            .layer("history_flags")
-            .map(grid_f32)
-            .unwrap_or_else(|| tectonic.map(|_| 0.0));
-        let (elevation, lakes) = match world.layer("elevation") {
-            Some(fine) => (
-                Some(grid_f32(fine)),
-                world.layer("lake_depth").map(grid_f32),
-            ),
-            None => (None, None),
+                .layer(name)
+                .with_context(|| format!("world has no {name} layer (made before M5?)"))
         };
+        let tectonic = grid_f32(layer("elevation_tectonic")?);
+        let flags = grid_f32(layer("history_flags")?);
+        let elevation = grid_f32(layer("elevation")?);
+        let lake_level = lake_level(&elevation, &grid_f32(layer("lake_depth")?));
+        let moho = smooth(&grid_f32(layer("moho_depth")?), MOHO_SMOOTH_CELLS);
         let blocks = Blocks::new(world.blocks()?)?;
         let geology = Geology::from_world(world, &blocks)?;
-        let mut t = Self::new(
-            world.config.seed,
-            &world.config.erosion,
-            &tectonic,
-            &flags,
-            elevation,
-            lakes,
+        let climate = SurfaceClimate::from_world(world, &elevation)?;
+        let d = layer("flow_direction")?;
+        ensure!(
+            d.width == elevation.width() && d.height == elevation.height(),
+            "flow_direction and elevation grids differ"
+        );
+        // Cells under permanent ice carry no river water.
+        // (Land cells only; the costly biome lookup only in cold places.)
+        let frozen: Vec<bool> = (0..elevation.width() * elevation.height())
+            .into_par_iter()
+            .map(|k| {
+                let h = f64::from(elevation.data()[k]);
+                if d.data.get_f64(k) as u8 == NO_DIR || h <= 0.0 {
+                    return false;
+                }
+                let (x, z) = elevation.cell_center(k % elevation.width(), k / elevation.width());
+                let tw = f64::from(climate.column(x, z).t_warm_sl) - climate.lapse * h;
+                tw < cfg.glacier_warm_c
+                    || (tw < cfg.glacier_warm_c + ICE_BIOME_MARGIN_C
+                        && geology.biome(x, z) == biomes::code::ICE)
+            })
+            .collect();
+        let dir = PeriodicGrid::from_vec(
+            d.width,
+            d.height,
+            d.cell_m,
+            (0..d.width * d.height)
+                .map(|k| d.data.get_f64(k) as u8)
+                .collect(),
+        );
+        let rivers = Rivers::new(
+            &dir,
+            &grid_f32(layer("river_width")?),
+            &grid_f32(layer("river_depth")?),
+            &elevation,
+            &lake_level,
+            &frozen,
+            &cfg.river_params(),
+        );
+        let seed = world.config.seed;
+        Ok(Self {
+            ruggedness: ruggedness(
+                &tectonic,
+                |i, j| *flags.get(i, j) as u8,
+                &world.config.erosion,
+            ),
+            baked_spacing: baked_min_spacing(elevation.cell_size()),
+            detail: Detail::new(seed, &world.config.erosion),
+            soils: resolve_soils(&cfg, &blocks),
+            plants: resolve_plants(&cfg),
+            plant_salt: nascio_world::rng::stage_u64(seed, "vegetation"),
+            ice_noise: nascio_world::noise::Fbm::new(
+                nascio_world::rng::stage_u64(seed, "water-ice-dither"),
+                cfg.water_ice_dither_m,
+                2,
+                0.5,
+            ),
             cfg,
-        )
-        .with_moho(
-            world
-                .layer("moho_depth")
-                .map(|l| smooth(&grid_f32(l), MOHO_SMOOTH_CELLS)),
-        )
-        .with_geology(blocks, geology);
-        t.climate = SurfaceClimate::from_world(world, &t.elevation);
-        t.rivers = match (
-            world.layer("flow_direction"),
-            world.layer("river_width"),
-            world.layer("river_depth"),
-        ) {
-            (Some(d), Some(w), Some(dp)) if d.width == t.elevation.width() => {
-                // Cells under permanent ice carry no river water.
-                // (Land cells only; the costly biome lookup only in cold places.)
-                let e = &t.elevation;
-                let frozen: Vec<bool> = (0..e.width() * e.height())
-                    .into_par_iter()
-                    .map(|k| {
-                        let h = f64::from(e.data()[k]);
-                        if d.data.get_f64(k) as u8 == NO_DIR || h <= 0.0 {
-                            return false;
-                        }
-                        let (x, z) = e.cell_center(k % e.width(), k / e.width());
-                        let c = t.climate.as_ref().map(|c| c.column(x, z));
-                        let tw = c.map_or(20.0, |c| f64::from(c.t_warm_sl)) - t.lapse() * h;
-                        tw < t.cfg.glacier_warm_c
-                            || (tw < t.cfg.glacier_warm_c + ICE_BIOME_MARGIN_C
-                                && t.geology
-                                    .as_ref()
-                                    .is_some_and(|g| g.biome(x, z) == biomes::code::ICE))
-                    })
-                    .collect();
-                let dir = PeriodicGrid::from_vec(
-                    d.width,
-                    d.height,
-                    d.cell_m,
-                    (0..d.width * d.height)
-                        .map(|k| d.data.get_f64(k) as u8)
-                        .collect(),
-                );
-                Some(Rivers::new(
-                    &dir,
-                    &grid_f32(w),
-                    &grid_f32(dp),
-                    &t.elevation,
-                    t.lake_level.as_ref(),
-                    &frozen,
-                    &t.cfg.river_params(),
-                ))
-            }
-            _ => None,
-        };
-        Ok(t)
-    }
-
-    /// Sets the block registry and the geology.
-    pub fn with_geology(mut self, blocks: Blocks, geology: Option<Geology>) -> Self {
-        self.soils = resolve_soils(&self.cfg, &blocks);
-        self.blocks = blocks;
-        self.geology = geology;
-        self
+            elevation,
+            lake_level,
+            moho,
+            blocks,
+            geology,
+            climate,
+            rivers,
+        })
     }
 
     pub fn blocks(&self) -> &Blocks {
         &self.blocks
     }
 
-    pub fn geology(&self) -> Option<&Geology> {
-        self.geology.as_ref()
+    pub fn geology(&self) -> &Geology {
+        &self.geology
     }
 
     /// Geology and climate of the column at `(x, z)` (defaults without them).
     pub fn column_geo(&self, x: f64, z: f64) -> ColumnGeo {
         let r = self.cfg.biome_dither_m;
         // With the dither, the biome is read below at another point.
-        let mut c = self.geology.as_ref().map_or_else(ColumnGeo::default, |g| {
-            if r > 0.0 {
-                g.column_without_biome(x, z)
-            } else {
-                g.column(x, z)
-            }
-        });
+        let g = &self.geology;
+        let mut c = if r > 0.0 {
+            g.column_without_biome(x, z)
+        } else {
+            g.column(x, z)
+        };
         c.climate = self.climate(x, z);
-        if r > 0.0
-            && let Some(g) = &self.geology
-        {
+        if r > 0.0 {
             // Hash of the block column (wrapped): the same draw in every chunk.
             let (i, k) = (
                 crate::geology::wrap(x.floor() as i32),
                 crate::geology::wrap(z.floor() as i32),
             );
-            let h = nascio_worldgen::rng::mix64(
+            let h = nascio_world::rng::mix64(
                 self.plant_salt ^ 0xB10E_D17E ^ (((i as u64) << 32) | k as u64),
             );
             let u = |s: u32| ((h >> s) & 0xFFFF) as f64 / 65_536.0;
             c.biome = g.biome(x + r * (u(0) + u(16) - 1.0), z + r * (u(32) + u(48) - 1.0));
         }
-        if self.rivers.is_some() {
-            c.river = matches!(
-                self.river(x, z),
-                Some(RiverHit::Channel { .. } | RiverHit::Bank { .. })
-            );
-        }
+        c.river = matches!(
+            self.river(x, z),
+            Some(RiverHit::Channel { .. } | RiverHit::Bank { .. })
+        );
         c
     }
 
@@ -584,16 +578,13 @@ impl Terrain {
     /// the sea or a lake (the trace ends at the shore).
     #[inline]
     pub fn river(&self, x: f64, z: f64) -> Option<RiverHit> {
-        let hit = self.rivers.as_ref()?.at(x, z)?;
+        let hit = self.rivers.at(x, z)?;
         (self.height_lod(x, z, 0.0) >= self.water_level(x, z) + 0.5).then_some(hit)
     }
 
     /// Surface climate at `(x, z)`.
     pub fn climate(&self, x: f64, z: f64) -> ColumnClimate {
-        let mut c = self
-            .climate
-            .as_ref()
-            .map_or_else(ColumnClimate::default, |c| c.column(x, z));
+        let mut c = self.climate.column(x, z);
         // Dithered freezing threshold: ragged ice edges instead of an isotherm of the coarse
         // climate grid (a straight line where the climate depends on latitude only).
         c.t_warm_water += (self.cfg.water_ice_dither_c * self.ice_noise.sample(x, z)) as f32;
@@ -601,7 +592,7 @@ impl Terrain {
     }
 
     fn lapse(&self) -> f64 {
-        self.climate.as_ref().map_or(0.0065, |c| c.lapse)
+        self.climate.lapse
     }
 
     /// Warmest-month temperature at height `y` of a column, °C.
@@ -617,7 +608,7 @@ impl Terrain {
             return None;
         }
         let tw = self.t_warm(&col.climate, top);
-        let ice_biome = self.geology.is_some() && col.biome == biomes::code::ICE;
+        let ice_biome = col.biome == biomes::code::ICE;
         if !(tw < c.glacier_warm_c || ice_biome) {
             return None;
         }
@@ -706,77 +697,11 @@ impl Terrain {
         }
     }
 
-    /// Sets the Moho depth grid (m below sea level, positive downwards).
-    pub fn with_moho(mut self, moho: Option<PeriodicGrid<f32>>) -> Self {
-        self.moho = moho;
-        self
-    }
-
     /// First magma block of a column whose top solid block is at `top` (stone above it): the
-    /// Moho, kept at least `min_crust_m` below the surface. `i32::MIN` without Moho data.
+    /// Moho, kept at least `min_crust_m` below the surface.
     pub fn moho_y(&self, x: f64, z: f64, top: i32) -> i32 {
-        match &self.moho {
-            Some(m) => {
-                let y = (-m.sample_bilinear(x, z)).floor() as i32;
-                y.min(top - self.cfg.min_crust_m)
-            }
-            None => i32::MIN,
-        }
-    }
-
-    /// Builds a terrain. `tectonic` and `history_flags` share the tectonic grid (they set the
-    /// ruggedness); `elevation` is the eroded fine grid with its `lake_depth`, or `None` to
-    /// use the tectonic elevation itself (worlds made before M3).
-    pub fn new(
-        seed: u64,
-        erosion: &ErosionConfig,
-        tectonic: &PeriodicGrid<f32>,
-        history_flags: &PeriodicGrid<f32>,
-        elevation: Option<PeriodicGrid<f32>>,
-        lake_depth: Option<PeriodicGrid<f32>>,
-        cfg: VoxelConfig,
-    ) -> Self {
-        let ruggedness = ruggedness(tectonic, |i, j| *history_flags.get(i, j) as u8, erosion);
-        let (elevation, baked_spacing) = match elevation {
-            Some(e) => {
-                let b = baked_min_spacing(e.cell_size());
-                (e, b)
-            }
-            None => (tectonic.clone(), f64::INFINITY),
-        };
-        let lake_level = lake_depth.map(|d| {
-            PeriodicGrid::from_fn(d.width(), d.height(), d.cell_size(), |i, j| {
-                let depth = *d.get(i as i64, j as i64);
-                if depth > 0.0 {
-                    elevation.get(i as i64, j as i64) + depth
-                } else {
-                    f32::NEG_INFINITY
-                }
-            })
-        });
-        let blocks = Blocks::builtin();
-        Self {
-            climate: None,
-            rivers: None,
-            soils: resolve_soils(&cfg, &blocks),
-            plants: resolve_plants(&cfg),
-            plant_salt: nascio_worldgen::rng::stage_u64(seed, "vegetation"),
-            ice_noise: nascio_worldgen::noise::Fbm::new(
-                nascio_worldgen::rng::stage_u64(seed, "water-ice-dither"),
-                cfg.water_ice_dither_m,
-                2,
-                0.5,
-            ),
-            cfg,
-            elevation,
-            lake_level,
-            ruggedness,
-            detail: Detail::new(seed, erosion),
-            baked_spacing,
-            moho: None,
-            blocks,
-            geology: None,
-        }
+        let y = (-self.moho.sample_bilinear(x, z)).floor() as i32;
+        y.min(top - self.cfg.min_crust_m)
     }
 
     pub fn config(&self) -> &VoxelConfig {
@@ -828,9 +753,7 @@ impl Terrain {
     /// Water surface at a world position: the surface of a lake whose cells surround the point
     /// (any of the four nearest cell centres), otherwise sea level.
     pub fn water_level(&self, x: f64, z: f64) -> f64 {
-        let Some(l) = &self.lake_level else {
-            return 0.0;
-        };
+        let l = &self.lake_level;
         let c = l.cell_size();
         let gx = (nascio_core::torus::wrap_f64(x) / c - 0.5).floor() as i64;
         let gz = (nascio_core::torus::wrap_f64(z) / c - 0.5).floor() as i64;
@@ -867,9 +790,8 @@ impl Terrain {
             class: Class::Loose,
         };
         if top <= c.beach_high_m {
-            // Beaches and shallow sea floors: quartz sand; deep sea floors: bare sediment
-            // (sand everywhere for worlds without geology).
-            return if top > c.shelf_sand_m || self.geology.is_none() {
+            // Beaches and shallow sea floors: quartz sand; deep sea floors: bare sediment.
+            return if top > c.shelf_sand_m {
                 sand(c.sand_depth_m)
             } else {
                 sand(0)
@@ -883,11 +805,7 @@ impl Terrain {
                 class: Class::Loose,
             };
         }
-        let biome = if self.geology.is_some() {
-            col.biome
-        } else {
-            biomes::code::TEMPERATE_FOREST
-        };
+        let biome = col.biome;
         let s = self.soils[usize::from(biome).min(biomes::code::COUNT - 1)];
         if slope > c.rock_slope || f64::from(top) > c.grass_max_elevation_m {
             return Soil { depth: 0, ..s };
@@ -928,15 +846,6 @@ impl Terrain {
         }
         let (x, z) = (crate::geology::wrap(x), crate::geology::wrap(z));
         let noise = RockNoise::new(f64::from(x) + 0.5, f64::from(z) + 0.5);
-        if self.geology.is_none() {
-            return RockColumn {
-                glacier,
-                soil,
-                weathered: 0.0,
-                sediment_end: 0.0,
-                noise,
-            };
-        }
         // Weathered rock thins out on steep blocks and at altitude; the dither turns the
         // contour of the coarse layer into a ragged fringe (audit M7, anomaly c).
         let c = &self.cfg;
@@ -944,7 +853,7 @@ impl Terrain {
             * (1.0
                 - (1.0 - c.weathering_alt_keep)
                     * smoothstep(c.weathering_alt_m[0], c.weathering_alt_m[1], f64::from(top)));
-        let u = (nascio_worldgen::rng::mix64(
+        let u = (nascio_world::rng::mix64(
             self.plant_salt ^ 0x3EA7_4E11 ^ ((u64::from(x as u32) << 32) | u64::from(z as u32)),
         ) >> 11) as f64
             / (1u64 << 53) as f64;
@@ -985,9 +894,7 @@ impl Terrain {
         if depth < soil.depth {
             return (if depth == 0 { soil.top } else { soil.under }, soil.class);
         }
-        let Some(g) = &self.geology else {
-            return (ids.granite, Class::Basement);
-        };
+        let g = &self.geology;
         let r = f64::from(depth - soil.depth);
         if r < rc.weathered {
             let b = if col.laterite {
@@ -1061,11 +968,7 @@ impl Terrain {
     fn plant_at(&self, x: i32, z: i32, u: f64, pick: f64) -> Option<Plant> {
         let (fx, fz) = (f64::from(x) + 0.5, f64::from(z) + 0.5);
         let col = self.column_geo(fx, fz);
-        let biome = if self.geology.is_some() {
-            col.biome
-        } else {
-            biomes::code::TEMPERATE_FOREST
-        };
+        let biome = col.biome;
         let (density, kinds) = &self.plants[usize::from(biome).min(biomes::code::COUNT - 1)];
         if u >= *density || kinds.is_empty() || col.river {
             return None;
@@ -1116,13 +1019,19 @@ pub(crate) mod tests {
     use proptest::prelude::*;
 
     /// A small synthetic world: a mountain ridge crossing both seams, an ocean, and a lake
-    /// straddling the x seam.
+    /// straddling the x seam; a temperate climate everywhere, continental crust under the land
+    /// and oceanic crust under the sea, no river and no ore body.
     pub fn test_terrain() -> Terrain {
         static T: std::sync::OnceLock<Terrain> = std::sync::OnceLock::new();
-        T.get_or_init(build_test_terrain).clone()
+        T.get_or_init(|| Terrain::from_world(&test_world(), VoxelConfig::default()).unwrap())
+            .clone()
     }
 
-    fn build_test_terrain() -> Terrain {
+    pub fn test_world() -> World {
+        use nascio_world::config::{Scale, WorldConfig};
+        use nascio_world::geology::setting;
+        use nascio_world::tectonics::{CONTINENTAL, OCEANIC};
+
         let n = 125;
         let cell = WORLD_SIZE_F64 / n as f64;
         let wave = |i: usize, j: usize, n: usize| {
@@ -1130,32 +1039,107 @@ pub(crate) mod tests {
             let b = std::f64::consts::TAU * j as f64 / n as f64;
             (1_200.0 * a.det_cos() + 900.0 * b.det_sin() + 300.0 * (a + b).det_cos()) as f32
         };
-        let tectonic = PeriodicGrid::from_fn(n, n, cell, |i, j| wave(i, j, n));
-        let flags = PeriodicGrid::from_fn(n, n, cell, |i, _| if i < 5 { 1.0 } else { 0.0 });
         let m = 5 * n;
-        let fine = PeriodicGrid::from_fn(m, m, cell / 5.0, |i, j| wave(i, j, m));
-        let lakes = PeriodicGrid::from_fn(m, m, cell / 5.0, |i, j| {
-            if (i < 3 || i > m - 4) && (300..306).contains(&j) {
-                5.0
-            } else {
-                0.0
-            }
-        });
-        // Moho 700 m under the sea floor, 3 500 m under the land, varying across both seams.
-        let moho = PeriodicGrid::from_fn(n, n, cell, |i, j| {
-            let e = f64::from(wave(i, j, n));
-            (if e < 0.0 { 700.0 - e } else { 3_500.0 + e }) as f32
-        });
-        Terrain::new(
-            42,
-            &ErosionConfig::default(),
-            &tectonic,
-            &flags,
-            Some(fine),
-            Some(lakes),
-            VoxelConfig::default(),
-        )
-        .with_moho(Some(moho))
+        let fine_cell = cell / 5.0;
+        let tect = |f: &dyn Fn(usize, usize) -> f32| PeriodicGrid::from_fn(n, n, cell, f);
+        let fine = |f: &dyn Fn(usize, usize) -> f32| PeriodicGrid::from_fn(m, m, fine_cell, f);
+        let land = |i: usize, j: usize| wave(i, j, n) > 0.0;
+        let f32s = |name: &str, g: PeriodicGrid<f32>| Layer::from_f32(name, "", &g);
+        let u8s = |name: &str, g: PeriodicGrid<u8>| Layer::from_u8(name, "", &g);
+        let layers =
+            vec![
+                f32s("elevation_tectonic", tect(&|i, j| wave(i, j, n))),
+                f32s("history_flags", tect(&|i, _| if i < 5 { 1.0 } else { 0.0 })),
+                // Moho 700 m under the sea floor, 3 500 m under the land, varying across both seams.
+                f32s(
+                    "moho_depth",
+                    tect(&|i, j| {
+                        let e = f64::from(wave(i, j, n));
+                        (if e < 0.0 { 700.0 - e } else { 3_500.0 + e }) as f32
+                    }),
+                ),
+                u8s(
+                    "geo_context",
+                    PeriodicGrid::from_fn(n, n, cell, |i, j| {
+                        if land(i, j) {
+                            setting::CRATON
+                        } else {
+                            setting::OCEAN
+                        }
+                    }),
+                ),
+                u8s(
+                    "crust_type",
+                    PeriodicGrid::from_fn(n, n, cell, |i, j| {
+                        if land(i, j) { CONTINENTAL } else { OCEANIC }
+                    }),
+                ),
+                f32s("sediment_thickness", tect(&|_, _| 0.0)),
+                f32s("weathering_depth", tect(&|_, _| 0.0)),
+                f32s("laterite", tect(&|_, _| 0.0)),
+                f32s("temperature_x0", tect(&|_, _| 12.0)),
+                f32s("temperature_a1", tect(&|_, _| 8.0)),
+                f32s("temperature_p1", tect(&|_, _| 0.0)),
+                f32s("temperature_a2", tect(&|_, _| 0.0)),
+                f32s("temperature_p2", tect(&|_, _| 0.0)),
+                f32s("precipitation_x0", tect(&|_, _| 800.0)),
+                u8s(
+                    "biome",
+                    PeriodicGrid::from_fn(n, n, cell, |_, _| {
+                        nascio_world::biomes::code::TEMPERATE_FOREST
+                    }),
+                ),
+                f32s("elevation", fine(&|i, j| wave(i, j, m))),
+                f32s(
+                    "lake_depth",
+                    fine(&|i, j| {
+                        if (i < 3 || i > m - 4) && (300..306).contains(&j) {
+                            5.0
+                        } else {
+                            0.0
+                        }
+                    }),
+                ),
+                u8s(
+                    "flow_direction",
+                    PeriodicGrid::from_fn(m, m, fine_cell, |_, _| NO_DIR),
+                ),
+                f32s("river_width", fine(&|_, _| 0.0)),
+                f32s("river_depth", fine(&|_, _| 0.0)),
+                u8s(
+                    "river_order",
+                    PeriodicGrid::from_fn(m, m, fine_cell, |_, _| 0),
+                ),
+            ];
+        let catalog = nascio_world::deposits::Catalog::default_catalog();
+        let registry = nascio_world::blocks::BlockRegistry::with_catalog(&catalog).unwrap();
+        let mut files = std::collections::BTreeMap::new();
+        files.insert(
+            "deposits.toml".to_string(),
+            nascio_world::deposits::DEFAULT_CATALOG.as_bytes().to_vec(),
+        );
+        files.insert(
+            "blocks.toml".to_string(),
+            registry.to_toml().unwrap().into_bytes(),
+        );
+        World {
+            config: WorldConfig::new(42, Scale::Fifth),
+            layers,
+            files,
+        }
+    }
+
+    #[test]
+    fn legacy_worlds_are_refused() {
+        let mut w = test_world();
+        w.layers.retain(|l| l.name != "geo_context");
+        let e = Terrain::from_world(&w, VoxelConfig::default())
+            .err()
+            .unwrap();
+        assert!(e.to_string().contains("geo_context"), "{e}");
+        let mut w = test_world();
+        w.layers.retain(|l| l.name != "temperature_a2");
+        assert!(Terrain::from_world(&w, VoxelConfig::default()).is_err());
     }
 
     #[test]

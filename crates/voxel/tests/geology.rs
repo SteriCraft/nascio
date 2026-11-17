@@ -74,7 +74,7 @@ fn column_layers_in_order() {
 #[test]
 fn ore_bodies_replace_rock_only() {
     let t = terrain();
-    let g = t.geology().expect("geology");
+    let g = t.geology();
     let builtin = BUILTIN.len() as u16;
     let mut found = [false; 4];
     for shape in [Shape::Stock, Shape::Layer, Shape::Vein, Shape::Lens] {

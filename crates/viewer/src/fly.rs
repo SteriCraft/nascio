@@ -26,7 +26,7 @@ use nascio_core::consts::{CHUNK_SIZE, CHUNKS_PER_AXIS};
 use nascio_core::coords::{BlockPos, ChunkPos, WorldPos};
 use nascio_core::geo::{latitude, longitude, seam_distance};
 use nascio_core::time::GameClock;
-use nascio_core::torus::delta;
+use nascio_core::torus::{delta, delta_chunks};
 use nascio_voxel::mesh::MeshData;
 use nascio_voxel::{ChunkMesh, ColumnSet, DeltaStore, Terrain, mesh_chunk};
 
@@ -293,8 +293,8 @@ impl Streamer {
     /// Whether column `key` lies within `radius` columns of the camera column.
     fn within(&self, key: (i32, i32), radius: i32) -> bool {
         let (dx, dz) = (
-            chunk_delta(self.center.0, key.0),
-            chunk_delta(self.center.1, key.1),
+            delta_chunks(self.center.0, key.0),
+            delta_chunks(self.center.1, key.1),
         );
         dx * dx + dz * dz <= radius * radius
     }
@@ -303,15 +303,6 @@ impl Streamer {
     /// for exactly these columns.
     pub fn wants_hole(&self, key: (i32, i32)) -> bool {
         matches!(self.slots.get(&key), Some(Slot::Ready { .. })) && self.within(key, self.radius)
-    }
-}
-
-pub fn chunk_delta(a: i32, b: i32) -> i32 {
-    let d = (b - a).rem_euclid(CHUNKS_PER_AXIS);
-    if d > CHUNKS_PER_AXIS / 2 {
-        d - CHUNKS_PER_AXIS
-    } else {
-        d
     }
 }
 
@@ -530,8 +521,8 @@ pub fn stream_chunks(
             return true;
         }
         let (dx, dz) = (
-            chunk_delta(center_now.0, k.0),
-            chunk_delta(center_now.1, k.1),
+            delta_chunks(center_now.0, k.0),
+            delta_chunks(center_now.1, k.1),
         );
         dx * dx + dz * dz <= keep * keep
     });
@@ -580,7 +571,7 @@ pub fn column_visibility(
     let use_horizon = settings.horizon && horizon.is_displayed();
     let (radius, keep, center) = (s.radius, s.radius + 2, s.center);
     let within = |k: (i32, i32), r: i32| {
-        let (dx, dz) = (chunk_delta(center.0, k.0), chunk_delta(center.1, k.1));
+        let (dx, dz) = (delta_chunks(center.0, k.0), delta_chunks(center.1, k.1));
         dx * dx + dz * dz <= r * r
     };
     let mut removed = 0;

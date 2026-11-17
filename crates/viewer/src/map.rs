@@ -71,7 +71,7 @@ pub struct MapState {
     pub section: Option<((f64, f64), (f64, f64))>,
     section_dirty: bool,
     section_tex: Option<(egui::TextureHandle, [usize; 2])>,
-    section_temp: Option<nascio_voxel::section::SurfaceTemperature>,
+    section_temp: Option<nascio_tools::section::SurfaceTemperature>,
 }
 
 impl MapState {
@@ -586,9 +586,9 @@ fn section_window(ctx: &egui::Context, s: &mut MapState, terrain: &nascio_voxel:
         s.section_dirty = false;
         let temp = s
             .section_temp
-            .get_or_insert_with(|| nascio_voxel::section::SurfaceTemperature::from_world(&s.world));
+            .get_or_insert_with(|| nascio_tools::section::SurfaceTemperature::from_world(&s.world));
         let catalog = s.world.catalog().ok().flatten();
-        let spec = nascio_voxel::section::SectionSpec {
+        let spec = nascio_tools::section::SectionSpec {
             from: a,
             to: b,
             top_m: 2_000.0,
@@ -600,7 +600,7 @@ fn section_window(ctx: &egui::Context, s: &mut MapState, terrain: &nascio_voxel:
                 a.0, a.1, b.0, b.1
             ),
         };
-        let cv = nascio_voxel::section::render(terrain, temp, catalog.as_ref(), &spec);
+        let cv = nascio_tools::section::render(terrain, temp, catalog.as_ref(), &spec);
         let (w, h) = (cv.img.width() as usize, cv.img.height() as usize);
         let pixels = cv
             .img

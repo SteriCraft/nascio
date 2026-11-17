@@ -6,7 +6,7 @@
 //! `+WORLD_SIZE / 2` in **both** directions (`delta(a, b) == delta(b, a) == HALF_WORLD`).
 //! This is the only case where `delta` is not antisymmetric.
 
-use crate::consts::{HALF_WORLD, WORLD_SIZE, WORLD_SIZE_F64};
+use crate::consts::{CHUNKS_PER_AXIS, HALF_WORLD, WORLD_SIZE, WORLD_SIZE_F64};
 use crate::fmath::DetMath;
 
 /// Wraps a coordinate into `[0, WORLD_SIZE)`.
@@ -21,6 +21,15 @@ pub fn wrap_f64(v: f64) -> f64 {
     let w = v.rem_euclid(WORLD_SIZE_F64);
     // rem_euclid may round up to exactly the period for tiny negative inputs.
     if w >= WORLD_SIZE_F64 { 0.0 } else { w }
+}
+
+/// Shortest signed offset from chunk coordinate `a` to `b` (horizontal), in
+/// `[-1562, 1562]` (`CHUNKS_PER_AXIS` = 3125 is odd). Any pair of `i32` inputs is valid.
+#[inline]
+pub fn delta_chunks(a: i32, b: i32) -> i32 {
+    let s = i64::from(CHUNKS_PER_AXIS);
+    let d = (i64::from(b) - i64::from(a)).rem_euclid(s);
+    (if d > s / 2 { d - s } else { d }) as i32
 }
 
 /// Shortest signed offset from `a` to `b`, in `(-WORLD_SIZE/2, WORLD_SIZE/2]`.
@@ -95,6 +104,32 @@ mod tests {
     use proptest::prelude::*;
 
     const S: i32 = WORLD_SIZE;
+
+    #[test]
+    fn delta_chunks_across_the_seam() {
+        let n = CHUNKS_PER_AXIS;
+        assert_eq!(delta_chunks(n - 1, 0), 1);
+        assert_eq!(delta_chunks(0, n - 1), -1);
+        assert_eq!(delta_chunks(3, 3 + n), 0);
+        // Extreme inputs do not overflow: 2^32 - 1 = 1 374 389 × 3125 + 1670, i.e. -1455.
+        assert_eq!(delta_chunks(i32::MIN, i32::MAX), 1670 - n);
+    }
+
+    proptest! {
+        #[test]
+        fn delta_chunks_is_shortest_and_periodic(
+            a in -1_000_000_000i32..1_000_000_000,
+            b in -1_000_000_000i32..1_000_000_000,
+            k in -3i32..3,
+        ) {
+            let n = CHUNKS_PER_AXIS;
+            let d = delta_chunks(a, b);
+            prop_assert!(d >= -n / 2 && d <= n / 2);
+            prop_assert_eq!((i64::from(a) + i64::from(d) - i64::from(b)).rem_euclid(i64::from(n)), 0);
+            prop_assert_eq!(delta_chunks(a + k * n, b), d);
+            prop_assert_eq!(delta_chunks(a, b + k * n), d);
+        }
+    }
 
     #[test]
     fn wrap_basic() {

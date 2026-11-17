@@ -25,15 +25,18 @@ Documents de référence, à lire avant toute tâche importante :
 ```
 crates/
   core/       nascio-core      maths du tore, coordonnées, constantes, temps et astronomie
+  world/      nascio-world     données d'un monde lues par la génération des chunks : config,
+                               grilles, bruit, fichiers, blocs, codes des couches, gisements
   worldgen/   nascio-worldgen  simulation macro (tectonique, érosion, climat, géologie) + CLI
   voxel/      nascio-voxel     définition des blocs, chunks 32³, génération de chunks, maillage
+  tools/      nascio-tools     outils de développement : chunkbench, topview, geology, coupes
   viewer/     nascio-viewer    visualiseur Bevy : cartes 2D + vue 3D en vol libre
 docs/
 out/          sorties générées (PNG, mondes de test), ignorées par git
 ```
 Plus tard : `server`, `protocol`, `client`, `web`.
 
-Sens des dépendances : `core` ← `worldgen` ← `voxel` ← `viewer`. **`core` ne dépend d'aucun moteur graphique.**
+Sens des dépendances : `core` ← `world` ← `worldgen` et `voxel` ; `tools` et `viewer` dépendent des trois. `voxel` ne dépend pas de `worldgen` (sauf pour ses tests). **`core` ne dépend d'aucun moteur graphique.**
 
 ## Invariants à ne jamais violer
 1. **Le tore partout.** Les coordonnées horizontales (x, z) sont périodiques, de période `WORLD_SIZE = 100_000`. Toute différence, distance, voisinage ou interpolation passe par les fonctions de `nascio-core::torus` (`wrap`, `delta`, `distance`…). On ne soustrait **jamais** deux coordonnées brutes. Les tests doivent couvrir les cas qui traversent la couture.

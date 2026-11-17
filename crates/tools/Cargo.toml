@@ -1,0 +1,21 @@
+[package]
+name = "nascio-tools"
+description = "Development tools for Nascio: chunk bench, top views, geological sections"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+nascio-core.workspace = true
+nascio-world.workspace = true
+nascio-worldgen.workspace = true
+nascio-voxel.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+rayon.workspace = true
+image.workspace = true
+
+[lints]
+workspace = true

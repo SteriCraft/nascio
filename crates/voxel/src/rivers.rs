@@ -27,9 +27,9 @@
 use nascio_core::consts::WORLD_SIZE_F64;
 use nascio_core::fmath::DetMath;
 use nascio_core::torus::{delta_f64, wrap_f64};
-use nascio_worldgen::erosion::flow::{D8, NO_DIR};
-use nascio_worldgen::grid::PeriodicGrid;
-use nascio_worldgen::rng::mix64;
+use nascio_world::erosion::flow::{D8, NO_DIR};
+use nascio_world::grid::PeriodicGrid;
+use nascio_world::rng::mix64;
 use serde::{Deserialize, Serialize};
 
 /// Width and depth of the rivers.
@@ -177,7 +177,7 @@ impl Rivers {
         width: &PeriodicGrid<f32>,
         depth: &PeriodicGrid<f32>,
         ground: &PeriodicGrid<f32>,
-        lake_level: Option<&PeriodicGrid<f32>>,
+        lake_level: &PeriodicGrid<f32>,
         frozen: &[bool],
         p: &RiverParams,
     ) -> Self {
@@ -185,7 +185,7 @@ impl Rivers {
         let cell = dir.cell_size();
         let n = res * res;
         let d = dir.data();
-        let lake = |k: usize| lake_level.map_or(f32::NEG_INFINITY, |l| l.data()[k]);
+        let lake = |k: usize| lake_level.data()[k];
         let step = |k: usize, code: u8| {
             let (i, j) = ((k % res) as i64, (k / res) as i64);
             let (di, dj) = D8[usize::from(code)];
@@ -731,7 +731,7 @@ mod tests {
             &width,
             &depth,
             &ground,
-            None,
+            &ground.map(|_| f32::NEG_INFINITY),
             &vec![false; res * res],
             p,
         )
@@ -810,7 +810,15 @@ mod tests {
         let depth = width.clone();
         let ground = PeriodicGrid::from_fn(res, res, 32.0, |i, _| 100.0 - i as f32);
         let frozen: Vec<bool> = (0..res * res).map(|k| k % res < 20 && k < res).collect();
-        let r = Rivers::new(&dir, &width, &depth, &ground, None, &frozen, &params(0.0));
+        let r = Rivers::new(
+            &dir,
+            &width,
+            &depth,
+            &ground,
+            &ground.map(|_| f32::NEG_INFINITY),
+            &frozen,
+            &params(0.0),
+        );
         assert_eq!(r.at(10.0 * 32.0 + 16.5, 16.5), None);
         assert!(matches!(
             r.at(30.0 * 32.0 + 16.5, 16.5),

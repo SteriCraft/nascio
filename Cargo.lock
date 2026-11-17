@@ -4163,6 +4163,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nascio-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "image",
+ "nascio-core",
+ "nascio-voxel",
+ "nascio-world",
+ "nascio-worldgen",
+ "rayon",
+]
+
+[[package]]
 name = "nascio-viewer"
 version = "0.1.0"
 dependencies = [
@@ -4171,6 +4185,7 @@ dependencies = [
  "bevy_egui",
  "clap",
  "nascio-core",
+ "nascio-tools",
  "nascio-voxel",
  "nascio-worldgen",
  "rayon",
@@ -4184,12 +4199,25 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
- "clap",
- "image",
  "nascio-core",
+ "nascio-world",
  "nascio-worldgen",
  "proptest",
  "rayon",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "nascio-world"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "nascio-core",
+ "proptest",
+ "rand",
+ "rand_chacha",
  "serde",
  "toml",
 ]
@@ -4203,6 +4231,7 @@ dependencies = [
  "clap",
  "image",
  "nascio-core",
+ "nascio-world",
  "proptest",
  "rand",
  "rand_chacha",

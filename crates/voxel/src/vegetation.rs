@@ -3,14 +3,14 @@
 //! plant, at a position and with a chance drawn from a hash of the cell, so every chunk finds
 //! the same plants, across the seam included. A plant may overhang the neighbouring chunks.
 
-use nascio_worldgen::rng::mix64;
+use nascio_world::rng::mix64;
 use serde::{Deserialize, Serialize};
 
 /// Plants of one biome (`[[voxel.vegetation]]`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BiomePlants {
-    /// Biome name, as in `nascio_worldgen::biomes::NAMES`.
+    /// Biome name, as in `nascio_world::biomes::NAMES`.
     pub biome: String,
     /// Share of the cells that hold a plant (0 to 1).
     pub density: f64,

@@ -6,14 +6,14 @@
 //! and the column is continuous across the seam. Setting boundaries are warped by a periodic
 //! noise so that they do not follow the 160 m cells.
 
+use anyhow::Context;
 use nascio_core::torus;
-use nascio_worldgen::biomes;
-use nascio_worldgen::deposits::{Body, BodyIndex, Host, Shape, block_hash};
-use nascio_worldgen::geology::setting;
-use nascio_worldgen::grid::PeriodicGrid;
-use nascio_worldgen::noise::Fbm;
-use nascio_worldgen::rng::{mix64, stage_u64};
-use nascio_worldgen::world_io::{Layer, World};
+use nascio_world::deposits::{Body, BodyIndex, Host, Shape, block_hash};
+use nascio_world::geology::setting;
+use nascio_world::grid::PeriodicGrid;
+use nascio_world::noise::Fbm;
+use nascio_world::rng::{mix64, stage_u64};
+use nascio_world::world_io::{Layer, World};
 
 use crate::block::{BlockId, Blocks};
 
@@ -90,9 +90,9 @@ pub struct Geology {
     sediment: PeriodicGrid<f32>,
     weathering: PeriodicGrid<f32>,
     laterite: PeriodicGrid<f32>,
-    precipitation: Option<PeriodicGrid<f32>>,
-    rivers: Option<PeriodicGrid<u8>>,
-    biome: Option<PeriodicGrid<u8>>,
+    precipitation: PeriodicGrid<f32>,
+    rivers: PeriodicGrid<u8>,
+    biome: PeriodicGrid<u8>,
     warp_x: Fbm,
     warp_z: Fbm,
     /// Finer warp of the biome boundaries only (the biome grid is 160 m).
@@ -130,19 +130,29 @@ const BIOME_WARP_M: f64 = 60.0;
 const BED_M: f64 = 7.0;
 
 impl Geology {
-    /// Geology of a generated world (`None` before M5: no `geo_context` layer).
-    pub fn from_world(world: &World, blocks: &Blocks) -> anyhow::Result<Option<Self>> {
-        let (Some(set), Some(crust), Some(sed), Some(wea), Some(lat)) = (
-            world.layer("geo_context"),
-            world.layer("crust_type"),
-            world.layer("sediment_thickness"),
-            world.layer("weathering_depth"),
-            world.layer("laterite"),
-        ) else {
-            return Ok(None);
-        };
+    /// Geology of a generated world. Every layer is required (worlds made before M5 are
+    /// refused).
+    pub fn from_world(world: &World, blocks: &Blocks) -> anyhow::Result<Self> {
+        let set = world
+            .layer("geo_context")
+            .context("world has no geo_context layer (made before M5?)")?;
+        let crust = world
+            .layer("crust_type")
+            .context("world has no crust_type layer (made before M5?)")?;
+        let sed = world
+            .layer("sediment_thickness")
+            .context("world has no sediment_thickness layer (made before M5?)")?;
+        let wea = world
+            .layer("weathering_depth")
+            .context("world has no weathering_depth layer (made before M5?)")?;
+        let lat = world
+            .layer("laterite")
+            .context("world has no laterite layer (made before M5?)")?;
+        let cat = world
+            .catalog()?
+            .context("world has no deposit catalogue (made before M5?)")?;
         let mut ores = Vec::new();
-        if let Some(cat) = world.catalog()? {
+        {
             for d in &cat.deposits {
                 let id = |name: &str| {
                     blocks
@@ -170,15 +180,27 @@ impl Geology {
         }
         let seed = world.config.seed;
         let s = |label: &str| stage_u64(seed, label);
-        Ok(Some(Self {
+        Ok(Self {
             setting: grid_u8(set),
             crust: grid_u8(crust),
             sediment: grid_f32(sed),
             weathering: grid_f32(wea),
             laterite: grid_f32(lat),
-            precipitation: world.layer("precipitation_x0").map(grid_f32),
-            rivers: world.layer("river_order").map(grid_u8),
-            biome: world.layer("biome").map(grid_u8),
+            precipitation: grid_f32(
+                world
+                    .layer("precipitation_x0")
+                    .context("world has no precipitation_x0 layer (made before M5?)")?,
+            ),
+            rivers: grid_u8(
+                world
+                    .layer("river_order")
+                    .context("world has no river_order layer (made before M5?)")?,
+            ),
+            biome: grid_u8(
+                world
+                    .layer("biome")
+                    .context("world has no biome layer (made before M5?)")?,
+            ),
             warp_x: Fbm::new(s("column-warp-x"), 800.0, 3, 0.5),
             warp_z: Fbm::new(s("column-warp-z"), 800.0, 3, 0.5),
             biome_warp_x: Fbm::new(s("biome-warp-x"), 250.0, 2, 0.5),
@@ -189,14 +211,11 @@ impl Geology {
             strata_seed: s("column-beds"),
             bodies: BodyIndex::new(world.bodies()?),
             ores,
-        }))
+        })
     }
 
     /// Biome code at `(x, z)`, read at the warped position like the settings.
     pub fn biome(&self, x: f64, z: f64) -> u8 {
-        if self.biome.is_none() {
-            return biomes::code::TEMPERATE_FOREST;
-        }
         let wx = x + WARP_M * self.warp_x.sample(x, z);
         let wz = z + WARP_M * self.warp_z.sample(x, z);
         self.biome_warped(x, z, wx, wz)
@@ -204,9 +223,7 @@ impl Geology {
 
     /// [`Self::biome`] at `(x, z)` whose settings warp lands at `(wx, wz)`.
     fn biome_warped(&self, x: f64, z: f64, wx: f64, wz: f64) -> u8 {
-        let Some(b) = &self.biome else {
-            return biomes::code::TEMPERATE_FOREST;
-        };
+        let b = &self.biome;
         let wx = wx + BIOME_WARP_M * self.biome_warp_x.sample(x, z);
         let wz = wz + BIOME_WARP_M * self.biome_warp_z.sample(x, z);
         let (i, j) = b.cell_of(wx, wz);
@@ -239,17 +256,14 @@ impl Geology {
             sediment: self.sediment.sample_bilinear(x, z).max(0.0) as f32,
             weathering: self.weathering.sample_bilinear(x, z).max(0.0) as f32,
             laterite: self.laterite.sample_bilinear(x, z) > 0.5,
-            river: self.rivers.as_ref().is_some_and(|r| near(r, x, z) > 0),
+            river: near(&self.rivers, x, z) > 0,
             biome: if biome {
                 self.biome_warped(x, z, wx, wz)
             } else {
                 0
             },
             climate: Default::default(),
-            arid: self
-                .precipitation
-                .as_ref()
-                .is_some_and(|p| p.sample_bilinear(x, z) < ARID_MM),
+            arid: self.precipitation.sample_bilinear(x, z) < ARID_MM,
         }
     }
 

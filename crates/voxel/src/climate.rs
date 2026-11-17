@@ -5,9 +5,10 @@
 //! of each climate cell (as the biomes do), so that the temperature at any block height `y` is
 //! `t_sl − lapse · max(y, 0)`: the fine relief gets its own snow line.
 
+use anyhow::Context;
 use nascio_core::climate::Harmonics;
-use nascio_worldgen::grid::PeriodicGrid;
-use nascio_worldgen::world_io::{Layer, World};
+use nascio_world::grid::PeriodicGrid;
+use nascio_world::world_io::{Layer, World};
 
 /// Samples of the year used for the warmest month.
 const YEAR_SAMPLES: usize = 24;
@@ -58,14 +59,25 @@ fn grid(l: &Layer) -> PeriodicGrid<f32> {
 }
 
 impl SurfaceClimate {
-    /// Climate of a generated world (`None` before M4), with `elevation` its finest relief.
-    pub fn from_world(world: &World, elevation: &PeriodicGrid<f32>) -> Option<Self> {
+    /// Climate of a generated world, with `elevation` its finest relief. The layers are
+    /// required (worlds made before M4 are refused).
+    pub fn from_world(world: &World, elevation: &PeriodicGrid<f32>) -> anyhow::Result<Self> {
         let names = ["x0", "a1", "p1", "a2", "p2"];
         let t: Vec<PeriodicGrid<f32>> = names
             .iter()
-            .map(|n| world.layer(&format!("temperature_{n}")).map(grid))
-            .collect::<Option<_>>()?;
-        let precip = grid(world.layer("precipitation_x0")?);
+            .map(|n| {
+                let name = format!("temperature_{n}");
+                world
+                    .layer(&name)
+                    .map(grid)
+                    .with_context(|| format!("world has no {name} layer (made before M4?)"))
+            })
+            .collect::<anyhow::Result<_>>()?;
+        let precip = grid(
+            world
+                .layer("precipitation_x0")
+                .context("world has no precipitation_x0 layer (made before M4?)")?,
+        );
         let lapse = world.config.climate.lapse_rate_c_per_m;
         let (w, h, cell) = (t[0].width(), t[0].height(), t[0].cell_size());
         // Mean land height of each climate cell, from the finest relief.
@@ -102,7 +114,7 @@ impl SurfaceClimate {
         let t_warm_sl = PeriodicGrid::from_fn(w, h, cell, |i, j| {
             (f64::from(*t_warm_water.get(i as i64, j as i64)) + lift(i, j)) as f32
         });
-        Some(Self {
+        Ok(Self {
             lapse,
             t_mean_sl,
             t_warm_sl,

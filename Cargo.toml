@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/worldgen", "crates/voxel", "crates/viewer"]
+members = ["crates/core", "crates/world", "crates/worldgen", "crates/voxel", "crates/tools", "crates/viewer"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,8 +11,10 @@ repository = "https://github.com/SteriCraft/nascio"
 
 [workspace.dependencies]
 nascio-core = { path = "crates/core" }
+nascio-world = { path = "crates/world" }
 nascio-worldgen = { path = "crates/worldgen" }
 nascio-voxel = { path = "crates/voxel" }
+nascio-tools = { path = "crates/tools" }
 
 # All versions are pinned. Upgrading one is an explicit decision (docs/decisions.md).
 serde = { version = "=1.0.229", features = ["derive"] }

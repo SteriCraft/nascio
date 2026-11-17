@@ -4,13 +4,13 @@
 use nascio_core::GeothermConfig;
 use nascio_core::fmath::DetMath;
 use nascio_core::torus;
-use nascio_worldgen::deposits::Catalog;
-use nascio_worldgen::grid::PeriodicGrid;
+use nascio_world::deposits::Catalog;
+use nascio_world::grid::PeriodicGrid;
+use nascio_world::world_io::World;
 use nascio_worldgen::plot::{Canvas, rgb, text_width};
-use nascio_worldgen::world_io::World;
 
-use crate::Terrain;
-use crate::block::BlockId;
+use nascio_voxel::Terrain;
+use nascio_voxel::block::BlockId;
 
 /// Isotherms drawn on sections, °C.
 pub const ISOTHERMS_C: [f64; 5] = [50.0, 100.0, 300.0, 600.0, 900.0];
@@ -147,9 +147,7 @@ pub fn render(
             let gz = terrain.height(c.x, c.z + e) - terrain.height(c.x, c.z - e);
             gx.det_hypot(gz) / (2.0 * e)
         };
-        let bodies = terrain
-            .geology()
-            .map_or_else(Vec::new, |g| g.bodies_near(c.x - 1.0, c.z - 1.0, 2.0));
+        let bodies = terrain.geology().bodies_near(c.x - 1.0, c.z - 1.0, 2.0);
         for py in 0..h {
             let y = spec.top_m - (py as f64 + 0.5) / h as f64 * span;
             let yi = y.floor() as i32;
@@ -167,7 +165,7 @@ pub fn render(
                     terrain.rock_block(&geo, bx, bz, c.top, slope, c.moho, c.top - yi);
                 let ore = terrain
                     .geology()
-                    .and_then(|g| g.ore_kind(&bodies, class, bx, yi, bz, c.top));
+                    .ore_kind(&bodies, class, bx, yi, bz, c.top);
                 match (ore, catalog) {
                     (Some(k), Some(cat)) if usize::from(k) < cat.deposits.len() => {
                         ores_used[usize::from(k)] = true;

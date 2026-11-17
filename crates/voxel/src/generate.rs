@@ -14,7 +14,7 @@ use crate::chunk::{Chunk, ChunkDeltas, NP, PaddedChunk};
 use crate::geology::{ColumnGeo, wrap};
 use crate::terrain::{RockColumn, Terrain};
 use crate::vegetation::{MAX_RADIUS, Part, PlantKind};
-use nascio_worldgen::deposits::Body;
+use nascio_world::deposits::Body;
 
 /// Columns stored around a chunk column: local `-2..=33` (one more than the padded border, for
 /// the slope).
@@ -77,13 +77,11 @@ impl ColumnSet {
                 geos[lx + NP * lz] = terrain.column_geo(x, z);
             }
         }
-        let bodies = terrain.geology().map_or_else(Vec::new, |g| {
-            g.bodies_near(
-                f64::from(ox - 2),
-                f64::from(oz - 2),
-                f64::from(CHUNK_SIZE + 4),
-            )
-        });
+        let bodies = terrain.geology().bodies_near(
+            f64::from(ox - 2),
+            f64::from(oz - 2),
+            f64::from(CHUNK_SIZE + 4),
+        );
         // Plants of the column and its border, overhanging ones included. Where two overlap, the
         // higher part wins (cactus, then log, then leaves).
         let mut plants = vec![Vec::new(); NP * NP];
@@ -279,8 +277,7 @@ impl ColumnSet {
             rock.get_or_insert_with(|| terrain.rock_column(geo, wx, wz, top, self.slope(x, z)));
         let (b, class) = terrain.rock_at(rc, geo, top, moho, top - y);
         if !self.bodies.is_empty()
-            && let Some(g) = terrain.geology()
-            && let Some(ore) = g.ore(&self.bodies, class, wx, y, wz, top)
+            && let Some(ore) = terrain.geology().ore(&self.bodies, class, wx, y, wz, top)
         {
             return ore;
         }
@@ -554,7 +551,21 @@ mod tests {
                 }
             }
         }
-        assert!(seen[usize::from(ids.grass)] && seen[usize::from(ids.sand)]);
+        assert!(seen[usize::from(ids.grass)], "grass");
+        // Beaches and shallow sea floors are sand (deep sea floors are bare sediment).
+        let c = t.config();
+        let beach = (0..CHUNKS_PER_AXIS)
+            .flat_map(|cx| (0..CHUNK_SIZE).map(move |lx| (cx, lx)))
+            .find_map(|(cx, lx)| {
+                let col = ColumnSet::new(&t, cx, 1_000);
+                let top = col.top(lx, 9);
+                (top > c.shelf_sand_m && top <= c.beach_high_m).then_some((cx, lx, top))
+            })
+            .expect("a beach on the test row");
+        let (cx, lx, top) = beach;
+        let p =
+            nascio_core::coords::BlockPos::new(cx * CHUNK_SIZE + lx, top, 1_000 * CHUNK_SIZE + 9);
+        assert_eq!(generate_chunk(&t, p.chunk()).get(p.local()), ids.sand);
         assert!(seen[usize::from(ids.water)]);
         let p = ChunkPos::new(5, 0, 5);
         assert!(chunk_at(&t, &NoDeltas, p) == generate_chunk(&t, p));

@@ -9,21 +9,23 @@ use nascio_core::torus::wrap_f64;
 
 use crate::rng::mix64;
 
-/// All divisors of `WORLD_SIZE` (2⁵·5⁵), ascending.
-pub fn world_divisors() -> Vec<u32> {
-    let mut d: Vec<u32> = (1..=WORLD_SIZE as u32)
-        .filter(|v| (WORLD_SIZE as u32).is_multiple_of(*v))
-        .collect();
-    d.sort_unstable();
-    d
+/// All divisors of `WORLD_SIZE` (2⁵·5⁵), ascending (computed once).
+pub fn world_divisors() -> &'static [u32] {
+    static DIVISORS: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    DIVISORS.get_or_init(|| {
+        (1..=WORLD_SIZE as u32)
+            .filter(|v| (WORLD_SIZE as u32).is_multiple_of(*v))
+            .collect()
+    })
 }
 
 /// Largest divisor of `WORLD_SIZE` not above `max`, or 1.
 pub fn divisor_at_most(max: f64) -> u32 {
     world_divisors()
-        .into_iter()
+        .iter()
         .rev()
-        .find(|&d| f64::from(d) <= max)
+        .find(|&&d| f64::from(d) <= max)
+        .copied()
         .unwrap_or(1)
 }
 
