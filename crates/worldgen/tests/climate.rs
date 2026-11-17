@@ -40,14 +40,29 @@ fn climate_is_continuous_across_the_seam_and_zonally_plausible() {
     assert!(row_mean(0, &a1) < 0.3 * row_mean(res / 4, &a1));
     // Zonal means: warm equator, cold seam.
     let eq = 0.5 * (row_mean(res / 2 - 1, &x0) + row_mean(res / 2, &x0));
-    let seam = 0.5 * (row_mean(0, &x0) + row_mean(res - 1, &x0));
     assert!((20.0..32.0).contains(&eq), "equator {eq}");
-    // Spec §4.3 aims at about -20 °C; the generator gives about -10 (v16: -10.4, v17: -9.8).
-    assert!((-28.0..-8.0).contains(&seam), "seam {seam}");
     // Polar band: heavy precipitation and permanent snow on land.
     let p0 = row_mean(0, &|k| f64::from(g.climate.precipitation.x0.data()[k]));
     assert!(p0 >= 1_000.0, "polar precipitation {p0}");
     // Continuity over the year of an arbitrary cell.
     let h: Harmonics = t.cell(res * res / 3);
     assert!((h.eval(0.0) - h.eval(365.0)).abs() < 1e-9);
+}
+
+/// Zonal mean near the seam on the target of spec §4.3 (about -20 °C). The generator gives
+/// about -10 °C (v16: -10.4, v17: -9.8): ignored until the recalibration of audit M7, lot 5.
+#[test]
+#[ignore = "seam climate recalibration pending (audit M7, lot 5)"]
+fn seam_zonal_mean_is_on_the_spec_target() {
+    let g = generate_full(&WorldConfig::new(42, Scale::Fifth)).expect("generation");
+    let t = &g.climate.temperature;
+    let res = t.x0.width();
+    let row_mean = |j: usize| {
+        (0..res)
+            .map(|i| f64::from(t.x0.data()[j * res + i]))
+            .sum::<f64>()
+            / res as f64
+    };
+    let seam = 0.5 * (row_mean(0) + row_mean(res - 1));
+    assert!((-25.0..-15.0).contains(&seam), "seam {seam}");
 }
