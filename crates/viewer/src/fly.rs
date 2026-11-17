@@ -195,14 +195,14 @@ impl Workers {
     }
 }
 
-/// The world's modifications (god mode). Workers take a snapshot (`Arc` clone); an edit
-/// copies the store only while a snapshot is held.
+/// The world's modifications (god mode), shared with the workers. The store locks each
+/// region on its own; readers get chunk snapshots, so an edit copies at most one chunk.
 #[derive(Resource, Clone)]
-pub struct SharedDeltas(pub Arc<Mutex<Arc<DeltaStore>>>);
+pub struct SharedDeltas(pub Arc<DeltaStore>);
 
 impl SharedDeltas {
     pub fn snapshot(&self) -> Arc<DeltaStore> {
-        self.0.lock().expect("deltas").clone()
+        self.0.clone()
     }
 }
 

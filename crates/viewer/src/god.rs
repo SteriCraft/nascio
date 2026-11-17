@@ -1,13 +1,12 @@
 //! God mode (future server tool): destroy and place blocks in the 3D view. Edits go to the
-//! world's [`DeltaStore`] (`world-<seed>/deltas/`), saved at once, and the touched columns are
-//! meshed again.
+//! world's [`DeltaStore`] (`world-<seed>/deltas/`, written to the region's journal at once),
+//! and the touched columns are meshed again.
 //!
 //! G toggles the mode. The mouse then turns the view (cursor captured) and a cross marks the
 //! centre of the screen: left click destroys the block under it, right click places the
 //! selected block against it, the wheel picks the block. G or Escape leaves.
 
-use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
+use std::collections::BTreeSet;
 
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
@@ -15,7 +14,7 @@ use bevy_egui::{EguiContexts, egui};
 use nascio_core::consts::CHUNK_SIZE;
 use nascio_core::coords::BlockPos;
 use nascio_voxel::block::{AIR, BlockId};
-use nascio_voxel::{ColumnSet, DeltaStore, Terrain};
+use nascio_voxel::{ColumnCache, DeltaStore, Terrain};
 
 use crate::fly::{FlyCam, RenderOrigin, SharedDeltas, SharedTerrain, Streamer};
 
@@ -33,7 +32,7 @@ pub struct God {
     pub block: BlockId,
     /// Block under the cross and the free cell in front of it.
     target: Option<(BlockPos, BlockPos)>,
-    columns: HashMap<(i32, i32), ColumnSet>,
+    columns: ColumnCache,
     pub status: String,
 }
 
@@ -43,7 +42,7 @@ impl God {
             on: false,
             block,
             target: None,
-            columns: HashMap::new(),
+            columns: ColumnCache::new(CACHE),
             status: String::new(),
         }
     }
@@ -54,13 +53,7 @@ impl God {
             return b;
         }
         let key = (p.x.div_euclid(CHUNK_SIZE), p.z.div_euclid(CHUNK_SIZE));
-        if self.columns.len() >= CACHE && !self.columns.contains_key(&key) {
-            self.columns.clear();
-        }
-        let col = self
-            .columns
-            .entry(key)
-            .or_insert_with(|| ColumnSet::new(terrain, key.0, key.1));
+        let col = self.columns.get(terrain, key.0, key.1);
         col.block(
             terrain,
             p.x - key.0 * CHUNK_SIZE,
@@ -207,12 +200,7 @@ pub fn god_input(
     let Some((q, id)) = edit else {
         return;
     };
-    let result = {
-        let mut guard = deltas.0.lock().expect("deltas");
-        let store = Arc::make_mut(&mut guard);
-        store.set(q, id);
-        store.save(blocks)
-    };
+    let result = deltas.0.set(q, id);
     god.status = match result {
         Ok(_) if id == AIR => format!("removed at {} {} {}", q.x, q.y, q.z),
         Ok(_) => format!("placed {} at {} {} {}", blocks.def(id).name, q.x, q.y, q.z),
@@ -244,7 +232,7 @@ pub fn god_ui(
     painter.line_segment([c - egui::vec2(9.0, 0.0), c + egui::vec2(9.0, 0.0)], stroke);
     painter.line_segment([c - egui::vec2(0.0, 9.0), c + egui::vec2(0.0, 9.0)], stroke);
     let blocks = terrain.0.blocks();
-    let chunks = deltas.snapshot().chunk_count();
+    let chunks = deltas.0.loaded_chunk_count();
     egui::Window::new("God mode")
         .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -12.0])
         .resizable(false)
@@ -252,6 +240,9 @@ pub fn god_ui(
         .show(ctx, |ui| {
             ui.label("Left click: destroy · right click: place · wheel: block · G / Esc: leave");
             ui.heading(blocks.def(god.block).name.as_str());
-            ui.label(format!("{chunks} modified chunks · {}", god.status));
+            ui.label(format!(
+                "{chunks} modified chunks (loaded regions) · {}",
+                god.status
+            ));
         });
 }

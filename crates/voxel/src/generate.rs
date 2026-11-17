@@ -304,6 +304,54 @@ impl ColumnSet {
     }
 }
 
+/// Bounded cache of [`ColumnSet`]s (a column with its plants and ore bodies weighs some
+/// 100 KB): at most `capacity` columns, the least recently used one dropped first.
+#[derive(Debug)]
+pub struct ColumnCache {
+    capacity: usize,
+    tick: u64,
+    columns: std::collections::BTreeMap<(i32, i32), (u64, std::sync::Arc<ColumnSet>)>,
+}
+
+impl ColumnCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            tick: 0,
+            columns: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Column `(cx, cz)` (wrapped), computed if missing.
+    pub fn get(&mut self, terrain: &Terrain, cx: i32, cz: i32) -> std::sync::Arc<ColumnSet> {
+        let key = (
+            cx.rem_euclid(CHUNKS_PER_AXIS),
+            cz.rem_euclid(CHUNKS_PER_AXIS),
+        );
+        self.tick += 1;
+        if let Some(e) = self.columns.get_mut(&key) {
+            e.0 = self.tick;
+            return e.1.clone();
+        }
+        if self.columns.len() >= self.capacity
+            && let Some(old) = self.columns.iter().min_by_key(|e| e.1.0).map(|e| *e.0)
+        {
+            self.columns.remove(&old);
+        }
+        let col = std::sync::Arc::new(ColumnSet::new(terrain, key.0, key.1));
+        self.columns.insert(key, (self.tick, col.clone()));
+        col
+    }
+
+    pub fn len(&self) -> usize {
+        self.columns.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+}
+
 /// Generated content of a chunk: pure and deterministic.
 pub fn generate_chunk(terrain: &Terrain, pos: ChunkPos) -> Chunk {
     ColumnSet::new(terrain, pos.cx, pos.cz)
@@ -324,6 +372,25 @@ mod tests {
     use crate::chunk::NoDeltas;
     use crate::terrain::tests::test_terrain;
     use nascio_core::coords::LocalPos;
+
+    #[test]
+    fn column_cache_is_bounded_and_wraps() {
+        let t = test_terrain();
+        let mut c = ColumnCache::new(3);
+        let a = c.get(&t, -1, 5);
+        assert!(std::sync::Arc::ptr_eq(
+            &a,
+            &c.get(&t, CHUNKS_PER_AXIS - 1, 5)
+        ));
+        for k in 0..5 {
+            c.get(&t, k, 0);
+            assert!(c.len() <= 3);
+        }
+        // The oldest column was dropped; a recent one is still shared.
+        let b = c.get(&t, 4, 0);
+        assert!(std::sync::Arc::ptr_eq(&b, &c.get(&t, 4, 0)));
+        assert!(!std::sync::Arc::ptr_eq(&a, &c.get(&t, -1, 5)));
+    }
 
     #[test]
     fn deterministic() {

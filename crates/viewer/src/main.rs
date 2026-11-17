@@ -182,7 +182,10 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     if let Some(r) = args.curvature_radius {
         render_cfg.curvature_radius_m = r;
     }
-    let palette_above = gen_cfg.voxel.delta_palette_above;
+    let delta_cfg = nascio_voxel::DeltaConfig {
+        palette_above: gen_cfg.voxel.delta_palette_above,
+        ..Default::default()
+    };
     let terrain = Arc::new(Terrain::from_world(&world, gen_cfg.voxel.clone())?);
     // Player modifications (god mode), `world-<seed>/deltas/`. Deltas of another world are
     // left untouched: edits then stay in memory, as under `--dev-override` (other chunks).
@@ -196,7 +199,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             nascio_worldgen::config::GENERATOR_VERSION,
             &fingerprint,
             terrain.blocks(),
-            palette_above,
+            delta_cfg.clone(),
         )
     };
     let deltas = match opened {
@@ -211,7 +214,8 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             DeltaStore::new(
                 nascio_worldgen::config::GENERATOR_VERSION,
                 "",
-                palette_above,
+                terrain.blocks(),
+                delta_cfg,
             )
         }
     };
@@ -329,9 +333,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     .insert_resource(fly::SharedTerrain(terrain))
     .insert_resource(fly::Workers::new())
     .insert_resource(fly::Streamer::new())
-    .insert_resource(fly::SharedDeltas(Arc::new(std::sync::Mutex::new(
-        Arc::new(deltas),
-    ))))
+    .insert_resource(fly::SharedDeltas(Arc::new(deltas)))
     .insert_resource(god)
     .insert_resource(horizon::Horizon::new(horizon_cfg))
     .insert_resource(RenderOrigin(BlockPos::new(0, 0, 0)))

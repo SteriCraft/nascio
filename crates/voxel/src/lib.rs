@@ -16,8 +16,8 @@ pub mod terrain;
 pub mod vegetation;
 
 pub use chunk::{Chunk, ChunkDeltas, NoDeltas, PaddedChunk};
-pub use delta::DeltaStore;
+pub use delta::{DeltaConfig, DeltaStore};
 pub use fingerprint::{DEV_OVERRIDE_MARK, GenConfig};
-pub use generate::{ColumnSet, chunk_at, generate_chunk};
+pub use generate::{ColumnCache, ColumnSet, chunk_at, generate_chunk};
 pub use mesh::{ChunkMesh, MeshData, mesh_chunk};
 pub use terrain::{ChunkTint, Terrain, VoxelConfig};
