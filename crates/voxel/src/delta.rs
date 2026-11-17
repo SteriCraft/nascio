@@ -7,11 +7,13 @@
 //! blocks).
 //!
 //! On disk, chunks are grouped in regions of `REGION_CHUNKS`² columns (all heights), in
-//! `world-<seed>/deltas/`: a region file `r.<rx>.<rz>.bin` and an append-only journal
-//! `r.<rx>.<rz>.log` of the edits made since the region file was last written (compaction).
-//! Each file records the generator version and the hash of the world it was made for; region
-//! files list the names of the blocks they use, journal records name their block (ids may
-//! change between registries).
+//! `world-<seed>/deltas/`: a region file `r.<rx>.<rz>.bin` per region, and one global
+//! append-only journal `wal/w.<first lsn>.log` (segments) of the edits made since the last
+//! checkpoint, each record numbered (LSN) and checksummed (CRC-32C). `flush` forces the
+//! journal to the disk (group commit); a checkpoint writes the modified regions (with the
+//! number of their last record) and drops the old segments. Each file records the generator
+//! version and the hash of the world it was made for; region files list the names of the
+//! blocks they use, journal records name their block (ids may change between registries).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
@@ -36,8 +38,15 @@ const _: () = assert!(CHUNKS_PER_AXIS % REGION_CHUNKS == 0);
 pub const DEFAULT_PALETTE_ABOVE: usize = 2048;
 
 const MAGIC: &[u8; 8] = b"NSCDELTA";
+/// Region journal of format 1 (before the global journal), read once and migrated.
 const LOG_MAGIC: &[u8; 8] = b"NSCDLOG\0";
-const FORMAT: u32 = 1;
+const WAL_MAGIC: &[u8; 8] = b"NSCWAL\0\0";
+/// Folder of the global journal, inside the deltas folder.
+const WAL_DIR: &str = "wal";
+/// Region file format: 2 adds the number of the last journal record applied.
+const FORMAT: u32 = 2;
+/// Journal record kind: a block edit. Other kinds are reserved for game state.
+const REC_BLOCK: u8 = 1;
 /// Palette entry of the blocks left as generated.
 const KEEP: BlockId = BlockId::MAX;
 
@@ -235,10 +244,11 @@ pub fn region_of(cx: i32, cz: i32) -> (i32, i32) {
 pub struct DeltaConfig {
     /// Number of modified blocks above which a chunk switches to a palette.
     pub palette_above: usize,
-    /// Journal records of a region above which it is compacted into its region file.
-    pub compact_after: usize,
-    /// Regions kept in memory (least recently used ones are dropped; their journal holds
-    /// every edit). Not applied to in-memory stores.
+    /// Size of the journal (bytes, all segments) above which a checkpoint writes the modified
+    /// regions to their files and drops the old segments.
+    pub checkpoint_bytes: u64,
+    /// Regions kept in memory (least recently used ones are dropped, written first when
+    /// modified). Not applied to in-memory stores.
     pub max_regions: usize,
 }
 
@@ -246,7 +256,7 @@ impl Default for DeltaConfig {
     fn default() -> Self {
         Self {
             palette_above: DEFAULT_PALETTE_ABOVE,
-            compact_after: 4096,
+            checkpoint_bytes: 16 << 20,
             max_regions: 64,
         }
     }
@@ -262,9 +272,10 @@ struct Region {
     /// Keyed `(cx, cz, cy)`: the chunks of a column are contiguous. Each chunk is shared
     /// with its readers (snapshots) and copied only when edited while read.
     chunks: BTreeMap<(i32, i32, i32), Arc<ChunkDelta>>,
-    /// Records in the journal since the last compaction.
-    records: usize,
-    journal: Option<File>,
+    /// Sequence number of the last journal record applied (from the file, then the edits).
+    lsn: u64,
+    /// Holds edits that are not in the region file yet (only in the journal).
+    dirty: bool,
     /// Why the region could not be read: it then reads as unmodified and refuses edits
     /// (its files are left untouched).
     broken: Option<String>,
@@ -277,12 +288,38 @@ struct Regions {
     tick: u64,
 }
 
+/// An edit read from the journal, waiting for its region to load.
+#[derive(Clone, Copy, Debug)]
+struct Pending {
+    lsn: u64,
+    pos: BlockPos,
+    id: BlockId,
+}
+
+/// The global journal: segments `wal/w.<first lsn>.log`, records numbered by `lsn`.
+#[derive(Debug, Default)]
+struct Wal {
+    /// Segment being appended to, and its path.
+    file: Option<(File, PathBuf)>,
+    /// Every segment on the disk, by first sequence number.
+    segments: BTreeMap<u64, PathBuf>,
+    /// Number of the next record.
+    next_lsn: u64,
+    /// Bytes of every segment.
+    bytes: u64,
+    /// Last record forced to the disk.
+    synced_lsn: u64,
+}
+
 /// Every player modification of a world, region by region.
 ///
-/// Regions are loaded on first use (region file, then its journal) and locked
-/// independently. An edit is appended to the region's journal before it is applied, and the
-/// journal is compacted into the region file from time to time. Readers get one chunk at a
-/// time ([`chunk`](Self::chunk)): an edit copies at most that chunk.
+/// Regions are loaded on first use (region file, then their records of the journal) and
+/// locked independently. An edit is written to the global journal (the OS has it: it
+/// survives a crash of the program) before it is applied; [`flush`](Self::flush) forces the
+/// journal to the disk (one `fsync` for every edit since the previous one: group commit).
+/// Checkpoints write the modified regions to their files and drop the old journal segments.
+/// Readers get one chunk at a time ([`chunk`](Self::chunk)): an edit copies at most that
+/// chunk.
 #[derive(Debug)]
 pub struct DeltaStore {
     dir: Option<PathBuf>,
@@ -291,6 +328,11 @@ pub struct DeltaStore {
     blocks: Blocks,
     cfg: DeltaConfig,
     regions: Mutex<Regions>,
+    wal: Mutex<Wal>,
+    /// Journal records of regions not loaded yet, by region.
+    pending: Mutex<BTreeMap<(i32, i32), Vec<Pending>>>,
+    /// Held during a checkpoint (one at a time).
+    checkpointing: Mutex<()>,
     problems: Mutex<Vec<String>>,
 }
 
@@ -309,15 +351,23 @@ impl DeltaStore {
             blocks: blocks.clone(),
             cfg,
             regions: Mutex::new(Regions::default()),
+            wal: Mutex::new(Wal {
+                next_lsn: 1,
+                ..Wal::default()
+            }),
+            pending: Mutex::new(BTreeMap::new()),
+            checkpointing: Mutex::new(()),
             problems: Mutex::new(Vec::new()),
         }
     }
 
-    /// The store of `dir` (created if missing). Only the file headers are read here; regions
-    /// load on first use.
+    /// The store of `dir` (created if missing). Region files are read on first use; only
+    /// their headers are read here, with the whole journal (indexed by region).
     ///
-    /// Fails when a file was made for another world (other hash). Files from another
-    /// generator version are used (absolute values) and listed in the returned warnings.
+    /// Fails when a file was made for another world (other hash) or when the journal is
+    /// corrupt before its last record. A last record cut short (crash) is dropped and listed
+    /// in [`problems`](Self::problems). Files from another generator version are used
+    /// (absolute values) and listed in the returned warnings.
     pub fn open(
         dir: &Path,
         generator_version: u32,
@@ -325,22 +375,26 @@ impl DeltaStore {
         blocks: &Blocks,
         cfg: DeltaConfig,
     ) -> anyhow::Result<(Self, Vec<String>)> {
-        let mut s = Self::new(generator_version, world_hash, blocks, cfg);
+        let s = Self::new(generator_version, world_hash, blocks, cfg);
         let mut warnings = Vec::new();
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        let wal_dir = dir.join(WAL_DIR);
+        std::fs::create_dir_all(&wal_dir)
+            .with_context(|| format!("creating {}", wal_dir.display()))?;
         let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| p.extension().is_some_and(|e| e == "bin" || e == "log"))
             .collect();
         files.sort();
+        let mut max_lsn = 0;
         for path in files {
             let magic = if path.extension().is_some_and(|e| e == "bin") {
                 MAGIC
             } else {
                 LOG_MAGIC
             };
-            let version = read_header(&path, magic, world_hash)
+            let (version, lsn) = read_header(&path, magic, world_hash)
                 .with_context(|| format!("reading {}", path.display()))?;
+            max_lsn = max_lsn.max(lsn);
             if version != generator_version {
                 warnings.push(format!(
                     "{}: made by generator version {version} (current {generator_version})",
@@ -348,12 +402,98 @@ impl DeltaStore {
                 ));
             }
         }
+        // The journal, segment by segment.
+        let mut segments = BTreeMap::new();
+        for e in std::fs::read_dir(&wal_dir)? {
+            let path = e?.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if let Some(hex) = name.strip_prefix("w.").and_then(|n| n.strip_suffix(".log")) {
+                let first = u64::from_str_radix(hex, 16)
+                    .with_context(|| format!("bad segment name {}", path.display()))?;
+                segments.insert(first, path);
+            }
+        }
+        let mut wal = Wal::default();
+        let mut pending: BTreeMap<(i32, i32), Vec<Pending>> = BTreeMap::new();
+        let mut expect: Option<u64> = None;
+        let last = segments.keys().next_back().copied();
+        for (&first, path) in &segments {
+            let bytes = std::fs::read(path)?;
+            let mut r = Reader(&bytes);
+            let version = s
+                .check_header(&mut r, WAL_MAGIC)
+                .with_context(|| format!("reading {}", path.display()))?;
+            if version != generator_version {
+                warnings.push(format!(
+                    "{}: made by generator version {version} (current {generator_version})",
+                    path.display()
+                ));
+            }
+            let mut good = bytes.len() - r.0.len();
+            let mut lsn = expect.unwrap_or(first);
+            ensure!(
+                lsn == first,
+                "{}: journal segment out of sequence (expected record {lsn})",
+                path.display()
+            );
+            loop {
+                if r.0.is_empty() {
+                    break;
+                }
+                match s.read_record(&mut r, lsn) {
+                    Ok(p) => {
+                        pending
+                            .entry(region_of(p.pos.chunk().cx, p.pos.chunk().cz))
+                            .or_default()
+                            .push(p);
+                        lsn += 1;
+                        good = bytes.len() - r.0.len();
+                    }
+                    Err(e) if Some(first) == last => {
+                        // Cut short by a crash: drop it and anything after it.
+                        s.problem(format!(
+                            "{}: last record dropped ({} bytes): {e:#}",
+                            path.display(),
+                            bytes.len() - good
+                        ));
+                        OpenOptions::new()
+                            .write(true)
+                            .open(path)?
+                            .set_len(good as u64)?;
+                        break;
+                    }
+                    Err(e) => {
+                        return Err(e).with_context(|| {
+                            format!("journal corrupt in {} at byte {good}", path.display())
+                        });
+                    }
+                }
+            }
+            expect = Some(lsn);
+            wal.bytes += good as u64;
+            max_lsn = max_lsn.max(lsn - 1);
+        }
+        wal.next_lsn = max_lsn + 1;
+        wal.synced_lsn = max_lsn;
+        if let Some((&first, path)) = segments.iter().next_back() {
+            let f = OpenOptions::new()
+                .append(true)
+                .open(path)
+                .with_context(|| format!("opening {}", path.display()))?;
+            // Records continue the last segment only if their numbers follow on.
+            if expect == Some(wal.next_lsn) || first == wal.next_lsn {
+                wal.file = Some((f, path.clone()));
+            }
+        }
+        wal.segments = segments;
+        let mut s = s;
+        *lock(&s.wal) = wal;
+        *lock(&s.pending) = pending;
         s.dir = Some(dir.to_owned());
         Ok((s, warnings))
     }
 
-    /// Problems met while loading regions (unreadable region, truncated journal), oldest
-    /// first.
+    /// Problems met while loading (unreadable region, record cut short), oldest first.
     pub fn problems(&self) -> Vec<String> {
         lock(&self.problems).clone()
     }
@@ -377,15 +517,29 @@ impl DeltaStore {
                 e.0.clone()
             } else {
                 if self.dir.is_some() && regions.map.len() >= self.cfg.max_regions.max(1) {
-                    // Least recently used region that nobody holds: its edits are in its files.
-                    let old = regions
+                    // Least recently used region that nobody holds, written first if modified.
+                    let mut idle: Vec<((i32, i32), u64)> = regions
                         .map
                         .iter()
                         .filter(|(_, e)| Arc::strong_count(&e.0) == 1)
-                        .min_by_key(|(_, e)| e.1)
-                        .map(|(k, _)| *k);
-                    if let Some(k) = old {
-                        regions.map.remove(&k);
+                        .map(|(k, e)| (*k, e.1))
+                        .collect();
+                    idle.sort_unstable_by_key(|e| e.1);
+                    for (k, _) in idle {
+                        let ok = {
+                            let mut g = write(&regions.map[&k].0);
+                            match self.write_back(k, &mut g) {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    self.problem(format!("keeping region {k:?} loaded: {e:#}"));
+                                    false
+                                }
+                            }
+                        };
+                        if ok {
+                            regions.map.remove(&k);
+                            break;
+                        }
                     }
                 }
                 let arc = Arc::new(RwLock::new(Region::default()));
@@ -402,6 +556,20 @@ impl DeltaStore {
         arc
     }
 
+    /// Writes a modified region to its file (durably), with the number of its last record.
+    fn write_back(&self, rk: (i32, i32), g: &mut Region) -> anyhow::Result<()> {
+        let Some(dir) = &self.dir else {
+            return Ok(());
+        };
+        if !g.dirty || g.broken.is_some() {
+            return Ok(());
+        }
+        let path = Self::region_path(dir, rk, "bin");
+        write_durable(&path, &self.write_region(&g.chunks, g.lsn))?;
+        g.dirty = false;
+        Ok(())
+    }
+
     fn load(&self, r: (i32, i32), g: &mut Region) {
         g.loaded = true;
         let Some(dir) = &self.dir else {
@@ -409,40 +577,61 @@ impl DeltaStore {
         };
         let bin = Self::region_path(dir, r, "bin");
         let log = Self::region_path(dir, r, "log");
-        let result = (|| -> anyhow::Result<()> {
+        let mut chunks = BTreeMap::new();
+        let result = (|| -> anyhow::Result<(u64, bool)> {
+            let mut lsn = 0;
             if bin.exists() {
                 let bytes = std::fs::read(&bin)?;
-                self.read_region(&bytes, &mut g.chunks)
+                lsn = self
+                    .read_region(&bytes, &mut chunks)
                     .with_context(|| format!("reading {}", bin.display()))?;
             }
-            if log.exists() {
+            // Journal of the region (format before the global journal): older than every
+            // record of the global journal.
+            let migrated = log.exists();
+            if migrated {
                 let bytes = std::fs::read(&log)?;
-                let (records, good) = self
-                    .replay(&bytes, &mut g.chunks)
+                let good = self
+                    .replay_region_log(&bytes, &mut chunks)
                     .with_context(|| format!("reading {}", log.display()))?;
                 if good < bytes.len() {
-                    // An edit cut short by a crash: drop it so that new records follow the
-                    // last complete one.
                     self.problem(format!(
                         "{}: incomplete last record dropped ({} bytes)",
                         log.display(),
                         bytes.len() - good
                     ));
-                    OpenOptions::new()
-                        .write(true)
-                        .open(&log)?
-                        .set_len(good as u64)?;
                 }
-                g.records = records;
             }
-            Ok(())
+            Ok((lsn, migrated))
         })();
-        if let Err(e) = result {
-            g.chunks.clear();
-            g.records = 0;
-            let msg = format!("{e:#}");
-            self.problem(msg.clone());
-            g.broken = Some(msg);
+        match result {
+            Ok((file_lsn, migrated)) => {
+                g.lsn = file_lsn;
+                let records = lock(&self.pending).remove(&r).unwrap_or_default();
+                for p in records.iter().filter(|p| p.lsn > file_lsn) {
+                    set_in(&mut chunks, p.pos, p.id, self.cfg.palette_above);
+                    g.lsn = p.lsn;
+                    g.dirty = true;
+                }
+                g.chunks = chunks;
+                if migrated {
+                    g.dirty = true;
+                    let done = self.write_back(r, g).and_then(|()| {
+                        std::fs::remove_file(&log)
+                            .with_context(|| format!("removing {}", log.display()))?;
+                        sync_dir(dir)
+                    });
+                    if let Err(e) = done {
+                        self.problem(format!("migrating {}: {e:#}", log.display()));
+                    }
+                }
+            }
+            Err(e) => {
+                // Its journal records stay pending: a checkpoint keeps their segments.
+                let msg = format!("{e:#}");
+                self.problem(msg.clone());
+                g.broken = Some(msg);
+            }
         }
     }
 
@@ -458,106 +647,154 @@ impl DeltaStore {
         self.chunk(p.chunk()).and_then(|d| d.get(p.local().index()))
     }
 
-    /// Records `id` at `p`: appended to the region's journal, then applied.
-    pub fn set(&self, p: BlockPos, id: BlockId) -> anyhow::Result<()> {
+    /// Sets a block: the edit is written to the journal (it survives a crash of the program;
+    /// a power cut only after the next [`flush`](Self::flush)), then applied. Returns its
+    /// sequence number (0 for a store in memory).
+    pub fn set(&self, p: BlockPos, id: BlockId) -> anyhow::Result<u64> {
         let c = p.chunk();
         let rk = region_of(c.cx, c.cz);
         let r = self.region(rk);
-        let mut g = write(&r);
-        if let Some(e) = &g.broken {
-            bail!("region {rk:?} unreadable, edit refused: {e}");
-        }
-        if let Some(dir) = &self.dir {
-            if g.journal.is_none() {
-                let path = Self::region_path(dir, rk, "log");
-                if !path.exists() {
-                    // Created with its header in one durable step: a crash never leaves a
-                    // journal with a torn header (which would refuse to open the store).
-                    write_durable(&path, &self.header(LOG_MAGIC))?;
+        let checkpoint;
+        let lsn;
+        {
+            let mut g = write(&r);
+            if let Some(e) = &g.broken {
+                bail!("region {rk:?} unreadable, edit refused: {e}");
+            }
+            {
+                let mut w = lock(&self.wal);
+                lsn = w.next_lsn;
+                if self.dir.is_some() {
+                    let rec = self.record(lsn, p, id);
+                    self.append(&mut w, &rec)?;
                 }
-                let f = OpenOptions::new()
-                    .append(true)
-                    .open(&path)
-                    .with_context(|| format!("opening {}", path.display()))?;
-                g.journal = Some(f);
+                w.next_lsn += 1;
+                checkpoint = self.dir.is_some() && w.bytes > self.cfg.checkpoint_bytes;
             }
-            let mut rec = Vec::with_capacity(32);
-            for v in [p.x, p.y, p.z] {
-                rec.extend_from_slice(&v.to_le_bytes());
-            }
-            put_str(&mut rec, &self.blocks.def(id).name);
-            if let Some(f) = g.journal.as_mut() {
-                f.write_all(&rec).context("writing the journal")?;
-            }
-            g.records += 1;
+            set_in(&mut g.chunks, p, id, self.cfg.palette_above);
+            g.lsn = lsn;
+            g.dirty = true;
         }
-        let key = (c.cx, c.cz, c.cy);
-        let d = g
-            .chunks
-            .entry(key)
-            .or_insert_with(|| Arc::new(ChunkDelta::Sparse(Vec::new())));
-        Arc::make_mut(d).set(p.local().index(), id, self.cfg.palette_above);
-        if self.dir.is_some() && g.records > self.cfg.compact_after {
-            self.compact(rk, &mut g)?;
+        drop(r);
+        if checkpoint {
+            self.checkpoint()?;
         }
+        Ok(if self.dir.is_some() { lsn } else { 0 })
+    }
+
+    /// Appends a record to the current segment (opened or created as needed).
+    fn append(&self, w: &mut Wal, rec: &[u8]) -> anyhow::Result<()> {
+        if w.file.is_none() {
+            let dir = self.dir.as_ref().context("store in memory")?.join(WAL_DIR);
+            let path = dir.join(format!("w.{:016x}.log", w.next_lsn));
+            write_durable(&path, &self.header(WAL_MAGIC))?;
+            let f = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .with_context(|| format!("opening {}", path.display()))?;
+            w.bytes += f.metadata()?.len();
+            w.segments.insert(w.next_lsn, path.clone());
+            w.file = Some((f, path));
+        }
+        let (f, path) = w.file.as_mut().expect("segment open");
+        f.write_all(rec)
+            .with_context(|| format!("writing {}", path.display()))?;
+        w.bytes += rec.len() as u64;
         Ok(())
     }
 
-    /// Writes the region file of `rk` from memory, then drops its journal.
-    fn compact(&self, rk: (i32, i32), g: &mut Region) -> anyhow::Result<()> {
+    /// Forces every edit made so far to the disk (one `fsync` of the journal: group commit).
+    /// Returns the sequence number of the last durable edit.
+    pub fn flush(&self) -> anyhow::Result<u64> {
+        let mut w = lock(&self.wal);
+        let last = w.next_lsn - 1;
+        if w.synced_lsn < last {
+            if let Some((f, path)) = &w.file {
+                f.sync_data()
+                    .with_context(|| format!("syncing {}", path.display()))?;
+            }
+            w.synced_lsn = last;
+        }
+        Ok(last)
+    }
+
+    /// Writes every modified region to its file, then drops the journal segments they cover;
+    /// returns the number of regions written. Called automatically when the journal exceeds
+    /// [`DeltaConfig::checkpoint_bytes`]. Segments are kept while a region that has records
+    /// in them cannot be read.
+    pub fn checkpoint(&self) -> anyhow::Result<usize> {
         let Some(dir) = &self.dir else {
-            return Ok(());
+            return Ok(0);
         };
-        let path = Self::region_path(dir, rk, "bin");
-        // The new region file is on the disk (data, then name) before the journal goes: a
-        // power cut can no longer leave a renamed but empty file with its journal deleted.
-        write_durable(&path, &self.write_region(&g.chunks))?;
-        // A crash before this point replays the journal over the new file: same result
-        // (absolute values).
-        g.journal = None;
-        let log = Self::region_path(dir, rk, "log");
-        match std::fs::remove_file(&log) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("removing {}", log.display())),
-        }
-        g.records = 0;
-        Ok(())
-    }
-
-    /// Forces the open journals to the disk (`fsync`). Edits are otherwise durable against a
-    /// crash of the program, not against a power cut, until their region is compacted.
-    pub fn sync(&self) -> anyhow::Result<()> {
-        let loaded: Vec<SharedRegion> = lock(&self.regions)
-            .map
-            .values()
-            .map(|e| e.0.clone())
-            .collect();
-        for r in loaded {
-            let g = read(&r);
-            if let Some(f) = &g.journal {
-                f.sync_data().context("syncing a journal")?;
+        let _one = lock(&self.checkpointing);
+        // New segment: the old ones only hold edits made before this point.
+        let old: Vec<PathBuf> = {
+            let mut w = lock(&self.wal);
+            if let Some((f, path)) = &w.file {
+                f.sync_data()
+                    .with_context(|| format!("syncing {}", path.display()))?;
             }
-        }
-        Ok(())
-    }
-
-    /// Compacts every loaded region that has journal records; returns how many.
-    pub fn compact_all(&self) -> anyhow::Result<usize> {
-        let loaded: Vec<(_, SharedRegion)> = lock(&self.regions)
+            w.synced_lsn = w.next_lsn - 1;
+            w.file = None;
+            let old: Vec<PathBuf> = std::mem::take(&mut w.segments).into_values().collect();
+            w.bytes = 0;
+            old
+        };
+        // Regions with records in the old segments: loaded and modified, or not loaded yet.
+        let waiting: Vec<(i32, i32)> = lock(&self.pending).keys().copied().collect();
+        let loaded: Vec<((i32, i32), SharedRegion)> = lock(&self.regions)
             .map
             .iter()
             .map(|(k, e)| (*k, e.0.clone()))
             .collect();
         let mut n = 0;
-        for (k, r) in loaded {
-            let mut g = write(&r);
-            if g.records > 0 && g.broken.is_none() {
-                self.compact(k, &mut g)?;
+        let mut keep = false;
+        let mut write_one = |k: (i32, i32), r: &SharedRegion| -> anyhow::Result<()> {
+            let mut g = write(r);
+            if g.broken.is_some() {
+                keep |= lock(&self.pending).contains_key(&k);
+                return Ok(());
+            }
+            if g.dirty {
+                self.write_back(k, &mut g)?;
                 n += 1;
             }
+            Ok(())
+        };
+        for (k, r) in &loaded {
+            write_one(*k, r)?;
         }
+        for k in waiting {
+            let r = self.region(k);
+            write_one(k, &r)?;
+        }
+        if keep {
+            // A broken region still needs its records: the segments stay (listed again).
+            let mut w = lock(&self.wal);
+            for p in old {
+                let first = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| n.strip_prefix("w.")?.strip_suffix(".log"))
+                    .and_then(|h| u64::from_str_radix(h, 16).ok())
+                    .unwrap_or(0);
+                w.bytes += std::fs::metadata(&p).map_or(0, |m| m.len());
+                w.segments.insert(first, p);
+            }
+            self.problem("checkpoint: journal kept for an unreadable region".into());
+            return Ok(n);
+        }
+        for p in old {
+            std::fs::remove_file(&p).with_context(|| format!("removing {}", p.display()))?;
+        }
+        sync_dir(&dir.join(WAL_DIR))?;
         Ok(n)
+    }
+
+    /// Writes every modified region to its file and empties the journal; returns the number
+    /// of regions written. Same as [`checkpoint`](Self::checkpoint).
+    pub fn compact_all(&self) -> anyhow::Result<usize> {
+        self.checkpoint()
     }
 
     /// Whether column `(cx, cz)` holds a modified block.
@@ -625,16 +862,65 @@ impl DeltaStore {
 
     /// File header: magic, format, generator version, world hash.
     fn header(&self, magic: &[u8; 8]) -> Vec<u8> {
+        let format = if magic == MAGIC { FORMAT } else { 1 };
         let mut out = Vec::with_capacity(64);
         out.extend_from_slice(magic);
-        put_u32(&mut out, FORMAT);
+        put_u32(&mut out, format);
         put_u32(&mut out, self.generator_version);
         put_str(&mut out, &self.world_hash);
         out
     }
 
-    /// Region file: header, block names, then the chunks of the region. Little-endian.
-    fn write_region(&self, chunks: &BTreeMap<(i32, i32, i32), Arc<ChunkDelta>>) -> Vec<u8> {
+    /// Journal record: length, sequence number, kind, content, CRC-32C (of the number, the
+    /// kind and the content).
+    fn record(&self, lsn: u64, p: BlockPos, id: BlockId) -> Vec<u8> {
+        let mut body = Vec::with_capacity(40);
+        body.extend_from_slice(&lsn.to_le_bytes());
+        body.push(REC_BLOCK);
+        for v in [p.x, p.y, p.z] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        put_str(&mut body, &self.blocks.def(id).name);
+        let mut rec = Vec::with_capacity(body.len() + 8);
+        put_u32(&mut rec, body.len() as u32);
+        rec.extend_from_slice(&body);
+        put_u32(&mut rec, crc32c(&body));
+        rec
+    }
+
+    /// Reads one journal record, which must be number `lsn`.
+    fn read_record(&self, r: &mut Reader, lsn: u64) -> anyhow::Result<Pending> {
+        let len = r.u32()? as usize;
+        ensure!((9..=1 << 16).contains(&len), "bad record length {len}");
+        let body = r.take(len)?;
+        let crc = r.u32()?;
+        ensure!(crc == crc32c(body), "bad checksum");
+        let mut b = Reader(body);
+        let n = u64::from_le_bytes(b.take(8)?.try_into()?);
+        ensure!(n == lsn, "record {n} where {lsn} was expected");
+        let kind = b.u8()?;
+        ensure!(kind == REC_BLOCK, "unknown record kind {kind}");
+        let (x, y, z) = (b.i32()?, b.i32()?, b.i32()?);
+        let name = b.str()?;
+        ensure!(b.0.is_empty(), "trailing bytes in record");
+        let id = self
+            .blocks
+            .id(&name)
+            .with_context(|| format!("unknown block `{name}`"))?;
+        Ok(Pending {
+            lsn,
+            pos: BlockPos::new(x, y, z),
+            id,
+        })
+    }
+
+    /// Region file: header, number of the last journal record applied, block names, then the
+    /// chunks of the region. Little-endian.
+    fn write_region(
+        &self,
+        chunks: &BTreeMap<(i32, i32, i32), Arc<ChunkDelta>>,
+        lsn: u64,
+    ) -> Vec<u8> {
         let chunks: Vec<(_, &Arc<ChunkDelta>)> =
             chunks.iter().filter(|(_, d)| !d.is_empty()).collect();
         // Block names, numbered in the file by first use.
@@ -681,6 +967,7 @@ impl DeltaStore {
             }
         }
         let mut out = self.header(MAGIC);
+        out.extend_from_slice(&lsn.to_le_bytes());
         put_u16(&mut out, names.len() as u16);
         for &b in &names {
             put_str(&mut out, &self.blocks.def(b).name);
@@ -689,11 +976,12 @@ impl DeltaStore {
         out
     }
 
-    /// Checks a header read by `r` (magic, format, world hash); returns its generator version.
+    /// Checks the header of a journal read by `r` (magic, format 1, world hash); returns its
+    /// generator version.
     fn check_header(&self, r: &mut Reader, magic: &[u8; 8]) -> anyhow::Result<u32> {
         ensure!(r.take(8)? == magic, "not a delta file");
         let format = r.u32()?;
-        ensure!(format == FORMAT, "unknown delta format {format}");
+        ensure!(format == 1, "unknown delta format {format}");
         let version = r.u32()?;
         let hash = r.str()?;
         if hash != self.world_hash {
@@ -702,14 +990,29 @@ impl DeltaStore {
         Ok(version)
     }
 
-    /// Reads a region file into `chunks`.
+    /// Reads a region file into `chunks`; returns the number of its last journal record.
     fn read_region(
         &self,
         bytes: &[u8],
         chunks: &mut BTreeMap<(i32, i32, i32), Arc<ChunkDelta>>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let mut r = Reader(bytes);
-        self.check_header(&mut r, MAGIC)?;
+        ensure!(r.take(8)? == MAGIC, "not a delta file");
+        let format = r.u32()?;
+        ensure!(
+            (1..=FORMAT).contains(&format),
+            "unknown delta format {format}"
+        );
+        let _version = r.u32()?;
+        let hash = r.str()?;
+        if hash != self.world_hash {
+            bail!("deltas made for another world (hash {hash})");
+        }
+        let lsn = if format >= 2 {
+            u64::from_le_bytes(r.take(8)?.try_into()?)
+        } else {
+            0
+        };
         let n = r.u16()?;
         let mut ids = Vec::with_capacity(usize::from(n));
         for _ in 0..n {
@@ -777,19 +1080,18 @@ impl DeltaStore {
             chunks.insert((pos.cx, pos.cz, pos.cy), Arc::new(d));
         }
         ensure!(r.0.is_empty(), "trailing bytes");
-        Ok(())
+        Ok(lsn)
     }
 
-    /// Replays a journal into `chunks`; returns the number of records and the length of its
-    /// complete part (a last record cut short is not applied).
-    fn replay(
+    /// Replays a region journal of the format before the global journal into `chunks`;
+    /// returns the length of its complete part (a last record cut short is not applied).
+    fn replay_region_log(
         &self,
         bytes: &[u8],
         chunks: &mut BTreeMap<(i32, i32, i32), Arc<ChunkDelta>>,
-    ) -> anyhow::Result<(usize, usize)> {
+    ) -> anyhow::Result<usize> {
         let mut r = Reader(bytes);
         self.check_header(&mut r, LOG_MAGIC)?;
-        let mut records = 0;
         let mut good = bytes.len() - r.0.len();
         while !r.0.is_empty() {
             let rec = (|| -> anyhow::Result<(BlockPos, String)> {
@@ -803,16 +1105,63 @@ impl DeltaStore {
                 .blocks
                 .id(&name)
                 .with_context(|| format!("unknown block `{name}`"))?;
-            let c = p.chunk();
-            let d = chunks
-                .entry((c.cx, c.cz, c.cy))
-                .or_insert_with(|| Arc::new(ChunkDelta::Sparse(Vec::new())));
-            Arc::make_mut(d).set(p.local().index(), id, self.cfg.palette_above);
-            records += 1;
+            set_in(chunks, p, id, self.cfg.palette_above);
             good = bytes.len() - r.0.len();
         }
-        Ok((records, good))
+        Ok(good)
     }
+}
+
+impl Drop for DeltaStore {
+    fn drop(&mut self) {
+        // A clean stop makes every edit durable.
+        if let Err(e) = self.flush() {
+            eprintln!("deltas: final flush failed: {e:#}");
+        }
+    }
+}
+
+/// Applies one edit to a map of chunk deltas.
+fn set_in(
+    chunks: &mut BTreeMap<(i32, i32, i32), Arc<ChunkDelta>>,
+    p: BlockPos,
+    id: BlockId,
+    palette_above: usize,
+) {
+    let c = p.chunk();
+    let d = chunks
+        .entry((c.cx, c.cz, c.cy))
+        .or_insert_with(|| Arc::new(ChunkDelta::Sparse(Vec::new())));
+    Arc::make_mut(d).set(p.local().index(), id, palette_above);
+}
+
+/// CRC-32C (Castagnoli), bit by bit over a small table.
+fn crc32c(bytes: &[u8]) -> u32 {
+    const fn table() -> [u32; 256] {
+        let mut t = [0u32; 256];
+        let mut i = 0;
+        while i < 256 {
+            let mut c = i as u32;
+            let mut k = 0;
+            while k < 8 {
+                c = if c & 1 != 0 {
+                    0x82f6_3b78 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+                k += 1;
+            }
+            t[i] = c;
+            i += 1;
+        }
+        t
+    }
+    const TABLE: [u32; 256] = table();
+    let mut c = !0u32;
+    for &b in bytes {
+        c = TABLE[((c ^ u32::from(b)) & 0xff) as usize] ^ (c >> 8);
+    }
+    !c
 }
 
 impl ChunkDeltas for DeltaStore {
@@ -825,8 +1174,9 @@ impl ChunkDeltas for DeltaStore {
     }
 }
 
-/// Reads the header of a delta file; returns its generator version.
-fn read_header(path: &Path, magic: &[u8; 8], world_hash: &str) -> anyhow::Result<u32> {
+/// Reads the header of a delta file; returns its generator version and, for a region file,
+/// the number of its last journal record (0 before format 2).
+fn read_header(path: &Path, magic: &[u8; 8], world_hash: &str) -> anyhow::Result<(u32, u64)> {
     let mut f = File::open(path)?;
     // Magic, format, version, hash length, then the hash.
     let mut head = vec![0u8; 18];
@@ -837,13 +1187,20 @@ fn read_header(path: &Path, magic: &[u8; 8], world_hash: &str) -> anyhow::Result
     let mut r = Reader(&head);
     ensure!(r.take(8)? == magic, "not a delta file");
     let format = r.u32()?;
-    ensure!(format == FORMAT, "unknown delta format {format}");
+    let known = if magic == MAGIC { 1..=FORMAT } else { 1..=1 };
+    ensure!(known.contains(&format), "unknown delta format {format}");
     let version = r.u32()?;
     let hash = r.str()?;
     if hash != world_hash {
         bail!("deltas made for another world (hash {hash})");
     }
-    Ok(version)
+    let mut lsn = 0;
+    if magic == MAGIC && format >= 2 {
+        let mut b = [0u8; 8];
+        f.read_exact(&mut b).context("truncated file")?;
+        lsn = u64::from_le_bytes(b);
+    }
+    Ok((version, lsn))
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1003,11 +1360,7 @@ mod tests {
         // Compacted into region files (one per region), journals gone.
         assert_eq!(s.compact_all().unwrap(), 3);
         assert_eq!(s.compact_all().unwrap(), 0);
-        let logs = std::fs::read_dir(&d)
-            .unwrap()
-            .filter(|e| e.as_ref().unwrap().path().extension().unwrap() == "log")
-            .count();
-        assert_eq!(logs, 0);
+        assert_eq!(segments(&d).len(), 0, "journal emptied");
         let (back, _) = DeltaStore::open(&d, 14, "abc", &b, cfg(50)).unwrap();
         assert_eq!(back.get(BlockPos::new(-1, 70, 5)), Some(AIR));
         assert!(matches!(
@@ -1028,39 +1381,224 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Journal segments of the store in `d`, sorted.
+    fn segments(d: &Path) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(d.join(WAL_DIR))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        v.sort();
+        v
+    }
+
     #[test]
-    fn automatic_compaction_and_truncated_journal() {
+    fn automatic_checkpoint_and_truncated_journal() {
         let b = blocks();
         let stone = b.id("granite").unwrap();
         let d = dir("compact");
         let c = DeltaConfig {
-            compact_after: 10,
+            checkpoint_bytes: 300,
             ..DeltaConfig::default()
         };
         let (s, _) = DeltaStore::open(&d, 1, "h", &b, c.clone()).unwrap();
+        let mut last = 0;
         for k in 0..13 {
-            s.set(BlockPos::new(k, 5, 0), stone).unwrap();
+            last = s.set(BlockPos::new(k, 5, 0), stone).unwrap();
         }
-        // Compacted at the 11th record; two records in the new journal.
-        let log = d.join("r.0.0.log");
+        assert_eq!(last, 13);
+        assert_eq!(s.flush().unwrap(), 13);
+        // Checkpointed at least once: region file written, a single (new) segment left.
         assert!(d.join("r.0.0.bin").exists());
-        let len = std::fs::metadata(&log).unwrap().len();
+        let seg = segments(&d);
+        assert_eq!(seg.len(), 1);
+        let len = std::fs::metadata(&seg[0]).unwrap().len();
         // A crash in the middle of the last record.
-        let f = OpenOptions::new().write(true).open(&log).unwrap();
+        let f = OpenOptions::new().write(true).open(&seg[0]).unwrap();
         f.set_len(len - 3).unwrap();
         drop(f);
         drop(s);
-        let (s, _) = DeltaStore::open(&d, 1, "h", &b, c).unwrap();
+        let (s, _) = DeltaStore::open(&d, 1, "h", &b, c.clone()).unwrap();
         assert_eq!(s.get(BlockPos::new(11, 5, 0)), Some(stone));
         assert_eq!(s.get(BlockPos::new(12, 5, 0)), None);
         assert_eq!(s.problems().len(), 1);
-        // New records follow the last complete one.
-        s.set(BlockPos::new(20, 5, 0), AIR).unwrap();
+        // New records follow the last complete one, numbered on.
+        assert_eq!(s.set(BlockPos::new(20, 5, 0), AIR).unwrap(), 13);
         drop(s);
         let (s, _) = DeltaStore::open(&d, 1, "h", &b, DeltaConfig::default()).unwrap();
         assert_eq!(s.get(BlockPos::new(20, 5, 0)), Some(AIR));
         assert_eq!(s.get(BlockPos::new(11, 5, 0)), Some(stone));
         assert!(s.problems().is_empty());
+        assert_eq!(s.set(BlockPos::new(21, 5, 0), AIR).unwrap(), 14);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_corrupt_record_before_the_end_refuses_the_store() {
+        let b = blocks();
+        let d = dir("corrupt");
+        let c = DeltaConfig {
+            checkpoint_bytes: u64::MAX,
+            ..DeltaConfig::default()
+        };
+        let (s, _) = DeltaStore::open(&d, 1, "h", &b, c.clone()).unwrap();
+        for k in 0..4 {
+            s.set(BlockPos::new(k, 0, 0), AIR).unwrap();
+        }
+        drop(s);
+        let seg = segments(&d)[0].clone();
+        let good = std::fs::read(&seg).unwrap();
+        // A flipped bit in the last record.
+        let mut bad = good.clone();
+        let at = bad.len() - 30;
+        bad[at] ^= 0x10;
+        std::fs::write(&seg, &bad).unwrap();
+        // In the last segment: read as a write cut short, the end is dropped.
+        let (s, _) = DeltaStore::open(&d, 1, "h", &b, c.clone()).unwrap();
+        assert_eq!(s.problems().len(), 1);
+        assert_eq!(s.get(BlockPos::new(0, 0, 0)), Some(AIR));
+        assert_eq!(s.get(BlockPos::new(3, 0, 0)), None);
+        drop(s);
+        // Before the last segment: corruption, the store refuses to open.
+        std::fs::write(&seg, &bad).unwrap();
+        let next = d.join(WAL_DIR).join("w.0000000000000005.log");
+        std::fs::write(&next, &std::fs::read(&seg).unwrap()[..26]).unwrap();
+        assert!(DeltaStore::open(&d, 1, "h", &b, c).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn region_journals_of_format_1_are_migrated() {
+        let b = blocks();
+        let stone = b.id("granite").unwrap();
+        let d = dir("migrate");
+        std::fs::create_dir_all(&d).unwrap();
+        // A region file of format 1 and its journal, as written before the global journal.
+        let old = DeltaStore::new(1, "h", &b, DeltaConfig::default());
+        let mut chunks = BTreeMap::new();
+        set_in(&mut chunks, BlockPos::new(1, 1, 1), stone, 2048);
+        let mut bin = old.write_region(&chunks, 0);
+        // Format 1: no sequence number after the header.
+        let head = old.header(MAGIC).len();
+        bin.drain(head..head + 8);
+        bin[8..12].copy_from_slice(&1u32.to_le_bytes());
+        std::fs::write(d.join("r.0.0.bin"), &bin).unwrap();
+        let mut log = old.header(LOG_MAGIC);
+        for v in [2i32, 1, 1] {
+            log.extend_from_slice(&v.to_le_bytes());
+        }
+        put_str(&mut log, "sand");
+        std::fs::write(d.join("r.0.0.log"), &log).unwrap();
+        let (s, _) = DeltaStore::open(&d, 1, "h", &b, DeltaConfig::default()).unwrap();
+        assert_eq!(s.get(BlockPos::new(1, 1, 1)), Some(stone));
+        assert_eq!(s.get(BlockPos::new(2, 1, 1)), b.id("sand"));
+        assert!(!d.join("r.0.0.log").exists(), "migrated");
+        assert!(s.problems().is_empty());
+        s.set(BlockPos::new(3, 1, 1), AIR).unwrap();
+        drop(s);
+        let (s, _) = DeltaStore::open(&d, 1, "h", &b, DeltaConfig::default()).unwrap();
+        assert_eq!(s.get(BlockPos::new(2, 1, 1)), b.id("sand"));
+        assert_eq!(s.get(BlockPos::new(3, 1, 1)), Some(AIR));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn records_already_in_a_region_file_are_not_replayed() {
+        let b = blocks();
+        let stone = b.id("granite").unwrap();
+        let d = dir("lsn");
+        let c = DeltaConfig {
+            checkpoint_bytes: u64::MAX,
+            ..DeltaConfig::default()
+        };
+        let (s, _) = DeltaStore::open(&d, 1, "h", &b, c.clone()).unwrap();
+        s.set(BlockPos::new(0, 0, 0), stone).unwrap();
+        s.set(BlockPos::new(0, 0, 0), AIR).unwrap();
+        // A crash after the region was written but before the segments were dropped.
+        let r = s.region((0, 0));
+        s.write_back((0, 0), &mut write(&r)).unwrap();
+        drop(r);
+        let seg = segments(&d);
+        let kept: Vec<Vec<u8>> = seg.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        drop(s);
+        for (p, bytes) in seg.iter().zip(&kept) {
+            std::fs::write(p, bytes).unwrap();
+        }
+        let (s, _) = DeltaStore::open(&d, 1, "h", &b, c).unwrap();
+        assert_eq!(s.get(BlockPos::new(0, 0, 0)), Some(AIR));
+        assert_eq!(s.set(BlockPos::new(1, 0, 0), stone).unwrap(), 3);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Edit number `k` of the crash test.
+    fn crash_edit(k: u64) -> BlockPos {
+        BlockPos::new((k % 64) as i32 * 13, (k / 64) as i32, (k % 7) as i32 * 801)
+    }
+
+    /// Child of [`a_killed_process_keeps_every_flushed_edit`]: edits and flushes until killed.
+    #[test]
+    #[ignore = "run by a_killed_process_keeps_every_flushed_edit"]
+    fn crash_child() {
+        let Ok(d) = std::env::var("NASCIO_CRASH_DIR") else {
+            return;
+        };
+        let b = blocks();
+        let stone = b.id("granite").unwrap();
+        let c = DeltaConfig {
+            checkpoint_bytes: 20_000,
+            max_regions: 3,
+            ..DeltaConfig::default()
+        };
+        let (s, _) = DeltaStore::open(Path::new(&d), 1, "h", &b, c).unwrap();
+        let mut out = std::io::stdout();
+        for k in 1.. {
+            let lsn = s.set(crash_edit(k), stone).unwrap();
+            assert_eq!(lsn, k);
+            if k % 50 == 0 {
+                let done = s.flush().unwrap();
+                writeln!(out, "flushed {done}").unwrap();
+                out.flush().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_killed_process_keeps_every_flushed_edit() {
+        use std::io::BufRead;
+        let d = dir("killed");
+        std::fs::create_dir_all(&d).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "delta::tests::crash_child",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("NASCIO_CRASH_DIR", &d)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut flushed = 0u64;
+        for line in std::io::BufReader::new(child.stdout.take().unwrap()).lines() {
+            if let Some(n) = line.unwrap().strip_prefix("flushed ") {
+                flushed = n.parse().unwrap();
+                if flushed >= 3_000 {
+                    break;
+                }
+            }
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(flushed >= 3_000, "child stopped early");
+        let b = blocks();
+        let stone = b.id("granite").unwrap();
+        let (s, _) = DeltaStore::open(&d, 1, "h", &b, DeltaConfig::default()).unwrap();
+        for k in 1..=flushed {
+            assert_eq!(s.get(crash_edit(k)), Some(stone), "edit {k} lost");
+        }
+        // Numbers go on after the last edit that reached the journal.
+        let next = s.set(BlockPos::new(5, 5, 5), AIR).unwrap();
+        assert!(next > flushed);
+        drop(s);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1071,7 +1609,7 @@ mod tests {
         let d = dir("leftover");
         let (s, _) = DeltaStore::open(&d, 1, "h", &b, DeltaConfig::default()).unwrap();
         s.set(BlockPos::new(1, 2, 3), stone).unwrap();
-        s.sync().unwrap();
+        s.flush().unwrap();
         assert_eq!(s.compact_all().unwrap(), 1);
         drop(s);
         assert!(!d.join("r.0.0.bin.tmp").exists() && !d.join("r.0.0.log").exists());
@@ -1216,7 +1754,7 @@ mod tests {
             let b = blocks();
             let ids = [AIR, b.id("granite").unwrap(), b.id("ice").unwrap(), b.id("sand").unwrap()];
             let d = dir(&format!("prop-{case}"));
-            let c = DeltaConfig { palette_above: 16, compact_after: 25, max_regions: 2 };
+            let c = DeltaConfig { palette_above: 16, checkpoint_bytes: 600, max_regions: 2 };
             let (s, _) = DeltaStore::open(&d, 1, "h", &b, c.clone()).unwrap();
             let mut model: BTreeMap<(i32, i32, i32), BlockId> = BTreeMap::new();
             for (k, &(x, z, y, periods, id)) in edits.iter().enumerate() {

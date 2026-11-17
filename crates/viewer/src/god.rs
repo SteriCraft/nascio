@@ -1,5 +1,5 @@
 //! God mode (future server tool): destroy and place blocks in the 3D view. Edits go to the
-//! world's [`DeltaStore`] (`world-<seed>/deltas/`, written to the region's journal at once),
+//! world's [`DeltaStore`] (`world-<seed>/deltas/`, journal forced to the disk at each edit),
 //! and the touched columns are meshed again.
 //!
 //! G toggles the mode. The mouse then turns the view (cursor captured) and a cross marks the
@@ -200,7 +200,8 @@ pub fn god_input(
     let Some((q, id)) = edit else {
         return;
     };
-    let result = deltas.0.set(q, id);
+    // Rare edits: each one is made durable at once (one `fsync`, under a millisecond).
+    let result = deltas.0.set(q, id).and_then(|_| deltas.0.flush());
     god.status = match result {
         Ok(_) if id == AIR => format!("removed at {} {} {}", q.x, q.y, q.z),
         Ok(_) => format!("placed {} at {} {} {}", blocks.def(id).name, q.x, q.y, q.z),

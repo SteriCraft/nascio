@@ -45,6 +45,18 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
+    /// Delta journal: edits as fast as one thread can, a flush every `--interval-ms` on
+    /// another thread (group commit), checkpoints as configured; in `dir` (emptied).
+    Wal {
+        dir: PathBuf,
+        #[arg(long, default_value_t = 5.0)]
+        seconds: f64,
+        #[arg(long, default_value_t = 50)]
+        interval_ms: u64,
+        /// Edits per second asked for (0: as fast as possible).
+        #[arg(long, default_value_t = 0)]
+        rate: u64,
+    },
     /// Cost of `fsync` for one record and for groups of records, in `dir`.
     Fsync {
         dir: PathBuf,
@@ -466,6 +478,90 @@ fn fsync(dir: PathBuf, rounds: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn wal(dir: PathBuf, seconds: f64, interval_ms: u64, rate: u64) -> anyhow::Result<()> {
+    use nascio_core::coords::BlockPos;
+    use nascio_voxel::{DeltaConfig, DeltaStore};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let _ = std::fs::remove_dir_all(&dir);
+    let blocks = nascio_voxel::block::Blocks::builtin();
+    let stone = blocks.id("granite").expect("granite");
+    let (store, _) = DeltaStore::open(&dir, 0, "netbench", &blocks, DeltaConfig::default())?;
+    let stop = AtomicBool::new(false);
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    let pct = |v: &mut Vec<Duration>, q: f64| {
+        v.sort_unstable();
+        v.get(((v.len() as f64 - 1.0) * q) as usize)
+            .copied()
+            .unwrap_or_default()
+    };
+    let (mut sets, mut flushes, edits) = std::thread::scope(|sc| {
+        let flusher = sc.spawn(|| {
+            let mut lat = Vec::new();
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(interval_ms));
+                let t = Instant::now();
+                store.flush().expect("flush");
+                lat.push(t.elapsed());
+            }
+            lat
+        });
+        let start = Instant::now();
+        let mut lat = Vec::new();
+        let mut k: u64 = 0;
+        // A battle: every edit in a 200 m square (one or two regions).
+        while start.elapsed().as_secs_f64() < seconds {
+            if rate > 0 {
+                let due = Duration::from_secs_f64(k as f64 / rate as f64);
+                if let Some(wait) = due.checked_sub(start.elapsed()) {
+                    std::thread::sleep(wait);
+                }
+            }
+            let h = mix64(k);
+            let p = BlockPos::new(
+                (h % 200) as i32,
+                ((h >> 16) % 64) as i32,
+                ((h >> 32) % 200) as i32,
+            );
+            let t = Instant::now();
+            store.set(p, stone).expect("set");
+            lat.push(t.elapsed());
+            k += 1;
+        }
+        stop.store(true, Ordering::Relaxed);
+        (lat, flusher.join().expect("flusher"), k)
+    });
+    println!(
+        "{edits} edits in {seconds} s: {:.0} edits/s; flush every {interval_ms} ms",
+        edits as f64 / seconds
+    );
+    println!(
+        "  set: median {:.4} ms, p99 {:.4} ms, max {:.2} ms (max includes checkpoints)",
+        ms(pct(&mut sets, 0.5)),
+        ms(pct(&mut sets, 0.99)),
+        ms(pct(&mut sets, 1.0))
+    );
+    println!(
+        "  flush ({}): median {:.2} ms, p99 {:.2} ms, max {:.2} ms",
+        flushes.len(),
+        ms(pct(&mut flushes, 0.5)),
+        ms(pct(&mut flushes, 0.99)),
+        ms(pct(&mut flushes, 1.0))
+    );
+    let t = Instant::now();
+    let n = store.checkpoint()?;
+    println!(
+        "  final checkpoint: {n} regions in {:.1} ms",
+        ms(t.elapsed())
+    );
+    drop(store);
+    let t = Instant::now();
+    let (store, _) = DeltaStore::open(&dir, 0, "netbench", &blocks, DeltaConfig::default())?;
+    println!("  reopen: {:.1} ms", ms(t.elapsed()));
+    drop(store);
+    std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
         Cmd::Codecs {
@@ -475,5 +571,11 @@ fn main() -> anyhow::Result<()> {
             seed,
         } => codecs(world, sites, side, seed),
         Cmd::Fsync { dir, rounds } => fsync(dir, rounds),
+        Cmd::Wal {
+            dir,
+            seconds,
+            interval_ms,
+            rate,
+        } => wal(dir, seconds, interval_ms, rate),
     }
 }
