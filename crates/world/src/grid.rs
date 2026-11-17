@@ -174,20 +174,20 @@ impl<T: Copy + Into<f64>> PeriodicGrid<T> {
         catmull_rom(row(-1), row(0), row(1), row(2), fz)
     }
 
-    /// [`sample_bicubic`](Self::sample_bicubic) clamped to the range of the four surrounding
-    /// cell centres: smooth like the bicubic, without its overshoot next to steep steps (no
-    /// spurious islets in front of a cliff, no pits at its foot).
-    pub fn sample_bicubic_clamped(&self, x: f64, z: f64) -> f64 {
-        let (i, j, _, _) = self.grid_pos(x, z);
-        let c = [
-            (*self.get(i, j)).into(),
-            (*self.get(i + 1, j)).into(),
-            (*self.get(i, j + 1)).into(),
-            (*self.get(i + 1, j + 1)).into(),
-        ];
-        let lo = c.iter().copied().fold(f64::INFINITY, f64::min);
-        let hi = c.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        self.sample_bicubic(x, z).clamp(lo, hi)
+    /// Bicubic made of monotone cubic Hermite passes ([`monotone_cubic`]): Catmull-Rom where
+    /// the nodes are smooth and monotone, no overshoot next to steep steps (no spurious islets
+    /// in front of a cliff, no pits at its foot), within the range of the four surrounding cell
+    /// centres, continuous and without plateaus. It replaces a Catmull-Rom clamped to those
+    /// four nodes, whose bounds changed across every node line: wherever the bicubic overshot
+    /// there, the surface stepped along the line (metres high on the 1/5 world at
+    /// (87 280, 480..555)), and the clamp left flat creases inside the cells.
+    pub fn sample_bicubic_monotone(&self, x: f64, z: f64) -> f64 {
+        let (i, j, fx, fz) = self.grid_pos(x, z);
+        let row = |dj: i64| {
+            let p = |di: i64| (*self.get(i + di, j + dj)).into();
+            monotone_cubic(p(-1), p(0), p(1), p(2), fx)
+        };
+        monotone_cubic(row(-1), row(0), row(1), row(2), fz)
     }
 }
 
@@ -199,6 +199,34 @@ fn catmull_rom(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
         + (-p0 + p2) * t
         + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
         + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
+}
+
+/// Cubic Hermite between `p1` and `p2` (`t` in [0, 1]) with Catmull-Rom tangents limited
+/// for monotonicity: zero at a local extremum of the nodes, at most three times the smaller
+/// adjacent difference otherwise (Fritsch–Carlson box), so the curve never leaves [p1, p2].
+/// The tangent at a node depends only on that node and its two neighbours: both intervals
+/// share it, and the curve is C¹ across nodes.
+#[inline]
+fn monotone_cubic(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
+    let tangent = |l: f64, r: f64| {
+        if l * r <= 0.0 {
+            0.0
+        } else {
+            let m = 0.5 * (l + r);
+            let cap = 3.0 * l.abs().min(r.abs());
+            m.clamp(-cap, cap)
+        }
+    };
+    let d = p2 - p1;
+    let (m1, m2) = (tangent(p1 - p0, d), tangent(d, p3 - p2));
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let v = (2.0 * t3 - 3.0 * t2 + 1.0) * p1
+        + (t3 - 2.0 * t2 + t) * m1
+        + (-2.0 * t3 + 3.0 * t2) * p2
+        + (t3 - t2) * m2;
+    // Rounding only: the limited tangents keep the cubic within [p1, p2].
+    v.clamp(p1.min(p2), p1.max(p2))
 }
 
 #[cfg(test)]
@@ -242,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn clamped_bicubic_does_not_overshoot_a_step() {
+    fn monotone_bicubic_does_not_overshoot_a_step() {
         let g = PeriodicGrid::from_fn(
             25,
             25,
@@ -250,17 +278,45 @@ mod tests {
             |i, _| if i < 12 { -1.0f32 } else { -1_500.0 },
         );
         let z = 10_000.0;
-        let (mut raw_max, mut clamped_max) = (f64::MIN, f64::MIN);
+        let (mut raw_max, mut monotone_max) = (f64::MIN, f64::MIN);
         for k in 0..200 {
             let x = 40_000.0 + f64::from(k) * 50.0;
             raw_max = raw_max.max(g.sample_bicubic(x, z));
-            clamped_max = clamped_max.max(g.sample_bicubic_clamped(x, z));
+            monotone_max = monotone_max.max(g.sample_bicubic_monotone(x, z));
         }
         assert!(raw_max > -1.0, "the plain bicubic overshoots: {raw_max}");
-        assert!(clamped_max <= -1.0);
+        assert!(monotone_max <= -1.0);
     }
 
     proptest! {
+        /// No step across node lines (x or z), on rough grids where the bicubic overshoots;
+        /// the result stays within the four surrounding nodes.
+        #[test]
+        fn monotone_bicubic_is_continuous_and_bounded(
+            seed in 0u64..1_000,
+            node in 0i64..25,
+            t in 0f64..1.0,
+            eps in 1e-7f64..1e-4,
+        ) {
+            let g = PeriodicGrid::from_fn(25, 25, 4_000.0, |i, j| {
+                let h = (i as u64 * 7_919 + j as u64 * 104_729 + seed * 6_151) % 1_009;
+                (h as f32 - 500.0) * if h.is_multiple_of(3) { 3.0 } else { 0.2 }
+            });
+            let line = (node as f64 + 0.5) * 4_000.0;
+            let across = (t * 100_000.0).max(1.0);
+            for (a, b) in [
+                ((line - eps, across), (line + eps, across)),
+                ((across, line - eps), (across, line + eps)),
+            ] {
+                let (va, vb) = (g.sample_bicubic_monotone(a.0, a.1), g.sample_bicubic_monotone(b.0, b.1));
+                prop_assert!((va - vb).abs() < 1e-2, "{a:?} {va} vs {b:?} {vb}");
+                let (i, j, _, _) = g.grid_pos(a.0, a.1);
+                let c = [g.get(i, j), g.get(i + 1, j), g.get(i, j + 1), g.get(i + 1, j + 1)].map(|v| f64::from(*v));
+                let (lo, hi) = (c.iter().copied().fold(f64::MAX, f64::min), c.iter().copied().fold(f64::MIN, f64::max));
+                prop_assert!((lo..=hi).contains(&va));
+            }
+        }
+
         #[test]
         fn bicubic_continuous_across_seam(t in 0f64..100_000.0, eps in 1e-6f64..1e-3) {
             let g = PeriodicGrid::from_fn(25, 25, 4_000.0, |i, j| ((i * 7919 + j * 104_729) % 97) as f32);

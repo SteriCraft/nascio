@@ -291,7 +291,7 @@ Première liste (à affiner avec le gameplay) :
 
 `nascio-voxel` ne dépend que de `nascio-world` : la configuration, les grilles, le bruit, les fichiers du monde, le registre de blocs, les codes des couches, le catalogue et les corps de gisements, et le bruit de détail. La simulation (`nascio-worldgen`) en dépend aussi. Le terrain exige toutes les couches d'un monde complet : un monde antérieur à M5 est refusé avec le nom de la couche manquante.
 - `generate_chunk(world: &WorldMacro, pos: ChunkPos) -> Chunk` est une fonction **pure et déterministe**.
-- L'altitude de surface vient de l'interpolation bicubique périodique de la grille de 32 m, plus un bruit de détail périodique dont l'amplitude dépend du contexte (rugueux en montagne, doux en plaine).
+- L'altitude de surface vient de l'interpolation bicubique périodique **monotone** de la grille de 32 m (passes d'Hermite à tangentes limitées : sans dépassement des nœuds voisins, continue), plus un bruit de détail périodique dont l'amplitude dépend du contexte (rugueux en montagne, doux en plaine).
 - Le contenu vertical suit la colonne géologique du §4.6. L'eau va jusqu'à y = 0 pour les océans, et jusqu'au niveau des lacs et des rivières.
 - **Rivières** *(config `[voxel]`, `river_*`)* :
   - **Réseau** : ordre de Strahler calculé sur tout le réseau de drainage des terres (`flow_direction`). De l'eau à partir de l'ordre `river_min_order` (4) ; en aval d'une cellule en eau, la rivière garde de l'eau jusqu'à son lac ou à la mer. Pas d'eau sur les cellules sous glace permanente (mois le plus chaud sous `glacier_warm_c`, ou biome glace) : une rivière naît au front de son glacier.

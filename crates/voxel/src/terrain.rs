@@ -735,13 +735,13 @@ impl Terrain {
     /// Macro elevation (eroded grid), without the chunk detail.
     #[inline]
     pub fn base_height(&self, x: f64, z: f64) -> f64 {
-        self.elevation.sample_bicubic_clamped(x, z)
+        self.elevation.sample_bicubic_monotone(x, z)
     }
 
     /// Surface height keeping only the octaves at least twice as wide as `sample_spacing`
     /// (for coarse horizon meshes, which would alias finer detail).
     pub fn height_lod(&self, x: f64, z: f64, sample_spacing: f64) -> f64 {
-        let e = self.elevation.sample_bicubic_clamped(x, z);
+        let e = self.elevation.sample_bicubic_monotone(x, z);
         let min = 2.0 * sample_spacing;
         if min >= self.baked_spacing {
             return e;

@@ -64,29 +64,29 @@ fn chunk_hash(t: &Terrain, p: ChunkPos) -> String {
 
 const GOLDEN_WORLD: &str = "c6b4518e104b06bbf8398188995f998b01672353fc1cb18b290805fb603902ff";
 const GOLDEN_CHUNKS: [&str; 24] = [
-    "3d169d6ab2644409",
+    "66e9640b07ad6da0",
     "832c5daebb8b7c8d",
-    "3697c600d5a72fdc",
+    "0b6e1063d7b3023d",
     "8dd9edbb0fab3aa5",
-    "0d12e7b5ca628fc5",
+    "6ae964185da07f22",
     "84b3c38e822bae75",
-    "30b95649d7471928",
+    "4edb532b1c9e925c",
     "8e7ee8ee3d2ebb93",
-    "5ab67303795a64c4",
+    "f115527fa39f6840",
     "2e2392efd81c59dc",
-    "5d8b96579da8f202",
+    "67ac55fffe6f267c",
     "edb6184e919db50c",
-    "cc3940c4dab7b424",
+    "7b57ffe1d93b9b03",
     "0445a6ba4cd05489",
-    "3dd8d18ee0d5982f",
+    "51f1d8ff142dbcb3",
     "3026edee840c118f",
-    "58901fd905e7ed01",
-    "427f851760e08672",
+    "f59aa78d0033124f",
+    "d4f6a7abf60c28e4",
     "dd6d073c390489aa",
     "7e4081ee18fb19b4",
-    "fa35e505722cc934",
-    "8978184afb8b41bb",
-    "e5881705100c2f85",
+    "df098ed8a8dd02eb",
+    "22d6fd51214bd512",
+    "52c6b2594861e601",
     "d90101daa182c197",
 ];
 
@@ -95,7 +95,7 @@ fn world_hash_is_the_reference() {
     let (w, _) = world();
     assert_eq!(
         (GENERATOR_VERSION, w.hash().as_str()),
-        (17, GOLDEN_WORLD),
+        (18, GOLDEN_WORLD),
         "world of seed 42 at 1/25 changed"
     );
 }
@@ -111,7 +111,7 @@ fn chunk_hashes_are_the_reference() {
         .collect();
     assert_eq!(
         (GENERATOR_VERSION, got.as_slice()),
-        (17, GOLDEN_CHUNKS.map(String::from).as_slice()),
+        (18, GOLDEN_CHUNKS.map(String::from).as_slice()),
         "chunks changed:\n{}",
         listing.join("\n")
     );
@@ -149,7 +149,7 @@ fn height_bits_are_the_reference() {
     let (_, t) = world();
     assert_eq!(
         (GENERATOR_VERSION, height_bits_hash(t).as_str()),
-        (17, "c7ad10b37ca905d1"),
+        (18, "ccf275a1c32c972e"),
         "surface heights changed (bits)"
     );
 }
