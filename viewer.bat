@@ -1,10 +1,10 @@
 @echo off
 rem Opens the Nascio viewer on a generated world.
-rem Usage: viewer.bat [world_dir] [viewer options...]   (default: out\m5\world-42)
+rem Usage: viewer.bat [world_dir] [viewer options...]   (default: out\pre-m6\world-42)
 rem   viewer.bat
-rem   viewer.bat out\m5\world-7
+rem   viewer.bat out\pre-m6\world-7
 rem   viewer.bat --fly --day 15 --hour 18 --pos 21000,1500
-rem   viewer.bat out\m5\world-42 --map-layer temperature --day 196
+rem   viewer.bat out\pre-m6\world-42 --map-layer temperature --day 196
 rem Options: --fly --pos x,z --day D --hour H --map-layer NAME --no-shadows --curvature-radius M
 rem Uses a separate target dir so it does not lock the build that Claude is using.
 setlocal
