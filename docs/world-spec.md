@@ -305,6 +305,7 @@ Première liste (à affiner avec le gameplay) :
 - Les grottes et les structures viendront plus tard.
 - **Modifications** : `Chunk = generate(pos) ⊕ delta(pos)` (`nascio-voxel::delta`). Un delta garde les blocs modifiés d'un chunk **en valeur absolue** (le bloc présent, pas une différence) : une modification garde son sens si le générateur change. Liste triée `(indice, bloc)` ; au-delà de `delta_palette_above` blocs (2 048), une palette (`KEEP` pour les blocs générés) sur 1, 2, 4, 8 ou 16 bits par bloc.
 - **Fichiers** : `world-<seed>/deltas/r.<rx>.<rz>.bin`, une région de 25 × 25 colonnes de chunks (800 m ; 25 divise 3 125, les régions pavent le tore), toutes hauteurs. En-tête : `NSCDELTA`, format, `generator_version`, empreinte du monde (`World::hash`), noms des blocs utilisés (les identifiants sont renumérotés au chargement). Écriture atomique (fichier temporaire puis renommage). Des deltas d'un autre monde sont refusés ; ceux d'une autre version du générateur sont chargés avec un avertissement.
+- **Outils de mesure** (crate `nascio-voxel`) : `chunkbench` mesure la génération et le maillage des chunks sur 1 et N cœurs (colonnes et chunks par seconde, temps CPU par étape) ; `topview` exporte des vues de dessus en PNG (un pixel par bloc : bloc le plus haut de chaque colonne, couleurs du visualiseur, eau mêlée à son lit selon la profondeur, ombrage du relief), sur des sites tirés au hasard (`--seed`), donnés (`--at x,z`) ou sur les rivières les plus profondes (`--rivers N`).
 
 ---
 
