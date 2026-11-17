@@ -22,6 +22,11 @@ Les blocs ont pour l'instant une couleur unie (`color` du registre). Cette liste
 - [ ] `sandstone`, `clay`, `limestone`, `gypsum`
 - [ ] `granite`, `gneiss`, `schist`, `basalt`, `gabbro`, `andesite`, `granulite`, `peridotite`
 
+## Végétation (provisoire)
+- [ ] `spruce_log` : tronc de sapin (dessus et côtés)
+- [ ] `spruce_leaves` : aiguilles de sapin (opaques pour l'instant)
+- [ ] `cactus`
+
 ## Fluides et divers
 - [ ] `water` : eau (teinte selon la profondeur, voir M6)
 - [ ] `magma`

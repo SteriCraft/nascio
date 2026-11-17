@@ -11,6 +11,7 @@ pub mod mesh;
 pub mod rivers;
 pub mod section;
 pub mod terrain;
+pub mod vegetation;
 
 pub use chunk::{Chunk, ChunkDeltas, NoDeltas, PaddedChunk};
 pub use generate::{ColumnSet, chunk_at, generate_chunk};

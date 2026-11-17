@@ -300,6 +300,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 @if(VERTEX_COLORS)
     tag = in.color.a;
     let is_water = tag < 0.99;
+    // Foliage is tagged 0.995 (opaque material): its sides keep their green under the snow.
+    let is_foliage = !is_water && tag < 0.999;
     pbr_input.material.base_color = alpha_discard(
         pbr_input.material.flags,
         pbr_input.material.alpha_cutoff,
@@ -331,7 +333,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Seasonal snow on land faces (not on water), sides included, never on downward faces.
     if !is_water {
         let h = in.world_position.y + curved.drop.x * dot(rel, rel) - curved.drop.z + curved.snow.x;
-        let facing = smoothstep(-0.5, -0.2, n.y);
+        let facing = select(
+            smoothstep(-0.5, -0.2, n.y),
+            0.05 + 0.85 * smoothstep(0.5, 0.9, n.y),
+            is_foliage
+        );
         let snow = smoothstep(0.15, 0.6, snow_cover(climate, h)) * facing;
         albedo = mix(albedo, vec3<f32>(0.86, 0.89, 0.93), snow);
     }

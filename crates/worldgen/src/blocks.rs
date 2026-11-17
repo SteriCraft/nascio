@@ -34,7 +34,7 @@ pub struct BlockDef {
 
 /// Blocks of the rock column (spec §4.6): `(name, colour, matter, density)`. `air` must stay
 /// first (id 0: empty chunks).
-pub const BUILTIN: [(&str, [u8; 3], Matter, f32); 28] = [
+pub const BUILTIN: [(&str, [u8; 3], Matter, f32); 31] = [
     ("air", [0, 0, 0], Matter::Empty, 0.0),
     ("water", [38, 92, 150], Matter::Fluid, 1_000.0),
     // Mantle magma under the Moho: infinite and deadly (spec §3).
@@ -69,6 +69,10 @@ pub const BUILTIN: [(&str, [u8; 3], Matter, f32); 28] = [
     ("snow", [244, 247, 251], Matter::Solid, 400.0),
     // Thin snow cover on top of a block, in the air cell above it (drawn 1/8 m thick).
     ("snow_layer", [244, 247, 251], Matter::Layer, 200.0),
+    // Provisional vegetation (M6): one spruce model, cacti in the hot desert. Leaves are opaque.
+    ("spruce_log", [88, 64, 44], Matter::Solid, 600.0),
+    ("spruce_leaves", [42, 96, 50], Matter::Solid, 200.0),
+    ("cactus", [74, 124, 60], Matter::Solid, 900.0),
 ];
 
 /// The registry, indexed by id.

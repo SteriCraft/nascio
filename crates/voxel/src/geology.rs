@@ -73,6 +73,9 @@ pub struct Geology {
     biome: Option<PeriodicGrid<u8>>,
     warp_x: Fbm,
     warp_z: Fbm,
+    /// Finer warp of the biome boundaries only (the biome grid is 160 m).
+    biome_warp_x: Fbm,
+    biome_warp_z: Fbm,
     pluton: Fbm,
     strata: Fbm,
     facies: Fbm,
@@ -99,6 +102,8 @@ fn grid_f32(l: &Layer) -> PeriodicGrid<f32> {
 const ARID_MM: f64 = 400.0;
 /// Amplitude of the warp of setting boundaries, m.
 const WARP_M: f64 = 120.0;
+/// Amplitude of the finer warp of biome boundaries, m.
+const BIOME_WARP_M: f64 = 60.0;
 /// Mean thickness of a sedimentary bed, m.
 const BED_M: f64 = 7.0;
 
@@ -154,6 +159,8 @@ impl Geology {
             biome: world.layer("biome").map(grid_u8),
             warp_x: Fbm::new(s("column-warp-x"), 800.0, 3, 0.5),
             warp_z: Fbm::new(s("column-warp-z"), 800.0, 3, 0.5),
+            biome_warp_x: Fbm::new(s("biome-warp-x"), 250.0, 2, 0.5),
+            biome_warp_z: Fbm::new(s("biome-warp-z"), 250.0, 2, 0.5),
             pluton: Fbm::new(s("column-pluton"), 1_600.0, 2, 0.5),
             strata: Fbm::new(s("column-strata"), 2_000.0, 2, 0.5),
             facies: Fbm::new(s("column-facies"), 4_000.0, 2, 0.5),
@@ -161,6 +168,19 @@ impl Geology {
             bodies: BodyIndex::new(world.bodies()?),
             ores,
         }))
+    }
+
+    /// Biome code at `(x, z)`, read at the warped position like the settings.
+    pub fn biome(&self, x: f64, z: f64) -> u8 {
+        let Some(b) = &self.biome else {
+            return biomes::code::TEMPERATE_FOREST;
+        };
+        let wx =
+            x + WARP_M * self.warp_x.sample(x, z) + BIOME_WARP_M * self.biome_warp_x.sample(x, z);
+        let wz =
+            z + WARP_M * self.warp_z.sample(x, z) + BIOME_WARP_M * self.biome_warp_z.sample(x, z);
+        let (i, j) = b.cell_of(wx, wz);
+        *b.get(i as i64, j as i64)
     }
 
     /// Geology of the column at `(x, z)` (block centre).
@@ -180,10 +200,7 @@ impl Geology {
             weathering: self.weathering.sample_bilinear(x, z).max(0.0) as f32,
             laterite: self.laterite.sample_bilinear(x, z) > 0.5,
             river: self.rivers.as_ref().is_some_and(|r| near(r, x, z) > 0),
-            biome: self
-                .biome
-                .as_ref()
-                .map_or(biomes::code::TEMPERATE_FOREST, |b| near(b, wx, wz)),
+            biome: self.biome(x, z),
             climate: Default::default(),
             arid: self
                 .precipitation

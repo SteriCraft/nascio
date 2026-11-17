@@ -12,6 +12,7 @@ use crate::block::{AIR, BlockId};
 use crate::chunk::{Chunk, ChunkDeltas, NP, PaddedChunk};
 use crate::geology::{ColumnGeo, wrap};
 use crate::terrain::Terrain;
+use crate::vegetation::{MAX_RADIUS, Part, PlantKind};
 use nascio_worldgen::deposits::Body;
 
 /// Columns stored around a chunk column: local `-2..=33` (one more than the padded border, for
@@ -35,6 +36,10 @@ pub struct ColumnSet {
     geos: Vec<ColumnGeo>,
     /// Ore bodies that may reach the column.
     bodies: Vec<Body>,
+    /// Plant blocks `(y, part)` above the ground of each column, local `-1..=32`.
+    plants: Vec<Vec<(i32, Part)>>,
+    /// Highest plant block (`i32::MIN`: none).
+    plant_top: i32,
 }
 
 impl ColumnSet {
@@ -78,7 +83,44 @@ impl ColumnSet {
                 f64::from(CHUNK_SIZE + 4),
             )
         });
+        // Plants of the column and its border, overhanging ones included. Where two overlap, the
+        // higher part wins (cactus, then log, then leaves).
+        let mut plants = vec![Vec::new(); NP * NP];
+        let mut plant_top = i32::MIN;
+        let shapes = PlantKind::ALL.map(PlantKind::parts);
+        let r = MAX_RADIUS;
+        let found = terrain.plants_in(
+            ox - 1 - r,
+            oz - 1 - r,
+            ox + CHUNK_SIZE + r,
+            oz + CHUNK_SIZE + r,
+        );
+        for p in found {
+            let shape = &shapes[PlantKind::ALL
+                .iter()
+                .position(|k| *k == p.kind)
+                .unwrap_or(0)];
+            for &(dx, dy, dz, part) in shape {
+                let (lx, lz) = (p.x + dx - ox, p.z + dz - oz);
+                if !(-1..=CHUNK_SIZE).contains(&lx) || !(-1..=CHUNK_SIZE).contains(&lz) {
+                    continue;
+                }
+                let k = Self::k(lx, lz);
+                let y = p.base + dy;
+                if y <= tops[k] {
+                    continue;
+                }
+                let cell: &mut Vec<(i32, Part)> = &mut plants[k];
+                match cell.iter_mut().find(|e| e.0 == y) {
+                    Some(e) => e.1 = e.1.max(part),
+                    None => cell.push((y, part)),
+                }
+                plant_top = plant_top.max(y);
+            }
+        }
         Self {
+            plants,
+            plant_top,
             cx,
             cz,
             tops,
@@ -158,6 +200,7 @@ impl ColumnSet {
         // `hi + 1`: the snow cover sits above the top block.
         let top = (hi + 1)
             .max(self.water_range().1 - 1)
+            .max(self.plant_top)
             .div_euclid(CHUNK_SIZE);
         bottom..=top
     }
@@ -169,7 +212,8 @@ impl ColumnSet {
         let (lo, hi) = (cy * CHUNK_SIZE - 1, cy * CHUNK_SIZE + CHUNK_SIZE);
         let (lo_water, hi_water) = self.water_range();
         let all_solid = hi <= lo_top;
-        let all_fluid_or_air = lo > hi_top + 1 && (hi < lo_water || lo >= hi_water);
+        let all_fluid_or_air =
+            lo > (hi_top + 1).max(self.plant_top) && (hi < lo_water || lo >= hi_water);
         !(all_solid || all_fluid_or_air)
     }
 
@@ -193,6 +237,12 @@ impl ColumnSet {
             let water_top = self.water_top(x, z);
             if y < water_top {
                 return terrain.water_block(self.geo(x, z), y, water_top);
+            }
+            if y <= self.plant_top
+                && let Some(&(_, part)) = self.plants[Self::k(x, z)].iter().find(|e| e.0 == y)
+                && let Some(b) = terrain.part_block(part)
+            {
+                return b;
             }
             if y == top + 1
                 && let Some(l) = terrain.snow_layer(self.geo(x, z), top, self.slope(x, z))
@@ -364,6 +414,30 @@ mod tests {
     }
 
     #[test]
+    fn plants_stand_on_the_ground() {
+        let t = test_terrain();
+        let log = t.blocks().ids.spruce_log.expect("vegetation blocks");
+        let mut n = 0;
+        for cz in (0..CHUNKS_PER_AXIS).step_by(97) {
+            for cx in (0..CHUNKS_PER_AXIS).step_by(89) {
+                let (ox, oz) = (cx * CHUNK_SIZE, cz * CHUNK_SIZE);
+                let col = ColumnSet::new(&t, cx, cz);
+                let plants = t.plants_in(ox, oz, ox + 31, oz + 31);
+                assert_eq!(plants, t.plants_in(ox, oz, ox + 31, oz + 31));
+                for p in plants {
+                    let (lx, lz) = (p.x - ox, p.z - oz);
+                    assert_eq!(p.base, col.top(lx, lz) + 1);
+                    assert!(col.water_top(lx, lz) <= p.base);
+                    assert_eq!(col.block(&t, lx, p.base, lz), log);
+                    assert_eq!(col.block(&t, lx, p.base + 6, lz), log);
+                    n += 1;
+                }
+            }
+        }
+        assert!(n > 50, "{n} trees");
+    }
+
+    #[test]
     fn simple_column() {
         let t = test_terrain();
         let ids = t.blocks().ids;
@@ -378,7 +452,8 @@ mod tests {
                     let top = col.top(5, 9);
                     let b = c.get(p);
                     seen[usize::from(b)] = true;
-                    if wy > top {
+                    let plant = [ids.spruce_log, ids.spruce_leaves, ids.cactus].contains(&Some(b));
+                    if wy > top && !plant {
                         assert_eq!(
                             b,
                             if wy < col.water_top(5, 9) {

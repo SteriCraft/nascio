@@ -37,6 +37,10 @@ pub struct ColumnIds {
     pub ice: Option<BlockId>,
     pub snow: Option<BlockId>,
     pub snow_layer: Option<BlockId>,
+    /// Vegetation blocks of M6, `None` in older registries.
+    pub spruce_log: Option<BlockId>,
+    pub spruce_leaves: Option<BlockId>,
+    pub cactus: Option<BlockId>,
 }
 
 /// The registry with what meshing needs per id (matter, linear colour).
@@ -80,6 +84,9 @@ impl Blocks {
             ice: registry.id("ice"),
             snow: registry.id("snow"),
             snow_layer: registry.id("snow_layer"),
+            spruce_log: registry.id("spruce_log"),
+            spruce_leaves: registry.id("spruce_leaves"),
+            cactus: registry.id("cactus"),
         };
         let matter = registry.blocks.iter().map(|b| b.matter).collect();
         let linear = registry
@@ -130,6 +137,13 @@ impl Blocks {
     #[inline]
     pub fn is_solid(&self, id: BlockId) -> bool {
         self.matter(id) == Matter::Solid
+    }
+
+    /// Whether a block is foliage (tagged for the shader: its sides stay green under the
+    /// seasonal snow).
+    #[inline]
+    pub fn is_foliage(&self, id: BlockId) -> bool {
+        self.ids.spruce_leaves == Some(id)
     }
 
     /// Linear-light RGB of a block colour (for vertex colours).

@@ -21,6 +21,8 @@ use crate::block::{BlockId, Blocks, srgb_to_linear};
 use crate::climate::{ColumnClimate, SurfaceClimate};
 use crate::geology::{Class, ColumnGeo, Geology};
 use crate::rivers::{RiverHit, RiverParams, Rivers};
+use crate::vegetation::{BiomePlants, Part, Plant, PlantKind, cell_draw, default_vegetation};
+use nascio_core::consts::WORLD_SIZE;
 use serde::{Deserialize, Serialize};
 
 /// Tunable parameters of chunk generation (`[voxel]` in TOML). The relief itself (detail noise
@@ -81,6 +83,17 @@ pub struct VoxelConfig {
     pub grass_cold_c: f64,
     /// Soil of each biome (`[[voxel.soils]]`); biomes not listed use `temperate forest`.
     pub soils: Vec<BiomeSoil>,
+    /// Trees grow where the warmest month at the ground is at least this (tree line), °C.
+    pub tree_line_warm_c: f64,
+    /// Plants grow on slopes up to this, m/m.
+    pub plant_max_slope: f64,
+    /// Side of the vegetation cells (at most one plant each), m; divides `WORLD_SIZE`.
+    pub plant_cell_m: i32,
+    /// Plants of each biome (`[[voxel.vegetation]]`); biomes not listed have none.
+    pub vegetation: Vec<BiomePlants>,
+    /// Each column reads its biome this far (at most, triangular draw per axis) from its
+    /// centre: biome boundaries become a mixed fringe (soils, plant density), m.
+    pub biome_dither_m: f64,
 }
 
 /// Soil of one biome: `top` block over `under`, `depth_m` thick in all (on flat ground; it
@@ -193,6 +206,11 @@ impl Default for VoxelConfig {
             grass_warm_c: 10.0,
             grass_cold_c: -2.0,
             soils: default_soils(),
+            tree_line_warm_c: 10.0,
+            plant_max_slope: 0.7,
+            plant_cell_m: 5,
+            vegetation: default_vegetation(),
+            biome_dither_m: 64.0,
         }
     }
 }
@@ -206,6 +224,23 @@ impl VoxelConfig {
         }
         Ok(toml::from_str::<File>(s)?.voxel)
     }
+}
+
+/// Plant table indexed by biome code: `(density, models)`.
+fn resolve_plants(cfg: &VoxelConfig) -> [(f64, Vec<PlantKind>); biomes::code::COUNT] {
+    std::array::from_fn(|b| {
+        cfg.vegetation
+            .iter()
+            .find(|v| v.biome == biomes::NAMES[b])
+            .map_or((0.0, Vec::new()), |v| {
+                let kinds: Vec<_> = v
+                    .plants
+                    .iter()
+                    .filter_map(|n| PlantKind::from_name(n))
+                    .collect();
+                (v.density.clamp(0.0, 1.0), kinds)
+            })
+    })
 }
 
 /// The surface of a world: everything chunk generation needs, immutable and thread-safe.
@@ -233,6 +268,10 @@ pub struct Terrain {
     climate: Option<SurfaceClimate>,
     /// River water (`None`: worlds made before M4).
     rivers: Option<Rivers>,
+    /// Plants by biome code.
+    plants: [(f64, Vec<PlantKind>); biomes::code::COUNT],
+    /// Hash salt of the vegetation cells.
+    plant_salt: u64,
 }
 
 /// Grass tint of the four corners of a chunk column, for meshing: bilinear inside the chunk,
@@ -404,6 +443,21 @@ impl Terrain {
             .as_ref()
             .map_or_else(ColumnGeo::default, |g| g.column(x, z));
         c.climate = self.climate(x, z);
+        let r = self.cfg.biome_dither_m;
+        if r > 0.0
+            && let Some(g) = &self.geology
+        {
+            // Hash of the block column (wrapped): the same draw in every chunk.
+            let (i, k) = (
+                crate::geology::wrap(x.floor() as i32),
+                crate::geology::wrap(z.floor() as i32),
+            );
+            let h = nascio_worldgen::rng::mix64(
+                self.plant_salt ^ 0xB10E_D17E ^ (((i as u64) << 32) | k as u64),
+            );
+            let u = |s: u32| ((h >> s) & 0xFFFF) as f64 / 65_536.0;
+            c.biome = g.biome(x + r * (u(0) + u(16) - 1.0), z + r * (u(32) + u(48) - 1.0));
+        }
         if self.rivers.is_some() {
             c.river = self.river(x, z).is_some();
         }
@@ -582,6 +636,8 @@ impl Terrain {
             climate: None,
             rivers: None,
             soils: resolve_soils(&cfg, &blocks),
+            plants: resolve_plants(&cfg),
+            plant_salt: nascio_worldgen::rng::stage_u64(seed, "vegetation"),
             cfg,
             elevation,
             lake_level,
@@ -767,6 +823,93 @@ impl Terrain {
         let crust = f64::from((top - moho).max(1));
         let u = f64::from(depth) / crust;
         (g.basement_block(ids, col, fx, fz, u), Class::Basement)
+    }
+
+    fn plant_cell(&self) -> i32 {
+        let c = self.cfg.plant_cell_m;
+        if c > 0 && WORLD_SIZE % c == 0 { c } else { 5 }
+    }
+
+    /// Block of a plant part (`None` in registries without vegetation).
+    #[inline]
+    pub fn part_block(&self, part: Part) -> Option<BlockId> {
+        let ids = &self.blocks.ids;
+        match part {
+            Part::Log => ids.spruce_log,
+            Part::Leaves => ids.spruce_leaves,
+            Part::Cactus => ids.cactus,
+        }
+    }
+
+    /// Plants whose trunk is in the block range `x0..=x1`, `z0..=z1` (unwrapped; the plants
+    /// come back in the same frame), in a fixed order.
+    pub fn plants_in(&self, x0: i32, z0: i32, x1: i32, z1: i32) -> Vec<Plant> {
+        let mut out = Vec::new();
+        if self.blocks.ids.spruce_log.is_none() {
+            return out;
+        }
+        let cell = self.plant_cell();
+        let n = i64::from(WORLD_SIZE / cell);
+        let max_density = self.plants.iter().map(|p| p.0).fold(0.0, f64::max);
+        for cj in z0.div_euclid(cell)..=z1.div_euclid(cell) {
+            for ci in x0.div_euclid(cell)..=x1.div_euclid(cell) {
+                let (ox, oz, u, pick) = cell_draw(
+                    self.plant_salt,
+                    i64::from(ci).rem_euclid(n),
+                    i64::from(cj).rem_euclid(n),
+                    cell,
+                );
+                let (x, z) = (ci * cell + ox, cj * cell + oz);
+                if u >= max_density || !(x0..=x1).contains(&x) || !(z0..=z1).contains(&z) {
+                    continue;
+                }
+                if let Some(p) = self.plant_at(x, z, u, pick) {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    /// The plant drawn at column `(x, z)`, if its biome and ground allow it.
+    fn plant_at(&self, x: i32, z: i32, u: f64, pick: f64) -> Option<Plant> {
+        let (fx, fz) = (f64::from(x) + 0.5, f64::from(z) + 0.5);
+        let col = self.column_geo(fx, fz);
+        let biome = if self.geology.is_some() {
+            col.biome
+        } else {
+            biomes::code::TEMPERATE_FOREST
+        };
+        let (density, kinds) = &self.plants[usize::from(biome).min(biomes::code::COUNT - 1)];
+        if u >= *density || kinds.is_empty() || col.river {
+            return None;
+        }
+        let kind = kinds[((pick * kinds.len() as f64) as usize).min(kinds.len() - 1)];
+        let top = self.height(fx, fz).floor() as i32;
+        if top <= self.cfg.beach_high_m || self.water_top(fx, fz) > top + 1 {
+            return None;
+        }
+        // Same slope as the chunk columns.
+        let slope = ((self.height(fx + 1.0, fz) - self.height(fx - 1.0, fz)) * 0.5)
+            .hypot((self.height(fx, fz + 1.0) - self.height(fx, fz - 1.0)) * 0.5);
+        if slope > self.cfg.plant_max_slope || self.glacier(&col, top, slope).is_some() {
+            return None;
+        }
+        let soil = self.soil(&col, top, slope);
+        let ids = &self.blocks.ids;
+        let ok = soil.depth > 0
+            && if kind.is_tree() {
+                ![ids.sand, ids.gravel].contains(&soil.top)
+                    && self.t_warm(&col.climate, top) >= self.cfg.tree_line_warm_c
+            } else {
+                soil.top == ids.sand
+            };
+        ok.then_some(Plant {
+            x,
+            z,
+            base: top + 1,
+            kind,
+        })
     }
 
     /// Top block of column `(x, z)` (world block coordinates) without ore, snow cover

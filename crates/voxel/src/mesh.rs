@@ -102,8 +102,14 @@ struct Face {
     depth: u8,
     /// Thin layer (snow cover): drawn `LAYER_H` thick at the bottom of its cell.
     layer: bool,
+    /// Foliage: opaque, tagged by [`FOLIAGE_ALPHA`].
+    foliage: bool,
     ao: [u8; 4],
 }
+
+/// Vertex alpha of foliage faces: opaque material, but the shader keeps their sides green
+/// under the seasonal snow (water is below 0.99, other faces 1).
+pub const FOLIAGE_ALPHA: f32 = 0.995;
 
 /// Thickness of a [`Matter::Layer`] block, m.
 pub const LAYER_H: f32 = 0.125;
@@ -149,6 +155,7 @@ pub fn mesh_chunk(p: &PaddedChunk, blocks: &Blocks, tint: &ChunkTint) -> ChunkMe
                                         0
                                     },
                                     layer: blocks.matter(block) == Matter::Layer,
+                                    foliage: blocks.is_foliage(block),
                                     ao,
                                 }
                             });
@@ -259,7 +266,13 @@ fn emit(
             }
         }
     }
-    let alpha = if f.water { water_alpha(f.depth) } else { 1.0 };
+    let alpha = if f.water {
+        water_alpha(f.depth)
+    } else if f.foliage {
+        FOLIAGE_ALPHA
+    } else {
+        1.0
+    };
     let mut colors = [0usize, 1, 2, 3].map(|k| {
         let rgb = tint.map_or(rgb, |t| t.at(corners[k][0], corners[k][2]));
         let a = AO_CURVE[usize::from(f.ao[k])];
