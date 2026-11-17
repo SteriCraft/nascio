@@ -14,7 +14,7 @@
 // sides of the voxel steps match their tops); the snow cover of the 160 m climate cell is
 // corrected by the lapse rate between the fragment's height and the cell's mean height, so
 // the snow line follows the fine relief. Haze and the far edge of the relief use the same air
-// as the sky dome (`atmosphere` below), so they match it at every height (pre-M6).
+// as the sky dome (`atmosphere.wesl`), so they match it at every height (pre-M6).
 
 import bevy_pbr::render::{
     mesh_functions,

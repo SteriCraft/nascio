@@ -11,7 +11,7 @@
 //! level's spacing can represent. Under water (sea or lake) the mesh is flattened to the water
 //! surface and coloured by depth (opaque distant water).
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
@@ -127,7 +127,7 @@ struct LevelResult {
     center: (i32, i32),
     mesh: MeshData,
     heights: Arc<Heights>,
-    hole: Arc<HashSet<(i32, i32)>>,
+    hole: Arc<BTreeSet<(i32, i32)>>,
 }
 
 #[derive(Resource)]
@@ -141,7 +141,7 @@ pub struct Horizon {
     level_max: Vec<f32>,
     /// Displayed centre and level-0 hole.
     center: Option<(i32, i32)>,
-    hole: Arc<HashSet<(i32, i32)>>,
+    hole: Arc<BTreeSet<(i32, i32)>>,
     /// Centre being built, its generation and finished levels.
     target: Option<(i32, i32)>,
     generation: u64,
@@ -185,14 +185,15 @@ impl Horizon {
         self.hole.contains(&key)
     }
 
-    /// Chunk columns of level 0 that are meshed and in range.
-    fn compute_hole(&self, center: (i32, i32), streamer: &Streamer) -> HashSet<(i32, i32)> {
+    /// Chunk columns of level 0 that are meshed and in range. A `BTreeSet`, so any future
+    /// iteration over the hole is in a fixed order (audit F9; only membership is used today).
+    fn compute_hole(&self, center: (i32, i32), streamer: &Streamer) -> BTreeSet<(i32, i32)> {
         let n = self.cfg.l0_columns();
         let first = (
             (f64::from(center.0) - self.cfg.half_extent(0)) as i32 / CHUNK_SIZE,
             (f64::from(center.1) - self.cfg.half_extent(0)) as i32 / CHUNK_SIZE,
         );
-        let mut set = HashSet::new();
+        let mut set = BTreeSet::new();
         for dz in 0..n {
             for dx in 0..n {
                 let key = (
@@ -215,7 +216,7 @@ impl Horizon {
         kind: Kind,
         level: usize,
         center: (i32, i32),
-        hole: Arc<HashSet<(i32, i32)>>,
+        hole: Arc<BTreeSet<(i32, i32)>>,
         heights: Option<Arc<Heights>>,
     ) {
         let terrain = terrain.clone();
@@ -286,7 +287,7 @@ fn build_level(
     level: usize,
     center: (i32, i32),
     h: &Heights,
-    hole: &HashSet<(i32, i32)>,
+    hole: &BTreeSet<(i32, i32)>,
 ) -> MeshData {
     let n = cfg.cells as i64;
     let s = cfg.spacing(level);
