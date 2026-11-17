@@ -7,8 +7,8 @@
 // Rendering only (colours, previews): platform maths is fine here.
 #![allow(clippy::disallowed_methods)]
 
-use crate::block::{AIR, BlockId, Blocks, Matter};
-use crate::chunk::{N, PaddedChunk};
+use crate::block::{BlockId, Blocks, Matter};
+use crate::chunk::{N, NP, PaddedChunk};
 use crate::terrain::ChunkTint;
 
 /// Brightness factor per occlusion level (0 = fully occluded corner, 3 = open).
@@ -85,8 +85,9 @@ impl ChunkMesh {
     }
 }
 
-/// Face drawn on `block` when its neighbour across the face is `neighbour`.
-#[inline]
+/// Face drawn on `block` when its neighbour across the face is `neighbour` (`Some(water)`):
+/// the per-cell rule, applied on whole rows by [`mesh_chunk`] (kept for the reference mesher).
+#[cfg(test)]
 fn face(blocks: &Blocks, block: BlockId, neighbour: BlockId) -> Option<bool> {
     match (blocks.matter(block), blocks.matter(neighbour)) {
         (Matter::Solid, Matter::Empty | Matter::Fluid | Matter::Layer) => Some(false),
@@ -117,54 +118,162 @@ pub const FOLIAGE_ALPHA: f32 = 0.995;
 /// Thickness of a [`Matter::Layer`] block, m.
 pub const LAYER_H: f32 = 0.125;
 
+/// Rows of a padded chunk, one per `(y, z)` in `-1..=32`, index `(z + 1) + NP · (y + 1)`.
+const ROWS: usize = NP * NP;
+
+/// Reusable buffers of [`mesh_chunk`] (one set per thread).
+struct Scratch {
+    /// Bit `x + 1` set where the block at `(x, y, z)` has that matter (padded rows).
+    solid: Vec<u64>,
+    layer: Vec<u64>,
+    fluid: Vec<u64>,
+    empty: Vec<u64>,
+    /// Visible faces per direction `2 · d + (sign < 0)`: bit `x` of word `z + N · y`.
+    faces: [Vec<u32>; 6],
+    mask: Vec<Option<Face>>,
+}
+
+impl Scratch {
+    fn new() -> Self {
+        Self {
+            solid: vec![0; ROWS],
+            layer: vec![0; ROWS],
+            fluid: vec![0; ROWS],
+            empty: vec![0; ROWS],
+            faces: std::array::from_fn(|_| vec![0; N * N]),
+            mask: vec![None; N * N],
+        }
+    }
+}
+
+thread_local! {
+    static SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new(Scratch::new());
+}
+
 /// Greedy mesh of the inner 32³ of a padded chunk, grass tinted by `tint`.
+///
+/// The visible faces are found with bit masks (one `u64` per padded row and matter), so the
+/// cost follows the number of faces rather than the volume (audit M5). Same output as the
+/// per-cell rule (solid against empty, fluid or layer; layer against empty or fluid; fluid
+/// against empty; checked by the tests).
 pub fn mesh_chunk(p: &PaddedChunk, blocks: &Blocks, tint: &ChunkTint) -> ChunkMesh {
     let mut out = ChunkMesh::default();
-    if p.is_uniform(AIR) || p.blocks.iter().all(|&b| blocks.is_solid(b)) {
+    let first = p.blocks[0];
+    if p.blocks.iter().all(|&b| b == first) {
+        // Uniform (air, rock or water): no face anywhere.
         return out;
     }
+    SCRATCH.with(|s| mesh_into(&mut out, &mut s.borrow_mut(), p, blocks, tint));
+    out
+}
+
+fn mesh_into(
+    out: &mut ChunkMesh,
+    s: &mut Scratch,
+    p: &PaddedChunk,
+    blocks: &Blocks,
+    tint: &ChunkTint,
+) {
+    // Matter masks of the padded rows.
+    for (r, row) in p.blocks.as_chunks::<NP>().0.iter().enumerate() {
+        let (mut so, mut la, mut fl, mut em) = (0u64, 0u64, 0u64, 0u64);
+        for (x, &b) in row.iter().enumerate() {
+            let bit = 1u64 << x;
+            match blocks.matter(b) {
+                Matter::Solid => so |= bit,
+                Matter::Layer => la |= bit,
+                Matter::Fluid => fl |= bit,
+                Matter::Empty => em |= bit,
+            }
+        }
+        (s.solid[r], s.layer[r], s.fluid[r], s.empty[r]) = (so, la, fl, em);
+    }
+    // Visible faces per direction (the rule of `face`, on whole rows).
+    let mut any_face = false;
+    for (k, faces) in s.faces.iter_mut().enumerate() {
+        let (d, sign) = (k / 2, if k % 2 == 0 { 1i32 } else { -1 });
+        let step = match d {
+            1 => sign * NP as i32,
+            2 => sign,
+            _ => 0,
+        };
+        for y in 0..N {
+            for z in 0..N {
+                let r = (z + 1) + NP * (y + 1);
+                let nr = (r as i32 + step) as usize;
+                let nb = |m: &[u64]| match (d, sign) {
+                    (0, 1) => m[nr] >> 1,
+                    (0, _) => m[nr] << 1,
+                    _ => m[nr],
+                };
+                let (ne, nf, nl) = (nb(&s.empty), nb(&s.fluid), nb(&s.layer));
+                let vis =
+                    (s.solid[r] & (ne | nf | nl)) | (s.layer[r] & (ne | nf)) | (s.fluid[r] & ne);
+                let w = (vis >> 1) as u32;
+                any_face |= w != 0;
+                faces[z + N * y] = w;
+            }
+        }
+    }
+    if !any_face {
+        return;
+    }
     let n = N as i32;
-    let mut mask: Vec<Option<Face>> = vec![None; N * N];
+    let mask = &mut s.mask;
+    mask.fill(None);
     for d in 0..3usize {
         let (u, v) = ((d + 1) % 3, (d + 2) % 3);
         for sign in [1i32, -1] {
+            let faces = &s.faces[2 * d + usize::from(sign < 0)];
             let mut normal = [0.0f32; 3];
             normal[d] = sign as f32;
-            for i in 0..n {
-                // Build the mask of visible faces on slice `i` looking along `sign · e_d`.
+            // Slices holding at least one face.
+            let mut slices = 0u32;
+            for (j, &w) in faces.iter().enumerate() {
+                slices |= match d {
+                    0 => w,
+                    1 => u32::from(w != 0) << (j / N),
+                    _ => u32::from(w != 0) << (j % N),
+                };
+            }
+            while slices != 0 {
+                let i = slices.trailing_zeros() as i32;
+                slices &= slices - 1;
+                // Mask of visible faces on slice `i` looking along `sign · e_d`.
                 for b in 0..n {
                     for a in 0..n {
                         let mut c = [0i32; 3];
                         c[d] = i;
                         c[u] = a;
                         c[v] = b;
+                        if faces[(c[2] + n * c[1]) as usize] >> c[0] & 1 == 0 {
+                            continue;
+                        }
                         let block = p.get(c[0], c[1], c[2]);
                         let mut nb = c;
                         nb[d] += sign;
-                        let neighbour = p.get(nb[0], nb[1], nb[2]);
-                        mask[a as usize + N * b as usize] =
-                            face(blocks, block, neighbour).map(|water| {
-                                let ao = if water {
-                                    [3; 4]
-                                } else {
-                                    corner_ao(p, blocks, nb, u, v)
-                                };
-                                Face {
-                                    block,
-                                    water,
-                                    depth: if water {
-                                        tint.water_depth[(c[0] + n * c[2]) as usize]
-                                    } else {
-                                        0
-                                    },
-                                    layer: blocks.matter(block) == Matter::Layer,
-                                    foliage: blocks.is_foliage(block),
-                                    ao,
-                                }
-                            });
+                        let matter = blocks.matter(block);
+                        let water = matter == Matter::Fluid;
+                        let ao = if water {
+                            [3; 4]
+                        } else {
+                            corner_ao(p, blocks, nb, u, v)
+                        };
+                        mask[a as usize + N * b as usize] = Some(Face {
+                            block,
+                            water,
+                            depth: if water {
+                                tint.water_depth[(c[0] + n * c[2]) as usize]
+                            } else {
+                                0
+                            },
+                            layer: matter == Matter::Layer,
+                            foliage: blocks.is_foliage(block),
+                            ao,
+                        });
                     }
                 }
-                // Greedy merge.
+                // Greedy merge (consumes every face: the mask is empty afterwards).
                 let plane = (i + i32::from(sign > 0)) as f32;
                 for b in 0..N {
                     let mut a = 0;
@@ -192,7 +301,7 @@ pub fn mesh_chunk(p: &PaddedChunk, blocks: &Blocks, tint: &ChunkTint) -> ChunkMe
                             }
                         }
                         emit(
-                            &mut out,
+                            out,
                             blocks.linear(f.block),
                             (tint.grass == Some(f.block)).then_some(tint),
                             f,
@@ -210,7 +319,6 @@ pub fn mesh_chunk(p: &PaddedChunk, blocks: &Blocks, tint: &ChunkTint) -> ChunkMe
             }
         }
     }
-    out
 }
 
 /// Occlusion of the four corners of a face whose air-side cell is `nb`, in quad corner order
@@ -300,9 +408,106 @@ fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::NP;
+    use crate::block::AIR;
     use crate::generate::ColumnSet;
     use crate::terrain::tests::test_terrain;
+    use proptest::prelude::*;
+
+    /// The per-cell definition (the pre-M7 implementation), reference of the bit-mask mesher.
+    fn mesh_reference(p: &PaddedChunk, blocks: &Blocks, tint: &ChunkTint) -> ChunkMesh {
+        let mut out = ChunkMesh::default();
+        if p.is_uniform(AIR) || p.blocks.iter().all(|&b| blocks.is_solid(b)) {
+            return out;
+        }
+        let n = N as i32;
+        let mut mask: Vec<Option<Face>> = vec![None; N * N];
+        for d in 0..3usize {
+            let (u, v) = ((d + 1) % 3, (d + 2) % 3);
+            for sign in [1i32, -1] {
+                let mut normal = [0.0f32; 3];
+                normal[d] = sign as f32;
+                for i in 0..n {
+                    // Build the mask of visible faces on slice `i` looking along `sign · e_d`.
+                    for b in 0..n {
+                        for a in 0..n {
+                            let mut c = [0i32; 3];
+                            c[d] = i;
+                            c[u] = a;
+                            c[v] = b;
+                            let block = p.get(c[0], c[1], c[2]);
+                            let mut nb = c;
+                            nb[d] += sign;
+                            let neighbour = p.get(nb[0], nb[1], nb[2]);
+                            mask[a as usize + N * b as usize] =
+                                face(blocks, block, neighbour).map(|water| {
+                                    let ao = if water {
+                                        [3; 4]
+                                    } else {
+                                        corner_ao(p, blocks, nb, u, v)
+                                    };
+                                    Face {
+                                        block,
+                                        water,
+                                        depth: if water {
+                                            tint.water_depth[(c[0] + n * c[2]) as usize]
+                                        } else {
+                                            0
+                                        },
+                                        layer: blocks.matter(block) == Matter::Layer,
+                                        foliage: blocks.is_foliage(block),
+                                        ao,
+                                    }
+                                });
+                        }
+                    }
+                    // Greedy merge.
+                    let plane = (i + i32::from(sign > 0)) as f32;
+                    for b in 0..N {
+                        let mut a = 0;
+                        while a < N {
+                            let Some(f) = mask[a + N * b] else {
+                                a += 1;
+                                continue;
+                            };
+                            let mut w = 1;
+                            while a + w < N && mask[a + w + N * b] == Some(f) {
+                                w += 1;
+                            }
+                            let mut h = 1;
+                            'grow: while b + h < N {
+                                for k in 0..w {
+                                    if mask[a + k + N * (b + h)] != Some(f) {
+                                        break 'grow;
+                                    }
+                                }
+                                h += 1;
+                            }
+                            for bb in b..b + h {
+                                for aa in a..a + w {
+                                    mask[aa + N * bb] = None;
+                                }
+                            }
+                            emit(
+                                &mut out,
+                                blocks.linear(f.block),
+                                (tint.grass == Some(f.block)).then_some(tint),
+                                f,
+                                d,
+                                u,
+                                v,
+                                sign,
+                                plane,
+                                normal,
+                                [a, b, w, h],
+                            );
+                            a += w;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
 
     fn ids() -> (Blocks, BlockId, BlockId) {
         let b = Blocks::builtin();
@@ -388,5 +593,74 @@ mod tests {
             })
             .sum();
         assert!(total > 0);
+    }
+
+    #[test]
+    fn same_mesh_as_the_reference_on_generated_terrain() {
+        // Columns of the test world, land and sea, with their grass and water tint.
+        let t = test_terrain();
+        let mut meshed = 0;
+        for (cx, cz) in [(7, 7), (0, 0), (30, 12), (60, 60), (100, 3)] {
+            let col = ColumnSet::new(&t, cx, cz);
+            let tint = t.chunk_tint(cx, cz);
+            for cy in col.chunk_range(1) {
+                let p = col.padded_chunk(&t, cy);
+                let m = mesh_chunk(&p, t.blocks(), &tint);
+                assert_eq!(
+                    m,
+                    mesh_reference(&p, t.blocks(), &tint),
+                    "chunk {cx} {cy} {cz}"
+                );
+                meshed += usize::from(!m.is_empty());
+            }
+        }
+        assert!(meshed > 0);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+        /// Random mixes of every matter (rock, snow layer, leaves, water, air), with ragged
+        /// borders: the bit-mask mesher gives exactly the per-cell definition.
+        #[test]
+        fn same_mesh_as_the_reference_on_random_chunks(
+            seed in any::<u64>(),
+            density in 1u64..16,
+        ) {
+            let b = Blocks::builtin();
+            let ids = b.ids;
+            let palette = [
+                AIR,
+                ids.granite,
+                ids.water,
+                ids.grass,
+                ids.snow_layer.expect("snow layer"),
+                ids.spruce_leaves.expect("leaves"),
+            ];
+            let p = padded(|x, y, z| {
+                let mut h = seed ^ (((x + 1) + 34 * ((z + 1) + 34 * (y + 1))) as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                h ^= h >> 29;
+                h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                h ^= h >> 32;
+                // Mostly air above a ground, so that faces merge as well as break up.
+                if h % 16 >= density && y > 8 {
+                    AIR
+                } else {
+                    palette[(h >> 8) as usize % palette.len()]
+                }
+            });
+            let mut tint = ChunkTint::NONE;
+            tint.grass = Some(ids.grass);
+            for (k, d) in tint.water_depth.iter_mut().enumerate() {
+                *d = (seed as usize + k) as u8 % 7;
+            }
+            prop_assert_eq!(mesh_chunk(&p, &b, &tint), mesh_reference(&p, &b, &tint));
+        }
+    }
+
+    #[test]
+    fn uniform_water_has_no_mesh() {
+        let (b, _, water) = ids();
+        assert!(mesh_chunk(&padded(|_, _, _| water), &b, &ChunkTint::NONE).is_empty());
     }
 }

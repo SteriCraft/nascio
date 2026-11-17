@@ -58,7 +58,7 @@ fn chunks() -> Vec<ChunkPos> {
 
 fn chunk_hash(t: &Terrain, p: ChunkPos) -> String {
     let c = generate_chunk(t, p);
-    let bytes: Vec<u8> = c.blocks().iter().flat_map(|b| b.to_le_bytes()).collect();
+    let bytes: Vec<u8> = c.to_dense().iter().flat_map(|b| b.to_le_bytes()).collect();
     blake3::hash(&bytes).to_hex()[..16].to_string()
 }
 
@@ -127,7 +127,7 @@ fn chunk_one_period_away_is_identical() {
         let b = ColumnSet::new(t, cx + CHUNKS_PER_AXIS, cz - CHUNKS_PER_AXIS)
             .padded_chunk(t, cy)
             .inner();
-        assert!(a.blocks() == b.blocks(), "({cx}, {cz})");
+        assert!(a == b, "({cx}, {cz})");
     }
 }
 
