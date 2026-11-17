@@ -173,7 +173,7 @@ fn fifth_scale_climate_path() {
 }
 
 #[test]
-#[ignore = "full scale: needs out/m7/world-42 (generator version 17), run in release"]
+#[ignore = "full scale: needs out/m7/world-42 (current generator version), run in release"]
 fn full_scale_climate_path() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/m7/world-42");
     let w = World::load(&dir).expect("reference world out/m7/world-42");

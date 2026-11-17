@@ -49,10 +49,9 @@ fn climate_is_continuous_across_the_seam_and_zonally_plausible() {
     assert!((h.eval(0.0) - h.eval(365.0)).abs() < 1e-9);
 }
 
-/// Zonal mean near the seam on the target of spec §4.3 (about -20 °C). The generator gives
-/// about -10 °C (v16: -10.4, v17: -9.8): ignored until the recalibration of audit M7, lot 5.
+/// Zonal mean near the seam on the target of spec §4.3 (about -20 °C): -18.8 °C since the
+/// perennial sea ice follows the air (v19; the sea-water floor held it at -9.8 °C before).
 #[test]
-#[ignore = "seam climate recalibration pending (audit M7, lot 5)"]
 fn seam_zonal_mean_is_on_the_spec_target() {
     let g = generate_full(&WorldConfig::new(42, Scale::Fifth)).expect("generation");
     let t = &g.climate.temperature;

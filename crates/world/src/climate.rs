@@ -29,6 +29,10 @@ pub struct ClimateConfig {
     pub lapse_rate_c_per_m: f64,
     /// Sea surfaces never go below this temperature (sea ice), °C.
     pub sea_ice_c: f64,
+    /// The floor `sea_ice_c` fades out as the warmest month of the sea goes from `sea_ice_c`
+    /// to `sea_ice_c` minus this, °C: over perennial sea ice the surface is ice and follows
+    /// the air (zonal mean near the seam ≈ −20 °C, §4.3); seas that thaw keep the floor.
+    pub perennial_ice_fade_c: f64,
     /// Albedo cooling of the polar band (snow, ice, clouds), °C at `c_min(s) = 1`.
     pub polar_cooling_c: f64,
     // --- Ocean currents ---
@@ -125,6 +129,7 @@ impl Default for ClimateConfig {
             sea_amplitude: 0.4,
             lapse_rate_c_per_m: 0.0065,
             sea_ice_c: -1.8,
+            perennial_ice_fade_c: 5.0,
             polar_cooling_c: 6.0,
             current_warm_c: 4.0,
             current_cold_c: 4.0,
@@ -183,6 +188,9 @@ impl ClimateConfig {
         let m = &self.mean_profile;
         if m.len() < 2 || m.windows(2).any(|w| w[0][0] >= w[1][0]) {
             return Err("mean_profile needs ascending ratios".into());
+        }
+        if self.perennial_ice_fade_c <= 0.0 {
+            return Err("perennial_ice_fade_c must be > 0".into());
         }
         if self.lag_land_days <= 0.0 || self.lag_sea_days <= 0.0 || self.lag_sea_days >= 90.0 {
             return Err("lags must lie in (0, 90) days".into());

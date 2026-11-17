@@ -169,6 +169,7 @@ On stocke `(X0, A1, p1, A2, p2)` par cellule. L'évaluation à n'importe quel in
   - inertie thermique : déphasage d'environ 1 mois sur terre et 1,5 à 2 mois en mer, amplitude réduite en mer, continentalité selon la distance à la côte : la température de la mer (saison amortie, `sea_amplitude` *(config)*) se mélange à celle de la terre avec un poids `exp(−d / 20 km)` *(config)* ;
   - gradient vertical de −6,5 °C/km ;
   - anomalies dues aux courants océaniques ;
+  - la surface de la mer ne descend pas sous le point de congélation de l'eau de mer (−1,8 °C *(config)*), sauf sur la **banquise pérenne** : quand le mois le plus chaud de la mer passe sous ce point, la surface est de la glace et suit l'air, avec un fondu continu sur 5 °C *(config)* ;
   - calibration pour obtenir des moyennes zonales plausibles (≈ 26 °C à l'équateur, ≈ −20 °C en moyenne près de la couture), avec des moyennes tempérées douces : environ 15 °C en juillet sur les côtes vers 45–60° et pas de mer gelée en dessous d'environ 60°.
 - **Vents dominants** : trois cellules par hémisphère, définies **en latitude φ** (alizés pour 0–30°, vents d'ouest pour 30–60°, vents polaires d'est pour 60–90°). Les bandes se déplacent avec δ_eff selon la saison. La couture est un anticyclone polaire : les deux côtés divergent, ce qui est cohérent.
 - **Courants océaniques** : gyres simplifiés entraînés par les vents et déviés par les côtes. On advecte des anomalies chaudes et froides : courants chauds sur les bords ouest des bassins, remontées froides sur les bords est en zone subtropicale.

@@ -508,8 +508,13 @@ pub fn run(
             let mut t = land.clone();
             let sea = surf.sea[k];
             if sea > 0.0 {
+                // Open water stays above its freezing point; perennial sea ice (warmest month
+                // below it) follows the air, with a continuous fade between the two.
+                let warmest = land.iter().copied().fold(f64::MIN, f64::max);
+                let ice = smoothstep(0.0, c.perennial_ice_fade_c, c.sea_ice_c - warmest);
+                let floor = sea * (1.0 - ice);
                 for v in &mut t {
-                    *v = sea * v.max(c.sea_ice_c) + (1.0 - sea) * *v;
+                    *v = floor * v.max(c.sea_ice_c) + (1.0 - floor) * *v;
                 }
             }
             (t, land)
