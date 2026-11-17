@@ -42,8 +42,8 @@ pub struct ColumnGeo {
     pub laterite: bool,
     /// On a river bed (gravel).
     pub river: bool,
-    /// Hot desert (sand).
-    pub desert: bool,
+    /// Biome code ([`biomes::code`]) at the warped position.
+    pub biome: u8,
     pub arid: bool,
 }
 
@@ -178,10 +178,10 @@ impl Geology {
             weathering: self.weathering.sample_bilinear(x, z).max(0.0) as f32,
             laterite: self.laterite.sample_bilinear(x, z) > 0.5,
             river: self.rivers.as_ref().is_some_and(|r| near(r, x, z) > 0),
-            desert: self
+            biome: self
                 .biome
                 .as_ref()
-                .is_some_and(|b| near(b, x, z) == biomes::code::HOT_DESERT),
+                .map_or(biomes::code::TEMPERATE_FOREST, |b| near(b, wx, wz)),
             arid: self
                 .precipitation
                 .as_ref()

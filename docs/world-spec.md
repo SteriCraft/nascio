@@ -205,7 +205,7 @@ Classification à partir des harmoniques de température et de précipitations, 
 Sorties : `geo_context` (contexte dominant), `sediment_thickness` (m), `weathering_depth` (m) et `laterite` (0 à 1).
 
 **Colonne verticale** (de haut en bas) :
-1. **Sol** de 0 à 3 m, selon le biome et la pente. On trouve du **sable de quartz** sur les plages, les déserts chauds et les fonds marins peu profonds, et du **gravier** sur le lit des rivières.
+1. **Sol** de 0 à 3 m, selon le biome et la pente. On trouve du **sable de quartz** sur les plages, les déserts chauds et les fonds marins peu profonds, et du **gravier** sur le lit des rivières. Chaque biome a un bloc de surface posé sur un bloc de sol, sur une épaisseur donnée *(config `[[voxel.soils]]`)* : herbe sur terre (forêt tempérée), herbe sèche (méditerranéen, steppe ; sur sol rouge en savane), mousse (toundra), podzol (forêt boréale), herbe sur sol rouge (forêt tropicale), vase (mangrove, marais, fonds de lac), gravier (désert froid), sable (désert chaud, bandes côtières). L'épaisseur diminue avec la pente jusqu'à la roche nue.
 2. **Altérites** : régolithe, ou latérite en climat tropical humide. Épaisseur `weathering_depth` *(config)*, nulle sur les fortes pentes ; sous climat tropical, le régolithe (saprolite) tient sur des pentes plus fortes.
 3. **Couverture sédimentaire**, d'épaisseur `sediment_thickness`, **jusqu'à environ 500 m** *(config)* :
    - épaisse dans les bassins (plaines continentales basses), les rifts, les deltas et cônes de dépôt (dépôts de l'érosion), et sur les plateaux ;

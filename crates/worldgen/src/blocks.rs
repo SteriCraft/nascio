@@ -32,7 +32,7 @@ pub struct BlockDef {
 
 /// Blocks of the rock column (spec §4.6): `(name, colour, matter, density)`. `air` must stay
 /// first (id 0: empty chunks).
-pub const BUILTIN: [(&str, [u8; 3], Matter, f32); 21] = [
+pub const BUILTIN: [(&str, [u8; 3], Matter, f32); 26] = [
     ("air", [0, 0, 0], Matter::Empty, 0.0),
     ("water", [38, 92, 150], Matter::Fluid, 1_000.0),
     // Mantle magma under the Moho: infinite and deadly (spec §3).
@@ -56,6 +56,12 @@ pub const BUILTIN: [(&str, [u8; 3], Matter, f32); 21] = [
     ("andesite", [112, 106, 102], Matter::Solid, 2_650.0),
     ("granulite", [122, 98, 94], Matter::Solid, 2_900.0),
     ("peridotite", [88, 112, 72], Matter::Solid, 3_300.0),
+    // Surface soils by biome (M6, `[[voxel.soils]]`).
+    ("dry_grass", [158, 150, 84], Matter::Solid, 1_400.0),
+    ("moss", [112, 122, 82], Matter::Solid, 1_200.0),
+    ("podzol", [92, 70, 52], Matter::Solid, 1_400.0),
+    ("red_soil", [150, 72, 46], Matter::Solid, 1_600.0),
+    ("mud", [84, 74, 60], Matter::Solid, 1_700.0),
 ];
 
 /// The registry, indexed by id.

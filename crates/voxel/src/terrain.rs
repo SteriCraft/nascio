@@ -11,6 +11,7 @@
 //! to its surface.
 
 use anyhow::Context;
+use nascio_worldgen::biomes;
 use nascio_worldgen::erosion::ErosionConfig;
 use nascio_worldgen::erosion::upsample::{Detail, baked_min_spacing, ruggedness};
 use nascio_worldgen::grid::PeriodicGrid;
@@ -44,6 +45,86 @@ pub struct VoxelConfig {
     pub underground_chunks: i32,
     /// The crust keeps at least this thickness of stone above the magma, m.
     pub min_crust_m: i32,
+    /// Soil of each biome (`[[voxel.soils]]`); biomes not listed use `temperate forest`.
+    pub soils: Vec<BiomeSoil>,
+}
+
+/// Soil of one biome: `top` block over `under`, `depth_m` thick in all (on flat ground; it
+/// thins with the slope, down to bare rock at `rock_slope`). Blocks are named as in the
+/// registry; a name missing from an older world's registry falls back to grass or dirt.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BiomeSoil {
+    /// Biome name, as in `nascio_worldgen::biomes::NAMES`.
+    pub biome: String,
+    pub top: String,
+    pub under: String,
+    pub depth_m: i32,
+}
+
+fn default_soils() -> Vec<BiomeSoil> {
+    [
+        // Land cells of the ocean biome (coastal strips above the sea): beach sand.
+        ("ocean", "sand", "sand", 3),
+        ("lake", "mud", "mud", 2),
+        // Bare ground until the ice of the glaciers (M6, step 2).
+        ("ice cap / glacier", "gravel", "gravel", 1),
+        ("tundra", "moss", "dirt", 1),
+        ("boreal forest", "podzol", "dirt", 2),
+        ("temperate forest", "grass", "dirt", 3),
+        ("mediterranean", "dry_grass", "dirt", 2),
+        ("steppe", "dry_grass", "dirt", 3),
+        ("hot desert", "sand", "sand", 3),
+        ("cold desert", "gravel", "gravel", 1),
+        ("savanna", "dry_grass", "red_soil", 3),
+        ("tropical rainforest", "grass", "red_soil", 3),
+        ("mangrove", "mud", "mud", 3),
+        ("marsh", "mud", "mud", 2),
+    ]
+    .into_iter()
+    .map(|(biome, top, under, depth_m)| BiomeSoil {
+        biome: biome.into(),
+        top: top.into(),
+        under: under.into(),
+        depth_m,
+    })
+    .collect()
+}
+
+/// A biome soil resolved to block ids.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Soil {
+    top: BlockId,
+    under: BlockId,
+    depth: i32,
+    class: Class,
+}
+
+/// Soil table indexed by biome code.
+fn resolve_soils(cfg: &VoxelConfig, blocks: &Blocks) -> [Soil; biomes::code::COUNT] {
+    let ids = &blocks.ids;
+    let resolve = |s: &BiomeSoil| {
+        let top = blocks.id(&s.top).unwrap_or(ids.grass);
+        let under = blocks.id(&s.under).unwrap_or(ids.dirt);
+        let loose = [ids.sand, ids.gravel].contains(&under) || blocks.id("mud") == Some(under);
+        Soil {
+            top,
+            under,
+            depth: s.depth_m.max(0),
+            class: if loose { Class::Loose } else { Class::Soil },
+        }
+    };
+    let find = |name: &str| cfg.soils.iter().find(|s| s.biome == name);
+    let fallback = find(biomes::NAMES[usize::from(biomes::code::TEMPERATE_FOREST)]).map_or(
+        Soil {
+            top: ids.grass,
+            under: ids.dirt,
+            depth: cfg.dirt_depth_m + 1,
+            class: Class::Soil,
+        },
+        resolve,
+    );
+    std::array::from_fn(|b| find(biomes::NAMES[b]).map_or(fallback, resolve))
 }
 
 impl Default for VoxelConfig {
@@ -59,6 +140,7 @@ impl Default for VoxelConfig {
             gravel_depth_m: 2,
             underground_chunks: 2,
             min_crust_m: 50,
+            soils: default_soils(),
         }
     }
 }
@@ -93,6 +175,8 @@ pub struct Terrain {
     blocks: Blocks,
     /// Rock column and ore bodies (`None`: worlds made before M5, granite down to the Moho).
     geology: Option<Geology>,
+    /// Soil by biome code.
+    soils: [Soil; biomes::code::COUNT],
 }
 
 /// Radius (cells) of the box blur applied three times to the Moho: the tectonic grid changes
@@ -176,6 +260,7 @@ impl Terrain {
 
     /// Sets the block registry and the geology.
     pub fn with_geology(mut self, blocks: Blocks, geology: Option<Geology>) -> Self {
+        self.soils = resolve_soils(&self.cfg, &blocks);
         self.blocks = blocks;
         self.geology = geology;
         self
@@ -244,7 +329,9 @@ impl Terrain {
                 }
             })
         });
+        let blocks = Blocks::builtin();
         Self {
+            soils: resolve_soils(&cfg, &blocks),
             cfg,
             elevation,
             lake_level,
@@ -252,7 +339,7 @@ impl Terrain {
             detail: Detail::new(seed, erosion),
             baked_spacing,
             moho: None,
-            blocks: Blocks::builtin(),
+            blocks,
             geology: None,
         }
     }
@@ -320,27 +407,47 @@ impl Terrain {
         self.water_level(x, z).round() as i32
     }
 
-    /// Soil of a column whose top solid block is at `top`: `(block, thickness, class)`;
-    /// thickness 0 for bare rock.
-    fn soil(&self, col: &ColumnGeo, top: i32, slope: f64) -> (BlockId, i32, Class) {
+    /// Soil of a column whose top solid block is at `top`; thickness 0 for bare rock.
+    fn soil(&self, col: &ColumnGeo, top: i32, slope: f64) -> Soil {
         let c = &self.cfg;
         let ids = &self.blocks.ids;
+        let sand = |depth| Soil {
+            top: ids.sand,
+            under: ids.sand,
+            depth,
+            class: Class::Loose,
+        };
         if top <= c.beach_high_m {
             // Beaches and shallow sea floors: quartz sand; deep sea floors: bare sediment
             // (sand everywhere for worlds without geology).
-            if top > c.shelf_sand_m || self.geology.is_none() {
-                (ids.sand, c.sand_depth_m, Class::Loose)
+            return if top > c.shelf_sand_m || self.geology.is_none() {
+                sand(c.sand_depth_m)
             } else {
-                (ids.sand, 0, Class::Loose)
-            }
-        } else if col.river {
-            (ids.gravel, c.gravel_depth_m, Class::Loose)
-        } else if col.desert {
-            (ids.sand, c.sand_depth_m, Class::Loose)
-        } else if slope > c.rock_slope || f64::from(top) > c.grass_max_elevation_m {
-            (ids.granite, 0, Class::Basement)
+                sand(0)
+            };
+        }
+        if col.river {
+            return Soil {
+                top: ids.gravel,
+                under: ids.gravel,
+                depth: c.gravel_depth_m,
+                class: Class::Loose,
+            };
+        }
+        let biome = if self.geology.is_some() {
+            col.biome
         } else {
-            (ids.dirt, c.dirt_depth_m + 1, Class::Soil)
+            biomes::code::TEMPERATE_FOREST
+        };
+        let s = self.soils[usize::from(biome).min(biomes::code::COUNT - 1)];
+        if slope > c.rock_slope || f64::from(top) > c.grass_max_elevation_m {
+            return Soil { depth: 0, ..s };
+        }
+        // Thinner on slopes, at least one block below the bare-rock slope.
+        let depth = (f64::from(s.depth) * (1.0 - slope / c.rock_slope)).ceil() as i32;
+        Soil {
+            depth: depth.clamp(s.depth.min(1), s.depth),
+            ..s
         }
     }
 
@@ -358,12 +465,10 @@ impl Terrain {
         depth: i32,
     ) -> (BlockId, Class) {
         let ids = &self.blocks.ids;
-        let (soil, soil_depth, soil_class) = self.soil(col, top, slope);
+        let soil = self.soil(col, top, slope);
+        let soil_depth = soil.depth;
         if depth < soil_depth {
-            if soil_class == Class::Soil && depth == 0 {
-                return (ids.grass, Class::Soil);
-            }
-            return (soil, soil_class);
+            return (if depth == 0 { soil.top } else { soil.under }, soil.class);
         }
         let (fx, fz) = (f64::from(x) + 0.5, f64::from(z) + 0.5);
         let Some(g) = &self.geology else {
