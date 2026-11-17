@@ -11,7 +11,7 @@ setlocal
 cd /d "%~dp0"
 
 rem The raw command line keeps the commas of `--pos x,z` (shift/%%1 would split them).
-set "WORLD=out\m5\world-42"
+set "WORLD=out\pre-m6\world-42"
 set "ARGS= %*"
 set "FIRST=%~1"
 if not "%FIRST%"=="" if not "%FIRST:~0,1%"=="-" (
