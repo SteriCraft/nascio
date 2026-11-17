@@ -193,6 +193,34 @@ fn local_of(index: usize) -> (i32, i32, i32) {
 }
 
 /// Region of a chunk column.
+/// Writes `bytes` to `path` so that a crash or a power cut leaves either the old file or the
+/// new one, complete: temporary file, `fsync`, rename, then `fsync` of the directory (Unix;
+/// NTFS journals the rename itself and a directory cannot be opened as a file on Windows).
+pub fn write_durable(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let mut name = path.file_name().context("file name")?.to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+    let mut f = File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+    f.write_all(bytes)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    f.sync_all()
+        .with_context(|| format!("syncing {}", tmp.display()))?;
+    drop(f);
+    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+    sync_dir(path.parent().unwrap_or(Path::new(".")))
+}
+
+/// Makes the names of a directory durable (renames, creations, removals).
+pub fn sync_dir(dir: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    File::open(dir)
+        .and_then(|d| d.sync_all())
+        .with_context(|| format!("syncing {}", dir.display()))?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
 pub fn region_of(cx: i32, cz: i32) -> (i32, i32) {
     (
         cx.rem_euclid(CHUNKS_PER_AXIS) / REGION_CHUNKS,
@@ -442,14 +470,15 @@ impl DeltaStore {
         if let Some(dir) = &self.dir {
             if g.journal.is_none() {
                 let path = Self::region_path(dir, rk, "log");
-                let mut f = OpenOptions::new()
-                    .create(true)
+                if !path.exists() {
+                    // Created with its header in one durable step: a crash never leaves a
+                    // journal with a torn header (which would refuse to open the store).
+                    write_durable(&path, &self.header(LOG_MAGIC))?;
+                }
+                let f = OpenOptions::new()
                     .append(true)
                     .open(&path)
                     .with_context(|| format!("opening {}", path.display()))?;
-                if f.metadata()?.len() == 0 {
-                    f.write_all(&self.header(LOG_MAGIC))?;
-                }
                 g.journal = Some(f);
             }
             let mut rec = Vec::with_capacity(32);
@@ -480,10 +509,9 @@ impl DeltaStore {
             return Ok(());
         };
         let path = Self::region_path(dir, rk, "bin");
-        let tmp = path.with_extension("bin.tmp");
-        std::fs::write(&tmp, self.write_region(&g.chunks))
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))?;
+        // The new region file is on the disk (data, then name) before the journal goes: a
+        // power cut can no longer leave a renamed but empty file with its journal deleted.
+        write_durable(&path, &self.write_region(&g.chunks))?;
         // A crash before this point replays the journal over the new file: same result
         // (absolute values).
         g.journal = None;
@@ -494,6 +522,23 @@ impl DeltaStore {
             Err(e) => return Err(e).with_context(|| format!("removing {}", log.display())),
         }
         g.records = 0;
+        Ok(())
+    }
+
+    /// Forces the open journals to the disk (`fsync`). Edits are otherwise durable against a
+    /// crash of the program, not against a power cut, until their region is compacted.
+    pub fn sync(&self) -> anyhow::Result<()> {
+        let loaded: Vec<SharedRegion> = lock(&self.regions)
+            .map
+            .values()
+            .map(|e| e.0.clone())
+            .collect();
+        for r in loaded {
+            let g = read(&r);
+            if let Some(f) = &g.journal {
+                f.sync_data().context("syncing a journal")?;
+            }
+        }
         Ok(())
     }
 
@@ -1015,6 +1060,32 @@ mod tests {
         let (s, _) = DeltaStore::open(&d, 1, "h", &b, DeltaConfig::default()).unwrap();
         assert_eq!(s.get(BlockPos::new(20, 5, 0)), Some(AIR));
         assert_eq!(s.get(BlockPos::new(11, 5, 0)), Some(stone));
+        assert!(s.problems().is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn leftovers_of_an_interrupted_write_are_ignored() {
+        let b = blocks();
+        let stone = b.id("granite").unwrap();
+        let d = dir("leftover");
+        let (s, _) = DeltaStore::open(&d, 1, "h", &b, DeltaConfig::default()).unwrap();
+        s.set(BlockPos::new(1, 2, 3), stone).unwrap();
+        s.sync().unwrap();
+        assert_eq!(s.compact_all().unwrap(), 1);
+        drop(s);
+        assert!(!d.join("r.0.0.bin.tmp").exists() && !d.join("r.0.0.log").exists());
+        // A crash during a durable write leaves only a temporary file, half written.
+        std::fs::write(d.join("r.0.0.bin.tmp"), b"NSCDEL").unwrap();
+        std::fs::write(d.join("r.0.0.log.tmp"), b"NSC").unwrap();
+        let (s, w) = DeltaStore::open(&d, 1, "h", &b, DeltaConfig::default()).unwrap();
+        assert!(w.is_empty());
+        assert_eq!(s.get(BlockPos::new(1, 2, 3)), Some(stone));
+        // The journal is created whole, then appended to.
+        s.set(BlockPos::new(4, 2, 3), AIR).unwrap();
+        drop(s);
+        let (s, _) = DeltaStore::open(&d, 1, "h", &b, DeltaConfig::default()).unwrap();
+        assert_eq!(s.get(BlockPos::new(4, 2, 3)), Some(AIR));
         assert!(s.problems().is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
