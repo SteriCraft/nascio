@@ -30,6 +30,28 @@ pub enum Class {
     Basement,
 }
 
+/// Rock noise of one block column (wrapped block centre), each value sampled on first use.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RockNoise {
+    x: f64,
+    z: f64,
+    sediment: Option<(f64, f64)>,
+    pluton: Option<bool>,
+    pluton_far: Option<f64>,
+}
+
+impl RockNoise {
+    pub fn new(x: f64, z: f64) -> Self {
+        Self {
+            x,
+            z,
+            sediment: None,
+            pluton: None,
+            pluton_far: None,
+        }
+    }
+}
+
 /// Geology of one column, sampled once per column.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ColumnGeo {
@@ -172,19 +194,37 @@ impl Geology {
 
     /// Biome code at `(x, z)`, read at the warped position like the settings.
     pub fn biome(&self, x: f64, z: f64) -> u8 {
+        if self.biome.is_none() {
+            return biomes::code::TEMPERATE_FOREST;
+        }
+        let wx = x + WARP_M * self.warp_x.sample(x, z);
+        let wz = z + WARP_M * self.warp_z.sample(x, z);
+        self.biome_warped(x, z, wx, wz)
+    }
+
+    /// [`Self::biome`] at `(x, z)` whose settings warp lands at `(wx, wz)`.
+    fn biome_warped(&self, x: f64, z: f64, wx: f64, wz: f64) -> u8 {
         let Some(b) = &self.biome else {
             return biomes::code::TEMPERATE_FOREST;
         };
-        let wx =
-            x + WARP_M * self.warp_x.sample(x, z) + BIOME_WARP_M * self.biome_warp_x.sample(x, z);
-        let wz =
-            z + WARP_M * self.warp_z.sample(x, z) + BIOME_WARP_M * self.biome_warp_z.sample(x, z);
+        let wx = wx + BIOME_WARP_M * self.biome_warp_x.sample(x, z);
+        let wz = wz + BIOME_WARP_M * self.biome_warp_z.sample(x, z);
         let (i, j) = b.cell_of(wx, wz);
         *b.get(i as i64, j as i64)
     }
 
     /// Geology of the column at `(x, z)` (block centre).
     pub fn column(&self, x: f64, z: f64) -> ColumnGeo {
+        self.column_with(x, z, true)
+    }
+
+    /// [`Self::column`] without its biome (left at the default), for callers that read the
+    /// biome elsewhere.
+    pub fn column_without_biome(&self, x: f64, z: f64) -> ColumnGeo {
+        self.column_with(x, z, false)
+    }
+
+    fn column_with(&self, x: f64, z: f64, biome: bool) -> ColumnGeo {
         let wx = x + WARP_M * self.warp_x.sample(x, z);
         let wz = z + WARP_M * self.warp_z.sample(x, z);
         let near = |g: &PeriodicGrid<u8>, x: f64, z: f64| {
@@ -200,7 +240,11 @@ impl Geology {
             weathering: self.weathering.sample_bilinear(x, z).max(0.0) as f32,
             laterite: self.laterite.sample_bilinear(x, z) > 0.5,
             river: self.rivers.as_ref().is_some_and(|r| near(r, x, z) > 0),
-            biome: self.biome(x, z),
+            biome: if biome {
+                self.biome_warped(x, z, wx, wz)
+            } else {
+                0
+            },
             climate: Default::default(),
             arid: self
                 .precipitation
@@ -218,20 +262,41 @@ impl Geology {
         &self.bodies.bodies
     }
 
-    /// Sedimentary bed at height `y` of column `(x, z)`.
+    /// Strata and facies noise of the column of `n`, sampled once.
+    fn sediment_noise(&self, n: &mut RockNoise) -> (f64, f64) {
+        let (x, z) = (n.x, n.z);
+        *n.sediment
+            .get_or_insert_with(|| (self.strata.sample(x, z), self.facies.sample(x, z)))
+    }
+
+    /// Whether the column of `n` is in a pluton, sampled once.
+    fn in_pluton(&self, n: &mut RockNoise) -> bool {
+        let (x, z) = (n.x, n.z);
+        *n.pluton
+            .get_or_insert_with(|| self.pluton.sample(x, z) > 0.25)
+    }
+
+    /// Far pluton noise of the column of `n` (granite of the upper crust), sampled once.
+    fn pluton_far(&self, n: &mut RockNoise) -> f64 {
+        let (x, z) = (n.x, n.z);
+        *n.pluton_far
+            .get_or_insert_with(|| self.pluton.sample(x + 50_000.0, z))
+    }
+
+    /// Sedimentary bed at height `y` of the column of `n`.
     pub fn sediment_block(
         &self,
         ids: &crate::block::ColumnIds,
         col: &ColumnGeo,
-        x: f64,
+        n: &mut RockNoise,
         y: i32,
-        z: f64,
     ) -> BlockId {
-        let yy = f64::from(y) + 8.0 * self.strata.sample(x, z);
+        let (strata, facies) = self.sediment_noise(n);
+        let yy = f64::from(y) + 8.0 * strata;
         let bed = (yy / BED_M).floor() as i64;
         let h = (mix64(self.strata_seed ^ bed as u64) >> 11) as f64 / (1u64 << 53) as f64;
         // Lateral facies changes: the same bed shifts lithology across a basin.
-        let h = (h + 0.3 * (self.facies.sample(x, z) + 1.0)).fract();
+        let h = (h + 0.3 * (facies + 1.0)).fract();
         let marine = setting::oceanic(col.setting) || col.setting == setting::MARINE_SHELF;
         let table: &[(BlockId, f64)] = if marine {
             &[(ids.limestone, 0.45), (ids.clay, 0.9), (ids.sandstone, 1.0)]
@@ -251,21 +316,20 @@ impl Geology {
             .map_or(table[table.len() - 1].0, |(b, _)| *b)
     }
 
-    /// Basement block at relative depth `u` (0 at the surface, 1 at the Moho) of the column.
+    /// Basement block at relative depth `u` (0 at the surface, 1 at the Moho) of the column
+    /// of `n`.
     pub fn basement_block(
         &self,
         ids: &crate::block::ColumnIds,
         col: &ColumnGeo,
-        x: f64,
-        z: f64,
+        n: &mut RockNoise,
         u: f64,
     ) -> BlockId {
         let lower = u > 2.0 / 3.0;
-        let pluton = self.pluton.sample(x, z) > 0.25;
-        let continental = |granite_bias: f64| {
+        let continental = |n: &mut RockNoise, granite_bias: f64| {
             if lower {
                 ids.granulite
-            } else if pluton || self.pluton.sample(x + 50_000.0, z) > 0.6 - granite_bias {
+            } else if self.in_pluton(n) || self.pluton_far(n) > 0.6 - granite_bias {
                 ids.granite
             } else {
                 ids.gneiss
@@ -294,7 +358,7 @@ impl Geology {
                 } else if col.oceanic {
                     ids.gabbro
                 } else {
-                    continental(0.0)
+                    continental(n, 0.0)
                 }
             }
             setting::ARC => {
@@ -313,7 +377,7 @@ impl Geology {
             setting::OROGEN => {
                 if lower {
                     ids.granulite
-                } else if pluton && u > 0.15 {
+                } else if u > 0.15 && self.in_pluton(n) {
                     ids.granite
                 } else if u < 0.35 {
                     ids.schist
@@ -322,7 +386,7 @@ impl Geology {
                 }
             }
             setting::RIFT if u < 0.08 => ids.basalt,
-            setting::CRATON => continental(0.0),
+            setting::CRATON => continental(n, 0.0),
             _ if col.oceanic => {
                 if u < 0.3 {
                     ids.basalt
@@ -330,7 +394,7 @@ impl Geology {
                     ids.gabbro
                 }
             }
-            _ => continental(0.2),
+            _ => continental(n, 0.2),
         }
     }
 

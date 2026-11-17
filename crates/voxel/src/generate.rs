@@ -12,7 +12,7 @@ use nascio_core::fmath::DetMath;
 use crate::block::{AIR, BlockId};
 use crate::chunk::{Chunk, ChunkDeltas, NP, PaddedChunk};
 use crate::geology::{ColumnGeo, wrap};
-use crate::terrain::Terrain;
+use crate::terrain::{RockColumn, Terrain};
 use crate::vegetation::{MAX_RADIUS, Part, PlantKind};
 use nascio_worldgen::deposits::Body;
 
@@ -232,6 +232,20 @@ impl ColumnSet {
     /// Block at local column `(x, z)` (in `-1..=32`) and world height `y`.
     #[inline]
     pub fn block(&self, terrain: &Terrain, x: i32, y: i32, z: i32) -> BlockId {
+        self.block_with(terrain, x, y, z, &mut None)
+    }
+
+    /// [`Self::block`], reusing `rock`, the rock data of column `(x, z)` (computed on first
+    /// need; `None` when not yet computed).
+    #[inline]
+    fn block_with(
+        &self,
+        terrain: &Terrain,
+        x: i32,
+        y: i32,
+        z: i32,
+        rock: &mut Option<RockColumn>,
+    ) -> BlockId {
         let top = self.top(x, z);
         let ids = &terrain.blocks().ids;
         if y > top {
@@ -260,8 +274,10 @@ impl ColumnSet {
             wrap(self.cx * CHUNK_SIZE + x),
             wrap(self.cz * CHUNK_SIZE + z),
         );
-        let (b, class) =
-            terrain.rock_block(self.geo(x, z), wx, wz, top, self.slope(x, z), moho, top - y);
+        let geo = self.geo(x, z);
+        let rc =
+            rock.get_or_insert_with(|| terrain.rock_column(geo, wx, wz, top, self.slope(x, z)));
+        let (b, class) = terrain.rock_at(rc, geo, top, moho, top - y);
         if !self.bodies.is_empty()
             && let Some(g) = terrain.geology()
             && let Some(ore) = g.ore(&self.bodies, class, wx, y, wz, top)
@@ -277,8 +293,10 @@ impl ColumnSet {
         let oy = cy * CHUNK_SIZE;
         for lz in -1..=CHUNK_SIZE {
             for lx in -1..=CHUNK_SIZE {
+                let mut rock = None;
                 for ly in -1..=CHUNK_SIZE {
-                    blocks[PaddedChunk::index(lx, ly, lz)] = self.block(terrain, lx, oy + ly, lz);
+                    blocks[PaddedChunk::index(lx, ly, lz)] =
+                        self.block_with(terrain, lx, oy + ly, lz, &mut rock);
                 }
             }
         }

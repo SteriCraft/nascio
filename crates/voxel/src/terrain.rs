@@ -20,7 +20,7 @@ use nascio_worldgen::world_io::{Layer, World};
 
 use crate::block::{BlockId, Blocks, srgb_to_linear};
 use crate::climate::{ColumnClimate, SurfaceClimate};
-use crate::geology::{Class, ColumnGeo, Geology};
+use crate::geology::{Class, ColumnGeo, Geology, RockNoise};
 use crate::rivers::{Gauge, RiverHit, RiverParams, Rivers};
 use crate::vegetation::{BiomePlants, Part, Plant, PlantKind, cell_draw, default_vegetation};
 use nascio_core::consts::WORLD_SIZE;
@@ -186,6 +186,18 @@ struct Soil {
     under: BlockId,
     depth: i32,
     class: Class,
+}
+
+/// Per-column part of [`Terrain::rock_block`] (see [`Terrain::rock_column`]).
+#[derive(Clone, Copy, Debug)]
+pub struct RockColumn {
+    glacier: Option<(i32, i32)>,
+    /// Soil, of depth 0 under a glacier.
+    soil: Soil,
+    /// Rock depths (below the soil) where the weathered layer and the sediments end.
+    weathered: f64,
+    sediment_end: f64,
+    noise: RockNoise,
 }
 
 /// Soil table indexed by biome code.
@@ -535,12 +547,16 @@ impl Terrain {
 
     /// Geology and climate of the column at `(x, z)` (defaults without them).
     pub fn column_geo(&self, x: f64, z: f64) -> ColumnGeo {
-        let mut c = self
-            .geology
-            .as_ref()
-            .map_or_else(ColumnGeo::default, |g| g.column(x, z));
-        c.climate = self.climate(x, z);
         let r = self.cfg.biome_dither_m;
+        // With the dither, the biome is read below at another point.
+        let mut c = self.geology.as_ref().map_or_else(ColumnGeo::default, |g| {
+            if r > 0.0 {
+                g.column_without_biome(x, z)
+            } else {
+                g.column(x, z)
+            }
+        });
+        c.climate = self.climate(x, z);
         if r > 0.0
             && let Some(g) = &self.geology
         {
@@ -897,10 +913,63 @@ impl Terrain {
         moho: i32,
         depth: i32,
     ) -> (BlockId, Class) {
-        let ids = &self.blocks.ids;
+        let mut rc = self.rock_column(col, x, z, top, slope);
+        self.rock_at(&mut rc, col, top, moho, depth)
+    }
+
+    /// The part of [`Self::rock_block`] shared by all blocks of column `(x, z)` (world block
+    /// coordinates): glacier, soil, weathered and sedimentary thicknesses, rock noise.
+    pub fn rock_column(&self, col: &ColumnGeo, x: i32, z: i32, top: i32, slope: f64) -> RockColumn {
         let mut soil = self.soil(col, top, slope);
-        if let Some((ice, snow)) = self.glacier(col, top, slope) {
-            // Ice and snow hold no ore (class `Soil`); the soil under them is gone.
+        let glacier = self.glacier(col, top, slope);
+        if glacier.is_some() {
+            // The soil under ice and snow is gone.
+            soil.depth = 0;
+        }
+        let (x, z) = (crate::geology::wrap(x), crate::geology::wrap(z));
+        let noise = RockNoise::new(f64::from(x) + 0.5, f64::from(z) + 0.5);
+        if self.geology.is_none() {
+            return RockColumn {
+                glacier,
+                soil,
+                weathered: 0.0,
+                sediment_end: 0.0,
+                noise,
+            };
+        }
+        // Weathered rock thins out on steep blocks and at altitude; the dither turns the
+        // contour of the coarse layer into a ragged fringe (audit M7, anomaly c).
+        let c = &self.cfg;
+        let thin = (1.0 - smoothstep(c.weathering_slope[0], c.weathering_slope[1], slope))
+            * (1.0
+                - (1.0 - c.weathering_alt_keep)
+                    * smoothstep(c.weathering_alt_m[0], c.weathering_alt_m[1], f64::from(top)));
+        let u = (nascio_worldgen::rng::mix64(
+            self.plant_salt ^ 0x3EA7_4E11 ^ ((u64::from(x as u32) << 32) | u64::from(z as u32)),
+        ) >> 11) as f64
+            / (1u64 << 53) as f64;
+        let weathering = f64::from(col.weathering) * thin + u;
+        RockColumn {
+            glacier,
+            soil,
+            weathered: weathering.floor(),
+            sediment_end: (weathering + f64::from(col.sediment)).floor(),
+            noise,
+        }
+    }
+
+    /// Block at depth `depth ≥ 0` of the column of `rc` (see [`Self::rock_block`]).
+    pub fn rock_at(
+        &self,
+        rc: &mut RockColumn,
+        col: &ColumnGeo,
+        top: i32,
+        moho: i32,
+        depth: i32,
+    ) -> (BlockId, Class) {
+        let ids = &self.blocks.ids;
+        if let Some((ice, snow)) = rc.glacier {
+            // Ice and snow hold no ore (class `Soil`).
             if depth < snow
                 && let Some(b) = ids.snow
             {
@@ -911,33 +980,16 @@ impl Terrain {
             {
                 return (b, Class::Soil);
             }
-            soil.depth = 0;
         }
-        let soil_depth = soil.depth;
-        if depth < soil_depth {
+        let soil = rc.soil;
+        if depth < soil.depth {
             return (if depth == 0 { soil.top } else { soil.under }, soil.class);
         }
-        let (fx, fz) = (f64::from(x) + 0.5, f64::from(z) + 0.5);
         let Some(g) = &self.geology else {
             return (ids.granite, Class::Basement);
         };
-        let r = f64::from(depth - soil_depth);
-        // Weathered rock thins out on steep blocks and at altitude; the dither turns the
-        // contour of the coarse layer into a ragged fringe (audit M7, anomaly c).
-        let c = &self.cfg;
-        let thin = (1.0 - smoothstep(c.weathering_slope[0], c.weathering_slope[1], slope))
-            * (1.0
-                - (1.0 - c.weathering_alt_keep)
-                    * smoothstep(c.weathering_alt_m[0], c.weathering_alt_m[1], f64::from(top)));
-        let u = (nascio_worldgen::rng::mix64(
-            self.plant_salt
-                ^ 0x3EA7_4E11
-                ^ ((u64::from(crate::geology::wrap(x) as u32) << 32)
-                    | u64::from(crate::geology::wrap(z) as u32)),
-        ) >> 11) as f64
-            / (1u64 << 53) as f64;
-        let weathering = f64::from(col.weathering) * thin + u;
-        if r < weathering.floor() {
+        let r = f64::from(depth - soil.depth);
+        if r < rc.weathered {
             let b = if col.laterite {
                 ids.laterite
             } else {
@@ -945,15 +997,18 @@ impl Terrain {
             };
             return (b, Class::Weathered);
         }
-        if r < (weathering + f64::from(col.sediment)).floor() {
+        if r < rc.sediment_end {
             return (
-                g.sediment_block(ids, col, fx, top - depth, fz),
+                g.sediment_block(ids, col, &mut rc.noise, top - depth),
                 Class::Sediment,
             );
         }
         let crust = f64::from((top - moho).max(1));
         let u = f64::from(depth) / crust;
-        (g.basement_block(ids, col, fx, fz, u), Class::Basement)
+        (
+            g.basement_block(ids, col, &mut rc.noise, u),
+            Class::Basement,
+        )
     }
 
     fn plant_cell(&self) -> i32 {
