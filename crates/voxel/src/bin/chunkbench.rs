@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use nascio_core::consts::CHUNKS_PER_AXIS;
-use nascio_voxel::{ColumnSet, Terrain, VoxelConfig, mesh_chunk};
+use nascio_voxel::{ColumnSet, GenConfig, Terrain, mesh_chunk};
 use nascio_worldgen::rng::mix64;
 use nascio_worldgen::world_io::World;
 use rayon::prelude::*;
@@ -38,6 +38,12 @@ struct Cli {
     /// Thread counts to run (default: 1 and all cores).
     #[arg(long, value_delimiter = ',')]
     threads: Vec<usize>,
+    /// TOML file with a `[voxel]` section (needs `--dev-override`; outputs are marked).
+    #[arg(long)]
+    voxel_config: Option<PathBuf>,
+    /// Allow `--voxel-config`.
+    #[arg(long)]
+    dev_override: bool,
 }
 
 /// Times summed over the work items (CPU time), and counts.
@@ -102,8 +108,13 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let t = Instant::now();
     let world = World::load(&cli.world)?;
-    let terrain = Terrain::from_world(&world, VoxelConfig::default())?;
-    println!("terrain loaded in {:.0} ms", ms(t.elapsed()));
+    let gen_cfg = GenConfig::load(cli.voxel_config.as_deref(), cli.dev_override)?;
+    let terrain = Terrain::from_world(&world, gen_cfg.voxel.clone())?;
+    println!(
+        "{}terrain loaded in {:.0} ms",
+        gen_cfg.mark(),
+        ms(t.elapsed())
+    );
 
     let keys: Vec<(i32, i32)> = (0..cli.sites)
         .flat_map(|s| {

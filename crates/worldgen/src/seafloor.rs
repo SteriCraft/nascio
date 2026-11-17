@@ -121,6 +121,7 @@ pub fn limit_coastal_land(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nascio_core::fmath::DetMath;
 
     fn max_slope(h: &[f64], w: usize, hgt: usize, cell: f64, mask: &[bool]) -> f64 {
         let mut m: f64 = 0.0;
@@ -225,7 +226,7 @@ mod tests {
     fn gentle_floors_are_untouched() {
         let (w, hgt, cell) = (64, 64, 160.0);
         let h0: Vec<f64> = (0..w * hgt)
-            .map(|k| -1_000.0 - 10.0 * ((k % w) as f64 * 0.1).sin())
+            .map(|k| -1_000.0 - 10.0 * ((k % w) as f64 * 0.1).det_sin())
             .collect();
         let mut h = h0.clone();
         let mask = vec![true; w * hgt];

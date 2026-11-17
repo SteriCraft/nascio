@@ -12,6 +12,7 @@
 //! Winds are purely zonal, so rows are independent (parallel and deterministic). Each row is
 //! walked twice around the torus so the moisture state wraps consistently.
 
+use nascio_core::fmath::DetMath;
 use nascio_core::geo::{latitude, seam_distance};
 use nascio_core::math::smoothstep;
 use rayon::prelude::*;
@@ -46,8 +47,8 @@ pub fn easterly_weight(abs_lat_deg: f64, blend: f64) -> f64 {
 fn walk_row(elev: &[f64], dx: f64, pz: f64, dir: i64, c: &ErosionConfig) -> Vec<f64> {
     let w = elev.len() as i64;
     let mut out = vec![0.0; elev.len()];
-    let recharge = 1.0 - (-dx / c.ocean_recharge_m).exp();
-    let decay = (-dx / c.land_decay_m).exp();
+    let recharge = 1.0 - (-dx / c.ocean_recharge_m).det_exp();
+    let decay = (-dx / c.land_decay_m).det_exp();
     let scale = pz / 1_000.0;
     let mut q = 1.0f64;
     let mut prev = elev[0].max(0.0);
@@ -62,7 +63,7 @@ fn walk_row(elev: &[f64], dx: f64, pz: f64, dir: i64, c: &ErosionConfig) -> Vec<
         let top = h.max(0.0);
         let climb = (top - prev).max(0.0);
         prev = top;
-        let released = q * (1.0 - (-climb / c.orographic_height_m).exp());
+        let released = q * (1.0 - (-climb / c.orographic_height_m).det_exp());
         q -= released;
         if step >= w {
             out[i] = pz * (c.dry_floor + (1.0 - c.dry_floor) * q)
@@ -156,7 +157,7 @@ mod tests {
         let n = 125;
         let elev: Vec<f64> = (0..n)
             .map(|i| match i {
-                40..=79 => 200.0 + 1_800.0 * (-(((i as f64) - 60.0) / 5.0).powi(2)).exp(),
+                40..=79 => 200.0 + 1_800.0 * (-(((i as f64) - 60.0) / 5.0).powi(2)).det_exp(),
                 _ => -2_000.0,
             })
             .collect();

@@ -3,6 +3,7 @@
 //! islands and seamounts whose age grows with distance (Hawaii-like archipelagos). Over a
 //! continent they leave a plateau (traps).
 
+use nascio_core::fmath::DetMath;
 use nascio_core::torus::distance_f64;
 
 use super::{Cell, Tectonics, flags};
@@ -33,7 +34,7 @@ impl Tectonics {
             let (ci, cj) = self.grid.cell_of(pos.0, pos.1);
             let plate = self.grid.get(ci as i64, cj as i64).plate as usize;
             let v = self.plates[plate].velocity;
-            let speed = v.0.hypot(v.1);
+            let speed = v.0.det_hypot(v.1);
             self.hotspots[h].travel_m += speed;
             // A (nearly) still plate keeps building one big volcano.
             let still = speed < 0.05 * max_speed;

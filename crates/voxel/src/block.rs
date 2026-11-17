@@ -2,6 +2,9 @@
 //! with the world (`blocks.toml`, see [`nascio_worldgen::blocks`]); code refers to blocks by
 //! name. Colours are provisional until textures exist.
 
+// Rendering only (colours, previews): platform maths is fine here.
+#![allow(clippy::disallowed_methods)]
+
 pub use nascio_worldgen::blocks::{BlockDef, BlockRegistry, Matter};
 
 /// A block id.

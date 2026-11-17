@@ -3,6 +3,9 @@
 //! [`colorize`] and [`legend`] work on the layers of a loaded [`World`], so the CLI previews
 //! and the viewer share the same palettes.
 
+// Rendering only (colours, previews): platform maths is fine here.
+#![allow(clippy::disallowed_methods)]
+
 use std::f64::consts::TAU;
 use std::path::{Path, PathBuf};
 

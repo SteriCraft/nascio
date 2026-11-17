@@ -7,6 +7,7 @@
 
 use nascio_core::consts::{CHUNK_SIZE, CHUNKS_PER_AXIS};
 use nascio_core::coords::ChunkPos;
+use nascio_core::fmath::DetMath;
 
 use crate::block::{AIR, BlockId};
 use crate::chunk::{Chunk, ChunkDeltas, NP, PaddedChunk};
@@ -68,7 +69,7 @@ impl ColumnSet {
                 tops[lx + NP * lz] = h(1, 1).floor() as i32;
                 let gx = (h(2, 1) - h(0, 1)) * 0.5;
                 let gz = (h(1, 2) - h(1, 0)) * 0.5;
-                slopes[lx + NP * lz] = gx.hypot(gz) as f32;
+                slopes[lx + NP * lz] = gx.det_hypot(gz) as f32;
                 let x = f64::from(ox + lx as i32 - 1) + 0.5;
                 let z = f64::from(oz + lz as i32 - 1) + 0.5;
                 water_tops[lx + NP * lz] = terrain.water_top(x, z);

@@ -19,6 +19,7 @@
 //!
 //! The sea never changes extent: land is never lowered below sea level and fans stay below it.
 
+use nascio_core::fmath::DetMath;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
@@ -106,7 +107,7 @@ pub fn erode(
             if hr >= h[k] {
                 continue;
             }
-            let f = cfg.dt_yr * cfg.k_fluvial * discharge[k].powf(cfg.m_exponent)
+            let f = cfg.dt_yr * cfg.k_fluvial * discharge[k].det_powf(cfg.m_exponent)
                 / shape.step(dir[k] as usize);
             let new = (h[k] + f * hr) / (1.0 + f);
             eroded[k] = (h[k] - new) * area;
@@ -347,7 +348,7 @@ mod tests {
         let mut h: Vec<f64> = (0..s.n())
             .map(|k| {
                 let i = (k % 32) as f64;
-                100.0 + 900.0 * (std::f64::consts::TAU * i / 32.0).cos().max(0.0)
+                100.0 + 900.0 * (std::f64::consts::TAU * i / 32.0).det_cos().max(0.0)
             })
             .collect();
         let sea = vec![false; s.n()];

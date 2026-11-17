@@ -121,5 +121,12 @@ Audit complet du projet par Fable, à partir des derniers benchmarks du PC Windo
 
 **Validation** : un rapport priorisé, trié en revue avec l'auteur avant d'ouvrir la phase « Serveur et réseau ».
 
+**Fait (2026-11-17)** : rapport `rapport-audit-M7.md` (0 critique, 6 élevés, 11 moyens, 9 faibles), validé par l'auteur. Tous les constats sont appliqués avant la phase Serveur, en cinq lots, un commit par lot (lot 5 : un commit par sous-lot) :
+1. **Déterminisme** — fait (2026-11-17, à valider) : empreinte de génération (monde + `[voxel]`), `--dev-override` marqué, `libm` pour le code de génération, hachages de référence (monde au 1/25, 24 chunks), CI Linux et Windows ; `generator_version` 15. Monde de référence d'échelle 1 : `out/m7/world-42` (101 s).
+2. **Rivières et anomalies** (méandres, gabarit de jeu, embouchures, banquise, limite de roche) ; `generator_version` 16.
+3. **Performances** (bruits par colonne, gauchissement dédoublonné, pools ; puis table de gradients, `generator_version` 17), mesurées sur un monde d'échelle 1.
+4. **Stockage des deltas** (régions à la demande, journal, instantanés par chunk).
+5. **Constats restants** : 5a crates, 5b maillage, 5c shaders, 5d documentation.
+
 ---
 Ensuite viendra la **Phase « Serveur et réseau »**, qui fera l'objet d'une feuille de route séparée.

@@ -1,6 +1,7 @@
 //! Final pass: classify the present-day plate boundaries, build trenches and arcs, smooth
 //! orogens, and derive elevation, crust thickness and Moho depth.
 
+use nascio_core::fmath::DetMath;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
@@ -287,7 +288,7 @@ impl Tectonics {
                     + 2.0
                         * t.plains_relief_m
                         * smoothstep(shelf_w[k], shelf_w[k] + t.coastal_plain_width_m, din)
-                    + relief * (o / relief).tanh()
+                    + relief * (o / relief).det_tanh()
                     + t.arc_uplift_m * g_arc[k]
                     + plateau;
                 land_cells.push(k);
@@ -546,7 +547,11 @@ impl Tectonics {
 
 #[inline]
 fn gauss(x: f64) -> f64 {
-    if x.is_finite() { (-x * x).exp() } else { 0.0 }
+    if x.is_finite() {
+        (-x * x).det_exp()
+    } else {
+        0.0
+    }
 }
 
 /// Periodic box blur of radius `r` cells, horizontal then vertical.

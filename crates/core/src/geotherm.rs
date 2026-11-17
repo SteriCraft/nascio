@@ -10,6 +10,7 @@
 //! 1 °C per metre just above the Moho. `T_s` is the mean annual air temperature on land; under
 //! water it goes from the surface water to the bottom water over `deep_water_m`.
 
+use crate::fmath::DetMath;
 use serde::{Deserialize, Serialize};
 
 /// Sea water freezes at about −1.8 °C: the sea floor is never colder.
@@ -56,7 +57,7 @@ impl GeothermConfig {
         if k < 1e-6 {
             u
         } else {
-            (k * u).exp_m1() / k.exp_m1()
+            (k * u).det_exp_m1() / k.det_exp_m1()
         }
     }
 
@@ -76,7 +77,7 @@ impl GeothermConfig {
         let u = if k < 1e-6 {
             f
         } else {
-            (f * k.exp_m1()).ln_1p() / k
+            (f * k.det_exp_m1()).det_ln_1p() / k
         };
         u * crust
     }

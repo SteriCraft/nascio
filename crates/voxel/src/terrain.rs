@@ -11,6 +11,7 @@
 //! to its surface.
 
 use anyhow::Context;
+use nascio_core::fmath::DetMath;
 use nascio_worldgen::biomes;
 use nascio_worldgen::erosion::ErosionConfig;
 use nascio_worldgen::erosion::upsample::{Detail, baked_min_spacing, ruggedness};
@@ -894,7 +895,7 @@ impl Terrain {
         }
         // Same slope as the chunk columns.
         let slope = ((self.height(fx + 1.0, fz) - self.height(fx - 1.0, fz)) * 0.5)
-            .hypot((self.height(fx, fz + 1.0) - self.height(fx, fz - 1.0)) * 0.5);
+            .det_hypot((self.height(fx, fz + 1.0) - self.height(fx, fz - 1.0)) * 0.5);
         if slope > self.cfg.plant_max_slope || self.glacier(&col, top, slope).is_some() {
             return None;
         }
@@ -945,7 +946,7 @@ pub(crate) mod tests {
         let wave = |i: usize, j: usize, n: usize| {
             let a = std::f64::consts::TAU * i as f64 / n as f64;
             let b = std::f64::consts::TAU * j as f64 / n as f64;
-            (1_200.0 * a.cos() + 900.0 * b.sin() + 300.0 * (a + b).cos()) as f32
+            (1_200.0 * a.det_cos() + 900.0 * b.det_sin() + 300.0 * (a + b).det_cos()) as f32
         };
         let tectonic = PeriodicGrid::from_fn(n, n, cell, |i, j| wave(i, j, n));
         let flags = PeriodicGrid::from_fn(n, n, cell, |i, _| if i < 5 { 1.0 } else { 0.0 });

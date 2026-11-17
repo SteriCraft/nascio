@@ -2,6 +2,9 @@
 //!
 //! `cargo run -p nascio-voxel --release --example surface_preview -- out/m2/world-42`
 
+// Tool output (colours, statistics): platform maths is fine here.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::PathBuf;
 
 use nascio_voxel::{Terrain, VoxelConfig};

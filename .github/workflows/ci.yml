@@ -15,7 +15,7 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # Linux only: Windows is tested locally by the author.
+  # Linux: format, lints and tests.
   check:
     name: ubuntu-latest
     runs-on: ubuntu-latest
@@ -35,4 +35,16 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         # The viewer has no tests; skipping it avoids a full Bevy test build.
+        run: cargo test --workspace --exclude nascio-viewer
+
+  # Windows: the same tests, so the reference hashes (world, chunks, libm bits) are checked
+  # on both platforms (audit M7, E5).
+  windows:
+    name: windows-latest
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
         run: cargo test --workspace --exclude nascio-viewer

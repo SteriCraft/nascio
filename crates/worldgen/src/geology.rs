@@ -5,6 +5,7 @@
 //! (type, age), the tectonic history flags, the sedimentary cover, the climate and the rivers.
 //! The deposit catalogue ([`crate::deposits`]) only refers to these contexts by name.
 
+use nascio_core::fmath::DetMath;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -443,7 +444,7 @@ pub fn run(
                 let jj = (j as i64 + dj).rem_euclid(res as i64) as usize;
                 elev[jj * res + ii]
             };
-            let slope = ((at(1, 0) - at(-1, 0)).hypot(at(0, 1) - at(0, -1))) / (2.0 * cell);
+            let slope = ((at(1, 0) - at(-1, 0)).det_hypot(at(0, 1) - at(0, -1))) / (2.0 * cell);
             let t = f64::from(*temp.get(i as i64, j as i64));
             let p = f64::from(*precip.get(i as i64, j as i64));
             let flat = 1.0 - smoothstep(0.08, 0.3, slope);
@@ -641,7 +642,7 @@ fn river_sources(
             } else {
                 cell
             };
-            let carried = s[k] * (-step / g.placer_reach_m).exp() as f32;
+            let carried = s[k] * (-step / g.placer_reach_m).det_exp() as f32;
             s[t] = s[t].max(carried);
             indegree[t] -= 1;
             if indegree[t] == 0 {

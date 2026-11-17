@@ -11,6 +11,11 @@ repository.workspace = true
 serde.workspace = true
 jiff.workspace = true
 thiserror.workspace = true
+libm.workspace = true
+
+[features]
+# Platform maths instead of libm (only to measure or compare; breaks cross-platform hashes).
+std-math = []
 
 [dev-dependencies]
 proptest.workspace = true

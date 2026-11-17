@@ -1,6 +1,9 @@
 //! Top view of the surface blocks and tree trunks around a point, 1 px per metre.
 //! `cargo run -p nascio-voxel --release --example veg_map -- x z out.png`
 
+// Tool output (colours, statistics): platform maths is fine here.
+#![allow(clippy::disallowed_methods)]
+
 use nascio_voxel::{Terrain, VoxelConfig};
 use nascio_worldgen::world_io::World;
 

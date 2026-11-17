@@ -4,6 +4,7 @@
 //! number of nodes per period, so every noise function loops exactly every 100 000 m.
 
 use nascio_core::consts::{WORLD_SIZE, WORLD_SIZE_F64};
+use nascio_core::fmath::DetMath;
 use nascio_core::torus::wrap_f64;
 
 use crate::rng::mix64;
@@ -59,7 +60,7 @@ impl PeriodicNoise {
         let iz = iz.rem_euclid(self.nodes) as u64;
         let h = mix64(self.seed ^ mix64(ix.wrapping_mul(0x8CB9_2BA7_2F3D_8DD7) ^ iz));
         let angle = (h >> 11) as f64 / (1u64 << 53) as f64 * std::f64::consts::TAU;
-        (angle.cos(), angle.sin())
+        (angle.det_cos(), angle.det_sin())
     }
 
     /// Noise value at world position `(x, z)` (metres, any value: wrapped internally).

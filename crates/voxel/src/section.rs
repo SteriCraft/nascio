@@ -2,6 +2,7 @@
 //! isotherms along a line on the map. Used by the viewer and by the `section` tool.
 
 use nascio_core::GeothermConfig;
+use nascio_core::fmath::DetMath;
 use nascio_core::torus;
 use nascio_worldgen::deposits::Catalog;
 use nascio_worldgen::grid::PeriodicGrid;
@@ -144,7 +145,7 @@ pub fn render(
             let e = 4.0;
             let gx = terrain.height(c.x + e, c.z) - terrain.height(c.x - e, c.z);
             let gz = terrain.height(c.x, c.z + e) - terrain.height(c.x, c.z - e);
-            gx.hypot(gz) / (2.0 * e)
+            gx.det_hypot(gz) / (2.0 * e)
         };
         let bodies = terrain
             .geology()
@@ -220,7 +221,7 @@ pub fn render(
     }
     cv.text(4, mt - 14, "height (m)", 1, ink);
     let d = torus::delta2_f64(spec.from, spec.to);
-    let len = d.0.hypot(d.1);
+    let len = d.0.det_hypot(d.1);
     let dstep = if len > 20_000.0 {
         5_000.0
     } else if len > 6_000.0 {

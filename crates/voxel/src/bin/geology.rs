@@ -7,6 +7,9 @@
 //! cargo run -p nascio-voxel --release --bin geology -- depths out/m5/world-42
 //! ```
 
+// Tool output (colours, statistics): platform maths is fine here.
+#![allow(clippy::disallowed_methods)]
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 

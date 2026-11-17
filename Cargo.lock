@@ -4156,6 +4156,7 @@ name = "nascio-core"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "libm",
  "proptest",
  "serde",
  "thiserror 2.0.21",
@@ -4182,6 +4183,7 @@ name = "nascio-voxel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "clap",
  "image",
  "nascio-core",

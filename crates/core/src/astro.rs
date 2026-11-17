@@ -6,6 +6,7 @@
 //! - the sun direction in world space (x east, y up, z south) is
 //!   `(cos e · sin A, sin e, −cos e · cos A)`.
 
+use crate::fmath::DetMath;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use serde::{Deserialize, Serialize};
@@ -85,7 +86,7 @@ pub const AURORA_NIGHT_NONE_DEG: f64 = -6.0;
 /// Solar declination δ(N) = −ε · cos(2π (N + 10) / 365), N the continuous day of year.
 #[inline]
 pub fn declination(n: f64) -> f64 {
-    -obliquity() * (TAU * (n + 10.0) / DAYS_PER_YEAR as f64).cos()
+    -obliquity() * (TAU * (n + 10.0) / DAYS_PER_YEAR as f64).det_cos()
 }
 
 impl AstroConfig {
@@ -239,25 +240,29 @@ impl SunPosition {
 /// Geometric elevation: `sin e = sin φ sin δ + cos φ cos δ cos H`.
 #[inline]
 pub fn elevation(phi: f64, dec: f64, h: f64) -> f64 {
-    (phi.sin() * dec.sin() + phi.cos() * dec.cos() * h.cos())
+    (phi.det_sin() * dec.det_sin() + phi.det_cos() * dec.det_cos() * h.det_cos())
         .clamp(-1.0, 1.0)
-        .asin()
+        .det_asin()
 }
 
 /// Azimuth from north towards east, in `[0, 2π)`. Morning (`H < 0`) gives an eastern azimuth.
 #[inline]
 pub fn azimuth(phi: f64, dec: f64, h: f64) -> f64 {
-    let y = -dec.cos() * h.sin();
-    let x = dec.sin() * phi.cos() - dec.cos() * h.cos() * phi.sin();
-    let a = y.atan2(x).rem_euclid(TAU);
+    let y = -dec.det_cos() * h.det_sin();
+    let x = dec.det_sin() * phi.det_cos() - dec.det_cos() * h.det_cos() * phi.det_sin();
+    let a = y.det_atan2(x).rem_euclid(TAU);
     if a >= TAU { 0.0 } else { a }
 }
 
 /// World-space unit vector for an elevation and azimuth (x east, y up, z south).
 #[inline]
 pub fn direction(elevation: f64, azimuth: f64) -> [f64; 3] {
-    let c = elevation.cos();
-    [c * azimuth.sin(), elevation.sin(), -c * azimuth.cos()]
+    let c = elevation.det_cos();
+    [
+        c * azimuth.det_sin(),
+        elevation.det_sin(),
+        -c * azimuth.det_cos(),
+    ]
 }
 
 /// Directional light intensity: 0 for `e_vis ≤ 0` (so none in the seam band, where
@@ -292,11 +297,11 @@ pub fn sidereal_angle(hour_angle: f64, n: f64) -> f64 {
 /// Ecliptic (λ, β) → equatorial (right ascension α, declination δ), radians.
 pub fn ecliptic_to_equatorial(lambda: f64, beta: f64) -> (f64, f64) {
     let e = obliquity();
-    let dec = (beta.sin() * e.cos() + beta.cos() * e.sin() * lambda.sin())
+    let dec = (beta.det_sin() * e.det_cos() + beta.det_cos() * e.det_sin() * lambda.det_sin())
         .clamp(-1.0, 1.0)
-        .asin();
-    let ra = (lambda.sin() * e.cos() - beta.tan() * e.sin())
-        .atan2(lambda.cos())
+        .det_asin();
+    let ra = (lambda.det_sin() * e.det_cos() - beta.det_tan() * e.det_sin())
+        .det_atan2(lambda.det_cos())
         .rem_euclid(TAU);
     (ra, dec)
 }
@@ -311,7 +316,7 @@ pub fn equatorial_direction(phi: f64, sidereal: f64, ra: f64, dec: f64) -> [f64;
 /// Illuminated fraction of the Moon for an elongation ψ from the sun: `(1 − cos ψ)/2`.
 #[inline]
 pub fn moon_illumination(elongation: f64) -> f64 {
-    0.5 * (1.0 - elongation.cos())
+    0.5 * (1.0 - elongation.det_cos())
 }
 
 impl AstroConfig {
@@ -322,7 +327,7 @@ impl AstroConfig {
         let lambda = sun_ecliptic_longitude(n)
             + TAU * t_days / LUNATION_DAYS
             + self.moon_phase_at_epoch_deg.to_radians();
-        let beta = MOON_INCLINATION_DEG.to_radians() * lambda.sin();
+        let beta = MOON_INCLINATION_DEG.to_radians() * lambda.det_sin();
         ecliptic_to_equatorial(lambda, beta)
     }
 }
@@ -331,11 +336,12 @@ impl AstroConfig {
 /// `Q = (S0/π)(h0 sin φ sin δ + cos φ cos δ sin h0)`, `h0 = acos(clamp(−tan φ tan δ, −1, 1))`.
 pub fn daily_insolation(phi: f64, dec: f64) -> f64 {
     let phi = phi.clamp(-FRAC_PI_2, FRAC_PI_2);
-    let x = -phi.tan() * dec.tan();
+    let x = -phi.det_tan() * dec.det_tan();
     // tan(±π/2) is finite in f64, but guard anyway: 0 · ∞ would be NaN.
     let x = if x.is_nan() { 0.0 } else { x.clamp(-1.0, 1.0) };
-    let h0 = x.acos();
-    let q = SOLAR_CONSTANT / PI * (h0 * phi.sin() * dec.sin() + phi.cos() * dec.cos() * h0.sin());
+    let h0 = x.det_acos();
+    let q = SOLAR_CONSTANT / PI
+        * (h0 * phi.det_sin() * dec.det_sin() + phi.det_cos() * dec.det_cos() * h0.det_sin());
     q.max(0.0)
 }
 
@@ -594,7 +600,7 @@ mod tests {
             let d = equatorial_direction(latitude(z), sidereal_angle(h, n), ra, dec);
             let s = direction(sun.elevation, sun.azimuth);
             let cos = d[0] * s[0] + d[1] * s[1] + d[2] * s[2];
-            assert!(cos.clamp(-1.0, 1.0).acos().to_degrees() < 2.6, "n={n}");
+            assert!(cos.clamp(-1.0, 1.0).det_acos().to_degrees() < 2.6, "n={n}");
         }
     }
 
@@ -605,11 +611,19 @@ mod tests {
             let n = t.rem_euclid(365.0);
             let (ra, dec) = c.moon_equatorial(t, n);
             let (rs, ds) = ecliptic_to_equatorial(sun_ecliptic_longitude(n), 0.0);
-            let a = [dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin()];
-            let b = [ds.cos() * rs.cos(), ds.cos() * rs.sin(), ds.sin()];
+            let a = [
+                dec.det_cos() * ra.det_cos(),
+                dec.det_cos() * ra.det_sin(),
+                dec.det_sin(),
+            ];
+            let b = [
+                ds.det_cos() * rs.det_cos(),
+                ds.det_cos() * rs.det_sin(),
+                ds.det_sin(),
+            ];
             (a[0] * b[0] + a[1] * b[1] + a[2] * b[2])
                 .clamp(-1.0, 1.0)
-                .acos()
+                .det_acos()
         };
         // New Moon at the epoch, full half a lunation later (within the 5.14° inclination).
         assert!(moon_illumination(elong(0.0)) < 0.01);

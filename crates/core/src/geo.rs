@@ -3,6 +3,7 @@
 //! `z = 0` (≡ 100 000) is the pole line (« the seam »), `z = 50 000` is the equator.
 //! Latitudes follow a sphere's area distribution: `φ = asin(d)`, `d = (50 000 − z) / 50 000`.
 
+use crate::fmath::DetMath;
 use std::f64::consts::TAU;
 
 use crate::consts::{HALF_WORLD, WORLD_SIZE_F64};
@@ -19,7 +20,7 @@ pub fn sin_latitude(z: f64) -> f64 {
 /// Latitude φ in radians, positive in the northern hemisphere (z < 50 000).
 #[inline]
 pub fn latitude(z: f64) -> f64 {
-    sin_latitude(z).asin()
+    sin_latitude(z).det_asin()
 }
 
 /// Distance to the seam `s = min(z, 100 000 − z) ∈ [0, 50 000]`.
@@ -32,7 +33,7 @@ pub fn seam_distance(z: f64) -> f64 {
 /// `|φ|` in radians as a function of the seam distance: `asin(1 − s / 50 000)`.
 #[inline]
 pub fn abs_latitude_from_seam(s: f64) -> f64 {
-    (1.0 - s / HALF).clamp(-1.0, 1.0).asin()
+    (1.0 - s / HALF).clamp(-1.0, 1.0).det_asin()
 }
 
 /// Longitude λ in radians, in `[0, 2π)`.

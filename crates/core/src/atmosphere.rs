@@ -11,6 +11,7 @@
 //! down to `tropopause_c` (then stays there), keeps the mixing ratio of the surface air, and the
 //! diurnal cycle fades over the boundary layer ([`AtmosphereConfig::air`]).
 
+use crate::fmath::DetMath;
 use serde::{Deserialize, Serialize};
 
 /// Earth's Kármán line, m.
@@ -153,7 +154,7 @@ fn earth_pressure(km: f64) -> f64 {
     let i = t.partition_point(|r| r[0] <= km).clamp(1, t.len() - 1);
     let (a, b) = (t[i - 1], t[i]);
     let f = (km - a[0]) / (b[0] - a[0]);
-    (a[1].ln() + f * (b[1].ln() - a[1].ln())).exp()
+    (a[1].det_ln() + f * (b[1].det_ln() - a[1].det_ln())).det_exp()
 }
 
 /// Saturation vapour pressure (hPa) at `t_c` °C: Magnus formulas over water above 0 °C and over
@@ -161,9 +162,9 @@ fn earth_pressure(km: f64) -> f64 {
 #[inline]
 pub fn saturation_vapour_hpa(t_c: f64) -> f64 {
     if t_c >= 0.0 {
-        6.112 * (17.62 * t_c / (243.12 + t_c)).exp()
+        6.112 * (17.62 * t_c / (243.12 + t_c)).det_exp()
     } else {
-        6.112 * (22.46 * t_c / (272.62 + t_c)).exp()
+        6.112 * (22.46 * t_c / (272.62 + t_c)).det_exp()
     }
 }
 

@@ -10,6 +10,9 @@
 //! cargo run -p nascio-voxel --release --bin topview -- out/m6/world-42 --at 51200,7300 --side 16
 //! ```
 
+// Tool output (colours, statistics): platform maths is fine here.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -17,7 +20,7 @@ use nascio_core::consts::{CHUNK_SIZE, CHUNKS_PER_AXIS};
 use nascio_core::torus::wrap;
 use nascio_voxel::mesh::water_alpha;
 use nascio_voxel::rivers::RiverHit;
-use nascio_voxel::{ColumnSet, Terrain, VoxelConfig};
+use nascio_voxel::{ColumnSet, GenConfig, Terrain};
 use nascio_worldgen::rng::mix64;
 use nascio_worldgen::world_io::World;
 use rayon::prelude::*;
@@ -44,6 +47,12 @@ struct Cli {
     /// Side of the patch, in chunk columns (32 blocks each).
     #[arg(long, default_value_t = 32)]
     side: i32,
+    /// TOML file with a `[voxel]` section (needs `--dev-override`; outputs are marked).
+    #[arg(long)]
+    voxel_config: Option<PathBuf>,
+    /// Allow `--voxel-config`.
+    #[arg(long)]
+    dev_override: bool,
 }
 
 fn parse_xz(s: &str) -> Result<(i32, i32), String> {
@@ -108,7 +117,8 @@ fn column(terrain: &Terrain, cx: i32, cz: i32) -> Vec<(i32, [f32; 3])> {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let world = World::load(&cli.world)?;
-    let terrain = Terrain::from_world(&world, VoxelConfig::default())?;
+    let gen_cfg = GenConfig::load(cli.voxel_config.as_deref(), cli.dev_override)?;
+    let terrain = Terrain::from_world(&world, gen_cfg.voxel.clone())?;
     std::fs::create_dir_all(&cli.out)?;
 
     let sites: Vec<(i32, i32)> = if cli.at.is_empty() {
@@ -205,7 +215,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         let (x0, z0) = (wrap(cx0 * CHUNK_SIZE), wrap(cz0 * CHUNK_SIZE));
-        let path = cli.out.join(format!("site-{i}_{x0}_{z0}.png"));
+        let path = gen_cfg.mark_path(cli.out.join(format!("site-{i}_{x0}_{z0}.png")));
         img.save(&path)?;
         println!(
             "{}: {px}x{px} blocks from ({x0}, {z0}), heights {lo}..{hi}",

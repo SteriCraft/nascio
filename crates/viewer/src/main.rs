@@ -26,7 +26,7 @@ use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 use clap::Parser;
 use nascio_core::consts::WORLD_SIZE_F64;
 use nascio_core::coords::{BlockPos, WorldPos};
-use nascio_voxel::{DeltaStore, Terrain, VoxelConfig};
+use nascio_voxel::{DEV_OVERRIDE_MARK, DeltaStore, GenConfig, Terrain};
 use nascio_worldgen::world_io::World;
 
 use fly::{FlyCam, FlySettings, RenderOrigin};
@@ -76,9 +76,14 @@ struct Args {
     /// Capture the window once the scene is loaded, then quit.
     #[arg(long)]
     screenshot: Option<PathBuf>,
-    /// TOML file with a `[voxel]` section overriding chunk generation parameters.
+    /// TOML file with a `[voxel]` section overriding chunk generation parameters (needs
+    /// `--dev-override`: it changes the world's chunks).
     #[arg(long)]
     voxel_config: Option<PathBuf>,
+    /// Allow `--voxel-config`. Deltas are then kept in memory and every output (window
+    /// title, screenshot, benchmark files) is marked `DEV-OVERRIDE`.
+    #[arg(long)]
+    dev_override: bool,
     /// TOML file with a `[render]` section (display curvature radius…).
     #[arg(long)]
     render_config: Option<PathBuf>,
@@ -164,10 +169,12 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             args.world.display()
         )
     })?;
-    let voxel_cfg = match &args.voxel_config {
-        Some(p) => VoxelConfig::from_toml(&std::fs::read_to_string(p)?)?,
-        None => VoxelConfig::default(),
-    };
+    let gen_cfg = GenConfig::load(args.voxel_config.as_deref(), args.dev_override)?;
+    if let Some(p) = args.screenshot.take() {
+        args.screenshot = Some(gen_cfg.mark_path(p));
+    }
+    args.bench_out = gen_cfg.mark_path(args.bench_out.clone());
+    let fingerprint = gen_cfg.fingerprint(&world);
     let mut render_cfg = match &args.render_config {
         Some(p) => curvature::RenderConfig::from_toml(&std::fs::read_to_string(p)?)?,
         None => curvature::RenderConfig::default(),
@@ -175,17 +182,24 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     if let Some(r) = args.curvature_radius {
         render_cfg.curvature_radius_m = r;
     }
-    let palette_above = voxel_cfg.delta_palette_above;
-    let terrain = Arc::new(Terrain::from_world(&world, voxel_cfg)?);
+    let palette_above = gen_cfg.voxel.delta_palette_above;
+    let terrain = Arc::new(Terrain::from_world(&world, gen_cfg.voxel.clone())?);
     // Player modifications (god mode), `world-<seed>/deltas/`. Deltas of another world are
-    // left untouched: edits then stay in memory.
-    let deltas = match DeltaStore::open(
-        &args.world.join("deltas"),
-        nascio_worldgen::config::GENERATOR_VERSION,
-        &world.hash(),
-        terrain.blocks(),
-        palette_above,
-    ) {
+    // left untouched: edits then stay in memory, as under `--dev-override` (other chunks).
+    let opened = if gen_cfg.dev_override {
+        Err(anyhow::anyhow!(
+            "{DEV_OVERRIDE_MARK}: chunks differ from the world's"
+        ))
+    } else {
+        DeltaStore::open(
+            &args.world.join("deltas"),
+            nascio_worldgen::config::GENERATOR_VERSION,
+            &fingerprint,
+            terrain.blocks(),
+            palette_above,
+        )
+    };
+    let deltas = match opened {
         Ok((d, warnings)) => {
             for w in warnings {
                 warn!("deltas: {w}");
@@ -279,7 +293,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     }
 
     let mut window = Window {
-        title: format!("Nascio viewer — {}", args.world.display()),
+        title: format!("{}Nascio viewer — {}", gen_cfg.mark(), args.world.display()),
         present_mode: if args.no_vsync {
             PresentMode::AutoNoVsync
         } else {

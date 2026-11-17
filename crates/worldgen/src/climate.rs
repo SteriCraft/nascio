@@ -38,6 +38,7 @@
 //! - **Diurnal range** (static): larger inland and in dry climates; the cycle itself is evaluated
 //!   at run time (`nascio_core::climate::diurnal_offset`).
 
+use nascio_core::fmath::DetMath;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::f64::consts::TAU;
@@ -427,7 +428,7 @@ impl Surface {
     /// Maritime share: 1 at sea, decaying inland.
     fn maritime(&self, k: usize, decay: f64) -> f64 {
         let s = self.sea[k];
-        s + (1.0 - s) * (-self.coast[k] / decay).exp()
+        s + (1.0 - s) * (-self.coast[k] / decay).det_exp()
     }
 }
 
@@ -556,8 +557,8 @@ fn currents(c: &ClimateConfig, surf: &Surface) -> (Vec<f64>, Vec<f64>, Vec<f64>)
                         .map_or(f64::INFINITY, |step| (step as f64 - 0.5) * cell)
                 };
                 let (dw, de) = (walk(-1), walk(1));
-                let west = (-dw / c.current_width_m).exp();
-                let east = (-de / c.current_width_m).exp();
+                let west = (-dw / c.current_width_m).det_exp();
+                let east = (-de / c.current_width_m).det_exp();
                 // Land to the west: western boundary of the basin, warm and poleward.
                 let warm = west * band(a, 20.0, 50.0);
                 // Land to the east: eastern boundary, cold upwelling, equatorward.
@@ -606,18 +607,18 @@ fn relax(teq: &[f64], tau_days: f64) -> Vec<f64> {
         let (mut a, mut b) = (0.0, 0.0);
         for (k, &x) in teq.iter().enumerate() {
             let w = TAU * (m * k) as f64 / nf;
-            a += x * w.cos();
-            b += x * w.sin();
+            a += x * w.det_cos();
+            b += x * w.det_sin();
         }
         let f = if 2 * m == n { 1.0 / nf } else { 2.0 / nf };
         let (a, b) = (a * f, b * f);
         // X·e^{-iw}… with H = 1/(1 + iθ): amplitude 1/√(1+θ²), lag atan θ.
         let theta = TAU * m as f64 / YEAR * tau_days;
         let gain = 1.0 / (1.0 + theta * theta).sqrt();
-        let lag = theta.atan();
+        let lag = theta.det_atan();
         for (k, o) in out.iter_mut().enumerate() {
             let w = TAU * (m * k) as f64 / nf - lag;
-            *o += gain * (a * w.cos() + b * w.sin());
+            *o += gain * (a * w.det_cos() + b * w.det_sin());
         }
     }
     out
@@ -625,7 +626,7 @@ fn relax(teq: &[f64], tau_days: f64) -> Vec<f64> {
 
 /// Relaxation time giving a phase lag of `lag_days` on the annual harmonic.
 fn tau_for_lag(lag_days: f64) -> f64 {
-    (TAU * lag_days / YEAR).tan() / (TAU / YEAR)
+    (TAU * lag_days / YEAR).det_tan() / (TAU / YEAR)
 }
 
 /// Runs the climate stage. `elevation` is the fine grid (m), `is_sea` its sea mask.
@@ -724,7 +725,7 @@ pub fn run(
         .iter()
         .map(|&h| cfg.atmosphere.pressure_hpa(h))
         .collect();
-    let recharge = |dist: f64| 1.0 - (-dist / c.ocean_recharge_m).exp();
+    let recharge = |dist: f64| 1.0 - (-dist / c.ocean_recharge_m).det_exp();
     for (step, &day) in days.iter().enumerate() {
         progress.set_range(0.1, 0.85, step, steps, 0.0);
         progress.detail(format!("day sample {}/{steps}", step + 1));
@@ -737,7 +738,7 @@ pub fn run(
                 let dec = astro.effective_declination(day, s);
                 let lat = shifted_latitude(latitude(z).to_degrees(), dec, c.itcz_shift);
                 let (u, v) = wind(c, lat, s);
-                let speed = u.hypot(v);
+                let speed = u.det_hypot(v);
                 let len = c.advection_step_m * speed / c.advection_ref_wind_m_s;
                 let (ox, oz) = if speed > 1e-9 {
                     (-u / speed * len, -v / speed * len)
@@ -779,7 +780,7 @@ pub fn run(
                     let (i, j) = (k % res, k / res);
                     let (x, z) = ((i as f64 + 0.5) * cell, (j as f64 + 0.5) * cell);
                     let (_, _, ox, oz, _) = per_cell[k];
-                    let len = ox.hypot(oz).max(1.0);
+                    let len = ox.det_hypot(oz).max(1.0);
                     let wk = bilinear(&w, res, cell, x + ox, z + oz) * row_ref[j];
                     let ws = sat[k].0;
                     let sea = surf.sea[k];
@@ -790,7 +791,7 @@ pub fn run(
                     } else {
                         wk
                     };
-                    let land_w = wk * (-len / c.land_decay_m).exp();
+                    let land_w = wk * (-len / c.land_decay_m).det_exp();
                     let wk = sea * sea_w + (1.0 - sea) * land_w;
                     // Above saturation, the excess condenses and rains out.
                     let excess = (wk - ws).max(0.0);
@@ -898,7 +899,7 @@ mod tests {
     fn relaxation_lags_and_damps() {
         let n = 48;
         let teq: Vec<f64> = (0..n)
-            .map(|k| 10.0 + 20.0 * (TAU * k as f64 / n as f64).cos())
+            .map(|k| 10.0 + 20.0 * (TAU * k as f64 / n as f64).det_cos())
             .collect();
         let tau = tau_for_lag(30.0);
         let t = relax(&teq, tau);

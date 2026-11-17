@@ -7,6 +7,7 @@
 //! This is the only case where `delta` is not antisymmetric.
 
 use crate::consts::{HALF_WORLD, WORLD_SIZE, WORLD_SIZE_F64};
+use crate::fmath::DetMath;
 
 /// Wraps a coordinate into `[0, WORLD_SIZE)`.
 #[inline]
@@ -73,7 +74,7 @@ pub fn distance(a: (i32, i32), b: (i32, i32)) -> f64 {
 #[inline]
 pub fn distance_f64(a: (f64, f64), b: (f64, f64)) -> f64 {
     let (dx, dz) = delta2_f64(a, b);
-    dx.hypot(dz)
+    dx.det_hypot(dz)
 }
 
 /// Periodic linear interpolation along the shortest path from `a` to `b`, wrapped.

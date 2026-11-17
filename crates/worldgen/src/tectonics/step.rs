@@ -5,6 +5,7 @@
 //! parallel map gives the same result in any execution order. Every tie is broken by a fixed
 //! rule (crust type, age, plate id, or the step index), never by thread order.
 
+use nascio_core::fmath::DetMath;
 use rayon::prelude::*;
 
 use super::{CONTINENTAL, Cell, OCEANIC, Tectonics, flags};
@@ -170,7 +171,7 @@ impl Tectonics {
                     continue;
                 }
                 let (va, vb) = (self.plates[a].velocity, self.plates[b].velocity);
-                let closing = (va.0 - vb.0).hypot(va.1 - vb.1);
+                let closing = (va.0 - vb.0).det_hypot(va.1 - vb.1);
                 // Weld before this step's move would exceed the allowed shortening.
                 if self.contact[a * np + b] + closing <= limit {
                     self.contact[a * np + b] += closing;

@@ -7,6 +7,7 @@
 //! coherent shape (vein, stock, lens, layer, blanket, placer); its blocks replace only rock (or
 //! sand and gravel for placers) when the chunks are generated ([`Body::ore_at`]).
 
+use nascio_core::fmath::DetMath;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -346,7 +347,7 @@ impl Body {
     pub fn y_range(&self) -> (f64, f64) {
         let c = f64::from(self.c);
         let h = match self.shape {
-            Shape::Vein => f64::from(self.b) * f64::from(self.dip).sin() + c,
+            Shape::Vein => f64::from(self.b) * f64::from(self.dip).det_sin() + c,
             Shape::Layer => c * 1.6,
             _ => c,
         };
@@ -356,7 +357,7 @@ impl Body {
     /// Irregular outline of sheets: radius factor at angle `t`.
     fn outline(&self, t: f64) -> f64 {
         let s = f64::from(self.seed);
-        1.0 + 0.22 * (3.0 * t + s * 0.001).sin() + 0.12 * (5.0 * t + s * 0.017).sin()
+        1.0 + 0.22 * (3.0 * t + s * 0.001).det_sin() + 0.12 * (5.0 * t + s * 0.017).det_sin()
     }
 
     /// Ore at world position `(x, y, z)` of a column whose top solid block is `top`: the
@@ -365,7 +366,7 @@ impl Body {
     pub fn ore_at(&self, x: f64, y: f64, z: f64, top: f64) -> Option<(f64, f64)> {
         let dx = torus::delta_f64(self.x, x);
         let dz = torus::delta_f64(self.z, z);
-        let (sy, cy) = f64::from(self.yaw).sin_cos();
+        let (sy, cy) = f64::from(self.yaw).det_sin_cos();
         let u = dx * cy + dz * sy;
         let v = -dx * sy + dz * cy;
         let (a, b, c) = (f64::from(self.a), f64::from(self.b), f64::from(self.c));
@@ -384,23 +385,23 @@ impl Body {
                 })
             }
             Shape::Vein => {
-                let (sd, cd) = f64::from(self.dip).sin_cos();
+                let (sd, cd) = f64::from(self.dip).det_sin_cos();
                 let dy = y - self.y;
                 let across = v * sd + dy * cd;
                 let along = v * cd - dy * sd;
-                let wobble = 0.75 + 0.25 * (u / 9.0 + f64::from(self.seed % 97)).sin();
+                let wobble = 0.75 + 0.25 * (u / 9.0 + f64::from(self.seed % 97)).det_sin();
                 let inside =
                     across.abs() < c * wobble && (u / a).powi(2) + (along / b).powi(2) < 1.0;
                 inside.then_some((g, 0.0))
             }
             Shape::Layer | Shape::Blanket | Shape::Placer => {
                 let r = ((u / a).powi(2) + (v / b).powi(2)).sqrt();
-                if r >= 1.45 || r >= self.outline(v.atan2(u)) {
+                if r >= 1.45 || r >= self.outline(v.det_atan2(u)) {
                     return None;
                 }
                 let dy = if self.shape == Shape::Layer {
                     // Gentle undulation of the bedding.
-                    let wave = c * 0.6 * ((u / 170.0 + f64::from(self.seed % 61)).sin());
+                    let wave = c * 0.6 * ((u / 170.0 + f64::from(self.seed % 61)).det_sin());
                     y - (self.y + wave)
                 } else {
                     // Depth below the ground, measured downwards.
@@ -538,7 +539,7 @@ fn poisson(rng: &mut ChaCha8Rng, lambda: f64) -> usize {
     if lambda <= 0.0 {
         return 0;
     }
-    let l = (-lambda.min(50.0)).exp();
+    let l = (-lambda.min(50.0)).det_exp();
     let mut k = 0;
     let mut p = 1.0;
     loop {
@@ -594,13 +595,13 @@ fn snap_placer(inp: &Inputs, x: f64, z: f64, river: bool) -> Option<(f64, f64, f
             0.0
         } else {
             let (di, dj) = D8[usize::from(d)];
-            (dj as f64).atan2(di as f64)
+            (dj as f64).det_atan2(di as f64)
         }
     } else {
         // Along the coast: across the slope.
         let gx = e.sample_bilinear(px + fcell, pz) - e.sample_bilinear(px - fcell, pz);
         let gz = e.sample_bilinear(px, pz + fcell) - e.sample_bilinear(px, pz - fcell);
-        gz.atan2(gx) + std::f64::consts::FRAC_PI_2
+        gz.det_atan2(gx) + std::f64::consts::FRAC_PI_2
     };
     Some((px, pz, yaw))
 }

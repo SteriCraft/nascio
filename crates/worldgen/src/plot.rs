@@ -2,6 +2,9 @@
 //!
 //! Kept dependency-free on purpose: it only serves development previews in `out/`.
 
+// Rendering only (colours, previews): platform maths is fine here.
+#![allow(clippy::disallowed_methods)]
+
 use image::{Rgb, RgbImage};
 
 /// An RGB colour.

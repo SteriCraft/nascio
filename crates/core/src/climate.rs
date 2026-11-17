@@ -5,6 +5,7 @@
 //! the year and the phases in days. The evaluation is continuous in N by construction, also
 //! across the new year.
 
+use crate::fmath::DetMath;
 use std::f64::consts::TAU;
 
 use crate::consts::DAYS_PER_YEAR;
@@ -28,8 +29,8 @@ impl Harmonics {
     #[inline]
     pub fn eval(&self, n: f64) -> f64 {
         self.x0
-            + self.a1 * (TAU * (n - self.p1) / YEAR).cos()
-            + self.a2 * (2.0 * TAU * (n - self.p2) / YEAR).cos()
+            + self.a1 * (TAU * (n - self.p1) / YEAR).det_cos()
+            + self.a2 * (2.0 * TAU * (n - self.p2) / YEAR).det_cos()
     }
 
     /// Projection of `samples`, taken at `N_k = 365·k/n` (`n ≥ 5`), on the mean and the first two
@@ -43,21 +44,21 @@ impl Harmonics {
         for (k, &x) in samples.iter().enumerate() {
             let w = TAU * k as f64 / nf;
             x0 += x;
-            c1 += x * w.cos();
-            s1 += x * w.sin();
-            c2 += x * (2.0 * w).cos();
-            s2 += x * (2.0 * w).sin();
+            c1 += x * w.det_cos();
+            s1 += x * w.det_sin();
+            c2 += x * (2.0 * w).det_cos();
+            s2 += x * (2.0 * w).det_sin();
         }
         let f = 2.0 / nf;
         let (c1, s1, c2, s2) = (c1 * f, s1 * f, c2 * f, s2 * f);
         // a·cos(w) + b·sin(w) = A·cos(w − θ), θ = atan2(b, a); w − θ = 2π(N − p)/365.
-        let p1 = (s1.atan2(c1) / TAU * YEAR).rem_euclid(YEAR);
-        let p2 = (s2.atan2(c2) / (2.0 * TAU) * YEAR).rem_euclid(YEAR / 2.0);
+        let p1 = (s1.det_atan2(c1) / TAU * YEAR).rem_euclid(YEAR);
+        let p2 = (s2.det_atan2(c2) / (2.0 * TAU) * YEAR).rem_euclid(YEAR / 2.0);
         Self {
             x0: x0 / nf,
-            a1: c1.hypot(s1),
+            a1: c1.det_hypot(s1),
             p1,
-            a2: c2.hypot(s2),
+            a2: c2.det_hypot(s2),
             p2,
         }
     }
@@ -70,7 +71,7 @@ pub const DIURNAL_PEAK_FRAC: f64 = 14.5 / 24.0;
 /// day fraction `local_frac`: a cosine peaking at 14:30 local solar time.
 #[inline]
 pub fn diurnal_offset(range: f64, local_frac: f64) -> f64 {
-    0.5 * range * (TAU * (local_frac - DIURNAL_PEAK_FRAC)).cos()
+    0.5 * range * (TAU * (local_frac - DIURNAL_PEAK_FRAC)).det_cos()
 }
 
 #[cfg(test)]

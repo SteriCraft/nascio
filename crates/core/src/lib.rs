@@ -7,6 +7,7 @@ pub mod atmosphere;
 pub mod climate;
 pub mod consts;
 pub mod coords;
+pub mod fmath;
 pub mod geo;
 pub mod geotherm;
 pub mod math;

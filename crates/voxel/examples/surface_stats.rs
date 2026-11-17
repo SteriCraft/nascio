@@ -3,6 +3,9 @@
 //!
 //! `cargo run -p nascio-voxel --release --example surface_stats -- out/m6/world-42`
 
+// Tool output (colours, statistics): platform maths is fine here.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::PathBuf;
 
 use nascio_core::consts::WORLD_SIZE;

@@ -8,6 +8,7 @@
 //! 3. erosion steps (stream power and hillslope diffusion) and coastal sediments;
 //! 4. final hydrography: lakes, flow directions, accumulation, basins, rivers.
 
+use nascio_core::fmath::DetMath;
 pub mod flow;
 pub mod hydro;
 pub mod precip;
@@ -441,10 +442,10 @@ pub fn final_hydrology(cfg: &WorldConfig, ero: &mut ErosionOutput, precip: &Peri
     let q: Vec<f64> = hy.discharge.iter().map(|d| d / SECONDS_PER_YEAR).collect();
     let on_river = |k: usize, v: f64| if hy.river_order[k] > 0 { v } else { 0.0 };
     let width: Vec<f64> = (0..q.len())
-        .map(|k| on_river(k, c.river_width_coef * q[k].powf(c.river_width_exp)))
+        .map(|k| on_river(k, c.river_width_coef * q[k].det_powf(c.river_width_exp)))
         .collect();
     let depth: Vec<f64> = (0..q.len())
-        .map(|k| on_river(k, c.river_depth_coef * q[k].powf(c.river_depth_exp)))
+        .map(|k| on_river(k, c.river_depth_coef * q[k].det_powf(c.river_depth_exp)))
         .collect();
     ero.report.lakes = hy.lakes;
     ero.report.lake_area_km2 =

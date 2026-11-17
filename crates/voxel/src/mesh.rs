@@ -4,6 +4,9 @@
 //! Faces are merged when they share block and corner occlusion (the classic "greedy" pass), and
 //! quads are split along the diagonal that keeps occlusion gradients isotropic.
 
+// Rendering only (colours, previews): platform maths is fine here.
+#![allow(clippy::disallowed_methods)]
+
 use crate::block::{AIR, BlockId, Blocks, Matter};
 use crate::chunk::{N, PaddedChunk};
 use crate::terrain::ChunkTint;

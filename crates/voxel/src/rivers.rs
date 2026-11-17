@@ -13,6 +13,7 @@
 //!   block of water); on the banks (`bank_m` wide) it is raised to the water surface so that
 //!   the water never hangs above lower ground.
 
+use nascio_core::fmath::DetMath;
 use nascio_core::torus::{delta_f64, wrap_f64};
 use nascio_worldgen::erosion::flow::{D8, NO_DIR};
 use nascio_worldgen::grid::PeriodicGrid;
@@ -254,7 +255,7 @@ impl Rivers {
             } else {
                 0.0
             };
-            let dist = (px - t * dx).hypot(pz - t * dz);
+            let dist = (px - t * dx).det_hypot(pz - t * dz);
             let lerp = |v: [f32; 2]| f64::from(v[0]) + (f64::from(v[1]) - f64::from(v[0])) * t;
             let half = lerp(g.half);
             let e = dist - half;

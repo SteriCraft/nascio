@@ -1,5 +1,6 @@
 //! Initial state: warped periodic Voronoi plates, continental masses, hotspots.
 
+use nascio_core::fmath::DetMath;
 use std::f64::consts::TAU;
 
 use nascio_core::consts::WORLD_SIZE_F64;
@@ -161,8 +162,8 @@ fn make_plates(cfg: &WorldConfig, max_speed: f64) -> Vec<Plate> {
             Plate {
                 id: k as u8,
                 seed,
-                velocity: (speed * angle.cos(), speed * angle.sin()),
-                drive: (speed * angle.cos(), speed * angle.sin()),
+                velocity: (speed * angle.det_cos(), speed * angle.det_sin()),
+                drive: (speed * angle.det_cos(), speed * angle.det_sin()),
             }
         })
         .collect()

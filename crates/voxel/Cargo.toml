@@ -12,6 +12,7 @@ nascio-core.workspace = true
 nascio-worldgen.workspace = true
 serde.workspace = true
 anyhow.workspace = true
+blake3.workspace = true
 toml.workspace = true
 rayon.workspace = true
 clap.workspace = true
