@@ -12,6 +12,7 @@ nascio-core.workspace = true
 nascio-world.workspace = true
 nascio-worldgen.workspace = true
 nascio-voxel.workspace = true
+nascio-protocol.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 rayon.workspace = true

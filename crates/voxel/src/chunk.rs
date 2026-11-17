@@ -78,6 +78,14 @@ impl Chunk {
         self.uniform() == Some(id)
     }
 
+    /// The blocks in index order, when the chunk holds an array (not uniform).
+    pub fn as_dense(&self) -> Option<&[BlockId; VOLUME]> {
+        match &self.storage {
+            Storage::Uniform(_) => None,
+            Storage::Dense(b) => Some(b),
+        }
+    }
+
     /// A copy of all the blocks, in index order.
     pub fn to_dense(&self) -> Box<[BlockId; VOLUME]> {
         match &self.storage {

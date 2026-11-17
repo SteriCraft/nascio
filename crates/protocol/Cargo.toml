@@ -1,0 +1,22 @@
+[package]
+name = "nascio-protocol"
+description = "Nascio network protocol: messages, chunk codec, framing (no networking)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+nascio-core.workspace = true
+nascio-voxel.workspace = true
+serde.workspace = true
+postcard.workspace = true
+zstd.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

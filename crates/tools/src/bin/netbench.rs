@@ -334,6 +334,40 @@ fn codecs(world: PathBuf, sites: u64, side: i32, seed: u64) -> anyhow::Result<()
         );
     }
 
+    // The protocol's codec v2 and column batches (what the server will send).
+    let mut k = 0;
+    let (mut land_b, mut land_n, mut sea_b, mut sea_n) = (0usize, 0usize, 0usize, 0usize);
+    let t = Instant::now();
+    for &(cx, cz) in &keys {
+        let col = ColumnSet::new(&terrain, cx, cz);
+        let range = col.chunk_range(underground);
+        let n = range.clone().count();
+        let c = nascio_protocol::chunk::Column {
+            cx,
+            cz,
+            cy_min: *range.start(),
+            version: 0,
+            chunks: samples[k..k + n].iter().map(|s| s.chunk.clone()).collect(),
+        };
+        let bytes = c.compress()?;
+        if samples[k].land {
+            (land_b, land_n) = (land_b + bytes.len(), land_n + 1);
+        } else {
+            (sea_b, sea_n) = (sea_b + bytes.len(), sea_n + 1);
+        }
+        ensure!(
+            nascio_protocol::chunk::Column::decompress(&bytes, u16::MAX - 1)? == c,
+            "protocol column round trip"
+        );
+        k += n;
+    }
+    println!(
+        "  protocol v2 column batch: land {:.0} bytes ({land_n}), sea {:.0} bytes ({sea_n}); {:.2} ms per column (encode + compress + decompress + decode, 1 thread)",
+        land_b as f64 / land_n.max(1) as f64,
+        sea_b as f64 / sea_n.max(1) as f64,
+        t.elapsed().as_secs_f64() * 1e3 / cols
+    );
+
     // Speeds, one thread, on the non-uniform chunks.
     let dense: Vec<Box<[BlockId; VOLUME]>> = samples
         .iter()
@@ -368,6 +402,14 @@ fn codecs(world: PathBuf, sites: u64, side: i32, seed: u64) -> anyhow::Result<()
     println!(
         "  v1 decode                    {:>8.1}",
         t.elapsed().as_secs_f64() * 1e6 / n
+    );
+    println!(
+        "  protocol v2 encode           {:>8.1}",
+        time(&|d| {
+            let mut b = Vec::new();
+            nascio_protocol::chunk::encode(&Chunk::from_blocks(Box::new(*d)), &mut b);
+            b.len()
+        })
     );
     println!(
         "  varint layer encode          {:>8.1}",
