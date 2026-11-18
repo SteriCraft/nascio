@@ -138,13 +138,13 @@ impl RunningServer {
             sky.len() >> 10,
             started.elapsed().as_secs_f64()
         );
-        let spawns = spawn::Spawns::new(
+        let spawns = Arc::new(spawn::Spawns::new(
             terrain.clone(),
             world,
             &fingerprint,
             &cfg,
             &data_dir.join("server"),
-        )?;
+        )?);
         // Each login replaces it with the player's point.
         let first = spawns.fixed.or(spawns.sites.first().copied());
         let spawn_pos = first.map_or([0.0; 3], |p| spawn::standing(&terrain, p));
@@ -186,6 +186,15 @@ impl RunningServer {
 
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Mutex::new(SimStats::default()));
+        let server_dir = data_dir.join("server");
+        let accounts = Arc::new(accounts::Accounts::open_with(
+            &server_dir,
+            argon2::Params::new(cfg.account_hash_kib, cfg.account_hash_passes, 1, Some(32))
+                .map_err(|e| anyhow::anyhow!("argon2 parameters: {e}"))?,
+        )?);
+        // Last positions: written by their own thread, at most once a second; it ends after
+        // the simulation (its sender), with a last write.
+        let (positions, positions_rx) = std::sync::mpsc::channel();
         let (tx, rx) = std::sync::mpsc::channel();
         // The simulation logs refused edits too (`reach`).
         let abuse = Arc::new(security::AbuseLog::open(
@@ -204,6 +213,9 @@ impl RunningServer {
             edit_reach_m: cfg.edit_reach_m,
             sim_columns: cfg.sim_columns,
             rt: tokio::runtime::Handle::current(),
+            spawns: spawns.clone(),
+            accounts: positions,
+            position_save_s: cfg.position_save_s,
             stats: stats.clone(),
             repl: replicate::ReplConfig {
                 radius_m: cfg.entity_radius_m,
@@ -224,6 +236,12 @@ impl RunningServer {
                 .name("sim".into())
                 .spawn(move || sim.run(rx, s))?,
         );
+        let a = accounts.clone();
+        threads.push(
+            std::thread::Builder::new()
+                .name("accounts".into())
+                .spawn(move || accounts::writer(a, positions_rx, Duration::from_secs(1)))?,
+        );
         // Group commit of the journal.
         let (d, s) = (deltas.clone(), stop.clone());
         let every = Duration::from_millis(cfg.fsync_interval_ms.max(1));
@@ -239,12 +257,6 @@ impl RunningServer {
                     }
                 })?,
         );
-        let server_dir = data_dir.join("server");
-        let accounts = accounts::Accounts::open_with(
-            &server_dir,
-            argon2::Params::new(cfg.account_hash_kib, cfg.account_hash_passes, 1, Some(32))
-                .map_err(|e| anyhow::anyhow!("argon2 parameters: {e}"))?,
-        )?;
         let hash_permits = match cfg.account_hash_concurrency {
             0 => (std::thread::available_parallelism().map_or(2, |n| n.get()) / 2).max(1),
             n => n,

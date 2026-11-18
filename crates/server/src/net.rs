@@ -50,7 +50,7 @@ pub struct Shared {
     /// `WorldSky` and horizon tiles sent (statistics; the client cache test reads them).
     pub sent_skies: AtomicU64,
     pub sent_tiles: AtomicU64,
-    pub accounts: Accounts,
+    pub accounts: Arc<Accounts>,
     /// Secret hashes computed at once (`account_hash_concurrency`).
     pub hashing: tokio::sync::Semaphore,
     pub abuse: Arc<AbuseLog>,
@@ -60,7 +60,7 @@ pub struct Shared {
     /// Players online, by account name.
     pub sessions: Mutex<BTreeMap<String, Session>>,
     /// Spawn sites and the points of the accounts.
-    pub spawns: crate::spawn::Spawns,
+    pub spawns: Arc<crate::spawn::Spawns>,
 }
 
 /// A player online.
@@ -270,13 +270,13 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         None => login(&shared, ip, &hello.name, &hello.auth).await.err(),
     };
     // The player's point (drawn at the first login).
-    let (spawn, refuse) = match refuse {
-        Some(r) => ([0.0; 3], Some(r)),
+    let (home, refuse) = match refuse {
+        Some(r) => (None, Some(r)),
         None => match shared.spawns.of(&shared.accounts, &hello.name) {
-            Ok(p) => (p, None),
+            Ok(h) => (Some(h), None),
             Err(e) => {
                 crate::say_err!("spawn point of {}: {e:#}", hello.name);
-                ([0.0; 3], Some("no spawn point: try again later".to_owned()))
+                (None, Some("no spawn point: try again later".to_owned()))
             }
         },
     };
@@ -290,12 +290,15 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         conn.close(1u32.into(), reason.as_bytes());
         return Ok(());
     }
+    let home = home.expect("a point when not refused");
+    // Back where it left, alive; otherwise at its point.
+    let last = shared.accounts.last(&hello.name);
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
     let name = hello.name.clone();
     let mut sh = shared.hello.clone();
     sh.player = id;
     sh.server_unix_ms = unix_ms();
-    sh.spawn = spawn;
+    sh.spawn = last.unwrap_or(home.pos);
     send.write_all(&frame(&to_bytes(&ServerMsg::Hello(sh.clone()))?))
         .await?;
     let (out, mut out_rx) = mpsc::unbounded_channel::<ServerMsg>();
@@ -303,7 +306,8 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     let link = Arc::new(PlayerLink {
         id,
         name: hello.name,
-        spawn: sh.spawn,
+        home,
+        last,
         ip,
         out,
         subs: Mutex::new(BTreeSet::new()),
@@ -586,6 +590,9 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     .await;
     let quiet = {
         let mut sessions = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        // Under the lock: the simulation gets the departure before any new login of the
+        // name (which needs the session gone), and keeps the position for it.
+        shared.input(Input::Leave(id));
         if sessions.get(&name).is_some_and(|s| s.id == id) {
             sessions
                 .remove(&name)
@@ -598,7 +605,6 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     if !quiet {
         shared.broadcast(&ServerMsg::Chat(Chat::Left(name.clone())));
     }
-    shared.input(Input::Leave(id));
     shared.online.fetch_sub(1, Ordering::Relaxed);
     streamer.abort();
     writer.abort();

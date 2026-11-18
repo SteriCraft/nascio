@@ -406,3 +406,151 @@ proptest! {
         prop_assert!((a.pos[1] - b.pos[1]).abs() < 1e-6);
     }
 }
+
+/// A stone trunk from the ground (y = 10) up to y = 20 at column (x, z).
+fn trunk(scene: &mut Scene, x: i32, z: i32) {
+    for y in 10..=20 {
+        scene.set(x, y, z, STONE);
+    }
+}
+
+#[test]
+fn free_place_leaves_a_free_box_alone() {
+    let p = PlayerParams::default();
+    let mut s = State::new([500.25, 10.0, 500.75], Mode::Walk);
+    s.vel = [1.0, 0.0, 0.0];
+    let before = s;
+    let scene = Scene::default();
+    assert_eq!(
+        free_place(&mut s, &p, &shapes(), &scene, 10.0),
+        Placed::Stayed
+    );
+    assert_eq!(s, before);
+}
+
+#[test]
+fn free_place_pushes_out_of_a_trunk_sideways() {
+    let p = PlayerParams::default();
+    let mut scene = Scene::default();
+    trunk(&mut scene, 500, 500);
+    let mut s = State::new([500.5, 10.0, 500.5], Mode::Walk);
+    assert_eq!(
+        free_place(&mut s, &p, &shapes(), &scene, 10.0),
+        Placed::Moved
+    );
+    // Four cells one metre away: the same height, then the lowest x.
+    assert_eq!(s.pos, [499.5, 10.0, 500.5]);
+    assert_eq!(s.vel, [0.0; 3]);
+}
+
+#[test]
+fn free_place_leaves_a_thick_slab_by_the_side() {
+    let p = PlayerParams::default();
+    let mut scene = Scene::default();
+    // A slab from y = 11 to 20 over x, z in 495..=505: the top is 11 m above the feet, the
+    // nearest side 5 m away.
+    for y in 11..=20 {
+        for x in 495..=505 {
+            for z in 495..=505 {
+                scene.set(x, y, z, STONE);
+            }
+        }
+    }
+    let mut s = State::new([500.5, 10.0, 500.5], Mode::Walk);
+    assert_eq!(
+        free_place(&mut s, &p, &shapes(), &scene, 10.0),
+        Placed::Moved
+    );
+    assert_eq!(s.pos[1], 10.0, "not on top: {:?}", s.pos);
+    assert_eq!(s.pos, [494.5, 10.0, 500.5]);
+}
+
+#[test]
+fn free_place_on_a_snow_layer() {
+    let p = PlayerParams::default();
+    let mut scene = Scene::default();
+    trunk(&mut scene, 500, 500);
+    // Snow all around the trunk, and a wall on the floor-level cells but the snowy one east.
+    for (x, z) in [(499, 500), (500, 499), (500, 501)] {
+        scene.set(x, 10, z, STONE);
+        scene.set(x, 11, z, STONE);
+    }
+    scene.set(501, 10, 500, SNOW);
+    let mut s = State::new([500.5, 10.0, 500.5], Mode::Walk);
+    assert_eq!(
+        free_place(&mut s, &p, &shapes(), &scene, 10.0),
+        Placed::Moved
+    );
+    assert_eq!(s.pos, [501.5, 10.0 + f64::from(LAYER_H), 500.5]);
+}
+
+#[test]
+fn free_place_finds_nothing_in_solid_rock() {
+    let p = PlayerParams::default();
+    let mut scene = Scene::default();
+    for y in 10..=25 {
+        for x in 485..=515 {
+            for z in 485..=515 {
+                scene.set(x, y, z, STONE);
+            }
+        }
+    }
+    let mut s = State::new([500.5, 10.0, 500.5], Mode::Walk);
+    let before = s;
+    assert_eq!(
+        free_place(&mut s, &p, &shapes(), &scene, 10.0),
+        Placed::Nowhere
+    );
+    assert_eq!(s, before);
+    // Unknown cells are not free either.
+    let mut unknown = Scene::default();
+    trunk(&mut unknown, 500, 500);
+    for x in 480..=520 {
+        for z in 480..=520 {
+            if (x, z) != (500, 500) {
+                unknown.unloaded.push((x, z));
+            }
+        }
+    }
+    assert_eq!(
+        free_place(&mut s, &p, &shapes(), &unknown, 10.0),
+        Placed::Nowhere
+    );
+}
+
+#[test]
+fn free_place_across_the_seam() {
+    let p = PlayerParams::default();
+    // The trunk at x = 0: the first candidate, x − 1, lies across the seam.
+    let mut scene = Scene::default();
+    trunk(&mut scene, 0, 500);
+    let mut s = State::new([0.5, 10.0, 500.5], Mode::Walk);
+    assert_eq!(
+        free_place(&mut s, &p, &shapes(), &scene, 10.0),
+        Placed::Moved
+    );
+    assert_eq!(s.pos, [f64::from(WORLD_SIZE) - 0.5, 10.0, 500.5]);
+    // The same slab 30 km away and across the seam give the same move.
+    let slab = |x0: i32| {
+        let mut scene = Scene::default();
+        for y in 11..=20 {
+            for x in x0 - 3..=x0 + 6 {
+                for z in 497..=503 {
+                    scene.set(x, y, z, STONE);
+                }
+            }
+        }
+        scene
+    };
+    let mut a = State::new([0.5, 10.0, 500.5], Mode::Walk);
+    let mut b = State::new([30_000.5, 10.0, 500.5], Mode::Walk);
+    free_place(&mut a, &p, &shapes(), &slab(0), 10.0);
+    free_place(&mut b, &p, &shapes(), &slab(30_000), 10.0);
+    assert_eq!(delta_f64(0.5, a.pos[0]), delta_f64(30_000.5, b.pos[0]));
+    assert_eq!(a.pos[1..], b.pos[1..]);
+    assert!(
+        delta_f64(0.5, a.pos[0]) < 0.0,
+        "west, across the seam: {:?}",
+        a.pos
+    );
+}

@@ -494,6 +494,81 @@ pub fn unstuck(
     Ok(Stuck::Pushed)
 }
 
+/// Result of [`free_place`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Placed {
+    /// The box was free where it stood: unchanged.
+    Stayed,
+    /// Moved to the nearest free place.
+    Moved,
+    /// No free place within the radius: the player suffocates.
+    Nowhere,
+}
+
+/// Puts a player arriving inside blocks (login at its last position, respawn) in the nearest
+/// place where its box fits, within `radius` metres of its feet.
+///
+/// Unknown cells (`None`: a column not loaded, or below a column's chunks) count as taken: the
+/// caller loads the columns within `radius` plus one metre first. A box free where it stands
+/// does not move. Otherwise the candidates are the centres of the cells, the feet on the floor
+/// of the cell or on a snow layer in it, sorted by distance to the feet (on the torus), then
+/// highest first, then by x and by z; the first where the box fits wins. Its speed is reset;
+/// it falls from there.
+pub fn free_place(
+    state: &mut State,
+    p: &PlayerParams,
+    shapes: &Shapes,
+    src: &impl BlockSource,
+    radius: f64,
+) -> Placed {
+    let w = World { p, shapes, src };
+    let fits = |pos: [f64; 3]| matches!(w.collides(&Aabb::of(pos, p)), Ok(false));
+    if fits(state.pos) {
+        return Placed::Stayed;
+    }
+    // Offsets from the cell of the feet, unwrapped: the order does not depend on where the
+    // seam is.
+    let [px, py, pz] = state.pos;
+    let (bx, by, bz) = (px.floor(), py.floor(), pz.floor());
+    let r = radius.max(0.0).ceil() as i32 + 1;
+    let mut cands: Vec<(f64, f64, i32, i32, [f64; 3])> = Vec::new();
+    for dy in -r..=r {
+        for dx in -r..=r {
+            for dz in -r..=r {
+                let (cx, cy, cz) = (bx + f64::from(dx), by + f64::from(dy), bz + f64::from(dz));
+                let floors = [Some(0.0), {
+                    let cell = w.shape(cx as i32, cy as i32, cz as i32);
+                    (cell == Ok(Shape::Layer)).then_some(f64::from(LAYER_H))
+                }];
+                for lift in floors.into_iter().flatten() {
+                    let q = [cx + 0.5, cy + lift, cz + 0.5];
+                    let d = [q[0] - px, q[1] - py, q[2] - pz];
+                    let d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                    if d2 <= radius * radius {
+                        cands.push((d2, q[1], dx, dz, q));
+                    }
+                }
+            }
+        }
+    }
+    cands.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then(b.1.total_cmp(&a.1))
+            .then(a.2.cmp(&b.2))
+            .then(a.3.cmp(&b.3))
+    });
+    match cands.into_iter().find(|c| fits(c.4)) {
+        Some((.., q)) => {
+            state.pos = [wrap_f64(q[0]), q[1], wrap_f64(q[2])];
+            state.vel = [0.0; 3];
+            state.on_ground = false;
+            state.in_fluid = false;
+            Placed::Moved
+        }
+        None => Placed::Nowhere,
+    }
+}
+
 /// Whether the client should jump for the player this step (the auto-jump setting): walking
 /// on the ground into a one-block ledge with room above it.
 pub fn auto_jump(

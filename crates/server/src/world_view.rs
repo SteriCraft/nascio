@@ -128,6 +128,13 @@ impl WorldView {
         }
     }
 
+    /// Whether every column within `margin` metres of `(x, z)` is held.
+    pub fn has_around(&self, x: f64, z: f64, margin: f64) -> bool {
+        let n = f64::from(CHUNK_SIZE);
+        let cols = |a: f64| ((a - margin) / n).floor() as i32..=((a + margin) / n).floor() as i32;
+        cols(z).all(|cz| cols(x).all(|cx| self.held.contains_key(&wrap_column(cx, cz))))
+    }
+
     fn request(&mut self, k: Key) {
         self.pending.insert(k, false);
         let (cache, tx, max_id) = (self.cache.clone(), self.tx.clone(), self.max_id);

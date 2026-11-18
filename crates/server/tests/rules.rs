@@ -1,6 +1,6 @@
 //! Chantier 5.3, the rules of the simulated players: no block placed inside a player, edits
-//! within 5 m of the eyes, a player arriving inside blocks put on top of them, flight for
-//! administrators only. (Deaths and respawns: unit tests of `movement`.)
+//! within 5 m of the eyes, a player arriving inside blocks put beside them (5.3bis), flight
+//! for administrators only. (Deaths and respawns: unit tests of `movement`, `arrival.rs`.)
 
 use std::time::{Duration, Instant};
 
@@ -158,32 +158,30 @@ async fn edits_arrivals_and_flight() {
     let dx = nascio_core::torus::delta_f64(here[0], moved[0]);
     assert!(dx > 1.2, "walked {dx} m east ({here:?} → {moved:?})");
 
-    // Two blocks where a newcomer will stand: it is pushed on top.
+    // Two blocks where a newcomer will stand: it is put beside them, not on top.
+    let beside = |p: [f64; 3]| {
+        let d = nascio_core::torus::distance_f64((p[0], p[2]), (spawn[0], spawn[2]));
+        (0.9..3.0).contains(&d) && p[1] < f64::from(cell(2)[1])
+    };
     for dy in [0, 1] {
         a.edit(cell(dy), granite).await.unwrap();
     }
     let mut b = Player::new(&server, "newcomer").await;
     b.run(1_500, Input::default()).await;
     let pushed = b.state.expect("a state").pos;
-    assert_eq!(
-        pushed[1],
-        f64::from(cell(2)[1]),
-        "on top of the blocks: {pushed:?}"
+    assert!(
+        beside(pushed),
+        "beside the blocks: {pushed:?} (spawn {spawn:?})"
     );
     b.c.close();
     a.run(300, Input::default()).await;
 
-    // One more above the head: a newcomer is not killed (its spawn point is not a trap), it
-    // rises on top of the blocks.
+    // One more above the head: still beside them, alive.
     a.edit(cell(2), granite).await.unwrap();
     let mut c = Player::new(&server, "unlucky").await;
     c.run(1_500, Input::default()).await;
-    let risen = c.state.expect("a state").pos;
-    assert_eq!(
-        risen[1],
-        f64::from(cell(3)[1]),
-        "on top of the blocks: {risen:?}"
-    );
+    let out = c.state.expect("a state").pos;
+    assert!(beside(out), "beside the blocks: {out:?} (spawn {spawn:?})");
     assert_eq!(c.state.unwrap().mode, Mode::Walk);
 
     // Flight: refused to a player, granted to an administrator and by the console.

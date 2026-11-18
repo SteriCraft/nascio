@@ -78,8 +78,39 @@ Limites connues :
 - Le visualiseur envoie `cmd: None` jusqu'en 5.5 : ses éditions sont mesurées depuis la position présente.
 - Le passage marche ↔ vol n'est pas numéroté avec les commandes : une petite correction côté client au basculement.
 
+## 5.3bis — Dernière position, expulsion, point obstrué
+Plan validé par l'auteur. Pendant l'étape, l'auteur a écarté la protection des blocs autour des points d'apparition : un point obstrué est remplacé par un autre point tiré autour du même site (`decisions.md`).
+
+- **Placement à l'arrivée** (`nascio_physics::free_place`, remplace `Body::arrive` et la montée de 64 m) :
+  - une boîte libre sur place ne bouge pas ;
+  - sinon, le joueur va à la place libre la plus proche, à 10 m au plus de ses pieds. Les candidats sont les centres de cellule, pieds au plancher ou sur une couche de neige, triés par distance, du plus haut au plus bas, puis par x et par z ;
+  - une cellule inconnue compte comme prise ; le serveur attend toutes les colonnes à moins de 11 m (`WorldView::has_around`).
+- **Sans place libre** :
+  - un joueur revenu à sa dernière position meurt (étouffement) ;
+  - un joueur à son point (première connexion, réapparition) reçoit un nouveau point tiré à 300 m au plus du même site, gardé dans son compte (`Spawns::redraw`), avec 8 tirages au plus ;
+  - une édition qui enferme un joueur passe toujours par `unstuck` (le cas d'une cellule encore inconnue est réessayé au tick suivant, `Body::unstick`).
+- **Dernière position** :
+  - `Account.last` dans `accounts.toml`, en `f64` exacts ; `None` pour un joueur mort au départ, qui revient vivant au point de son compte ;
+  - le `Hello.spawn` est le point d'arrivée ;
+  - la position est gardée au départ, à l'arrêt propre (fin de `Sim::run`) et toutes les `position_save_s` (60 s).
+- **Écriture** :
+  - un fil `accounts` reçoit les changements de la simulation, les applique en mémoire et écrit le fichier au plus une fois par seconde ; une mutex d'écriture garantit que la dernière écriture est la plus récente ;
+  - le départ part vers la simulation sous le verrou des sessions, et la simulation garde la position des joueurs partis : une reconnexion immédiate retrouve la position au bit près ;
+  - **coût mesuré** (500 comptes, release) : fichier de 99 Ko, sérialisation 1,2 ms, écriture complète durable 4,2 ms en médiane (5,2 ms au pire), hors du tick.
+- **Tests** :
+  - physique (6 nouveaux) : boîte libre immobile, sortie d'un tronc par le côté, sortie d'une dalle épaisse par le côté, place sur la neige, rien de libre (roche, puis cellules inconnues) → `Nowhere`, la couture ;
+  - `movement` : arrivée dans un tronc → à côté ; rien de libre → décision laissée à la simulation ;
+  - `tests/arrival.rs` : reconnexion → même position au bit près ; position gardée chaque seconde en ligne ; après un arrêt propre, la position est lue dans `accounts.toml` au bit près ; un joueur enterré hors de toute plage meurt, part mort, puis revient vivant au point de son compte ;
+  - `tests/rules.rs` : « monté sur le dessus » devient « expulsé à côté » (deux blocs, puis trois) ;
+  - `tests/spawn.rs` : nouveau tirage autour du même site, ou autour du point fixe sans le garder.
+
+Limites connues :
+- Après un arrêt brutal, le joueur revient à sa position d'au plus 60 s avant.
+- Dans une reconnexion plus rapide qu'un tick, le `Hello.spawn` peut être l'ancien point ; la simulation, elle, place le joueur au bon endroit, et le client se cale sur le premier état.
+- Le nouveau tirage d'un point obstrué n'est couvert que par les tests de `spawn` (impossible d'obstruer 10 m autour d'un point par le jeu dans un test).
+
 Texte proposé pour la spec (§8.1, §8.4 et §8.5), mis à jour en 5.3, à intégrer en 5.6 :
 - §8.1 : `PROTOCOL_VERSION` vaut 10 ; datagrammes non fiables pour les états des entités, les commandes du joueur et son état autoritaire, chacun précédé d'un octet de type. Le client dépend aussi de `nascio-physics`.
 - §8.4 (nouveau point, **le mouvement**) : le client envoie à 20 Hz ses commandes numérotées, une par pas de 1/60 s, en répétant les 32 dernières non acquittées. Le serveur simule chaque joueur avec `nascio-physics`, contre les blocs mêmes qu'il envoie aux clients (air au-dessus d'une colonne, inconnu au-dessous) : chaque tick, au plus 3 pas plus un de rattrapage, dans un crédit de 3 pas par tick gardé jusqu'à 9 ; une commande dont une cellule est inconnue attend. Sans aucun datagramme de commandes pendant 250 ms, le serveur avance le joueur sans touche, numérote ces pas à la suite et les acquitte (les vraies commandes de ces numéros sont ignorées ; un client qui reçoit un acquittement au-delà de sa dernière commande numérote la suivante après l'acquittement). Il renvoie à chaque tick, avant les entités et dans le même budget, l'état du joueur (position et vitesse exactes, n° de la dernière commande appliquée), sur lequel le client rejoue ses commandes suivantes.
-- §8.4 (suite, **mort et vol**) : un joueur enfermé à l'arrivée, à la réapparition ou par une édition est posé sur les blocs, sauf si la rangée au-dessus de sa tête est solide : il meurt d'étouffement. Toucher le magma tue. `Died { cause }` prévient le client ; un mort ne bouge plus et n'est plus vu des autres ; `Respawn` le ramène au point de son compte (`Respawned`). Le vol est réservé aux administrateurs (`Fly`, ou la commande de console `fly`), sans gravité, sans traverser les blocs.
+- §8.4 (suite, **arrivée, mort et vol**) : un joueur revient à sa dernière position (gardée avec son compte au départ, à l'arrêt du serveur et toutes les 60 s ; un joueur mort au départ revient à son point). À l'arrivée et à la réapparition, un joueur dans des blocs va à la place libre la plus proche à 10 m au plus ; sans place, il meurt d'étouffement à sa dernière position, ou reçoit un autre point près du même site s'il était à son point. Un joueur qu'une édition enferme est posé sur les blocs, sauf si la rangée au-dessus de sa tête est solide : il meurt d'étouffement. Toucher le magma tue. `Died { cause }` prévient le client ; un mort ne bouge plus et n'est plus vu des autres ; `Respawn` le ramène au point de son compte (`Respawned`). Le vol est réservé aux administrateurs (`Fly`, ou la commande de console `fly`), sans gravité, sans traverser les blocs.
 - §8.5 : « les positions (`Move`) et » disparaît ; le point « Un déplacement plus rapide… (`Correct`) » est remplacé par : le serveur simule lui-même le joueur, et un seau de jetons limite les datagrammes de commandes (`input_datagrams_per_s`). La portée d'édition (`edit_reach_m`, 5 m) se mesure des yeux, tels qu'ils étaient après la commande que porte `SetBlock.cmd`, au point le plus proche de la cellule ; une édition qui précède sa commande attend au plus une seconde ; un bloc qui fait obstacle ne se pose pas dans un joueur.

@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail, ensure};
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -16,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::spawn::AccountSpawn;
 
 /// One account as stored.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Account {
     pub name: String,
     /// Salt and hash, hexadecimal.
@@ -37,6 +39,9 @@ pub struct Account {
     /// Where the player comes back at each login, drawn at the first one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn: Option<AccountSpawn>,
+    /// Where the player was when it left (feet, metres, exact); `None`: never left alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<[f64; 3]>,
 }
 
 /// A ban of an account, temporary or permanent.
@@ -116,6 +121,17 @@ pub struct Accounts {
     accounts: Mutex<BTreeMap<String, Account>>,
     /// Hashing parameters of new accounts.
     params: Params,
+    /// Held while a snapshot is taken and written: the last write is always the newest.
+    writing: Mutex<()>,
+}
+
+/// A change the simulation hands to the [`writer`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum Change {
+    /// The player's last position (`None`: it died, it comes back at its point).
+    Last(String, Option<[f64; 3]>),
+    /// A new spawn point (the former one was blocked).
+    Spawn(String, AccountSpawn),
 }
 
 /// A name: 3 to 16 characters among ASCII letters, digits and `_`.
@@ -177,6 +193,7 @@ impl Accounts {
             path,
             accounts: Mutex::new(accounts),
             params,
+            writing: Mutex::new(()),
         })
     }
 
@@ -196,14 +213,48 @@ impl Accounts {
         self.accounts.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn save(&self, accounts: &BTreeMap<String, Account>) -> anyhow::Result<()> {
+    /// Writes the accounts as they are now (durably). The accounts stay readable meanwhile:
+    /// only the snapshot is taken under their lock.
+    pub fn save(&self) -> anyhow::Result<()> {
+        let _w = self.writing.lock().unwrap_or_else(|e| e.into_inner());
         let file = File {
-            accounts: accounts.values().cloned().collect(),
+            accounts: self.lock().values().cloned().collect(),
         };
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         write_durable(&self.path, toml::to_string(&file)?.as_bytes())
+    }
+
+    /// Applies changes in memory (written by the next [`Self::save`]); unknown accounts are
+    /// skipped. Whether anything changed.
+    pub fn apply(&self, changes: &[Change]) -> bool {
+        let mut accounts = self.lock();
+        let mut any = false;
+        for c in changes {
+            match c {
+                Change::Last(name, pos) => {
+                    if let Some(a) = accounts.get_mut(name)
+                        && a.last != *pos
+                    {
+                        a.last = *pos;
+                        any = true;
+                    }
+                }
+                Change::Spawn(name, s) => {
+                    if let Some(a) = accounts.get_mut(name) {
+                        a.spawn = Some(*s);
+                        any = true;
+                    }
+                }
+            }
+        }
+        any
+    }
+
+    /// The last position of `name`, if it left alive.
+    pub fn last(&self, name: &str) -> Option<[f64; 3]> {
+        self.lock().get(name).and_then(|a| a.last)
     }
 
     /// Creates an account (refused if the name is taken or invalid, or the secret too
@@ -233,9 +284,11 @@ impl Accounts {
                 admin: false,
                 ban: None,
                 spawn: None,
+                last: None,
             },
         );
-        self.save(&accounts)
+        drop(accounts);
+        self.save()
     }
 
     /// Checks a login; with `register`, an unknown name creates the account.
@@ -282,9 +335,11 @@ impl Accounts {
                 admin: false,
                 ban: None,
                 spawn: None,
+                last: None,
             },
         );
-        self.save(&accounts)?;
+        drop(accounts);
+        self.save()?;
         Ok(Login::Created)
     }
 
@@ -315,7 +370,8 @@ impl Accounts {
             reason: reason.to_owned(),
         };
         a.ban = Some(ban.clone());
-        self.save(&accounts)?;
+        drop(accounts);
+        self.save()?;
         Ok(ban)
     }
 
@@ -326,7 +382,8 @@ impl Accounts {
             bail!("unknown account {name}");
         };
         let was = a.ban.take().is_some_and(|b| b.active(now_unix_ms));
-        self.save(&accounts)?;
+        drop(accounts);
+        self.save()?;
         Ok(was)
     }
 
@@ -353,7 +410,8 @@ impl Accounts {
             bail!("no account {name}");
         };
         a.spawn = Some(spawn);
-        self.save(&accounts)
+        drop(accounts);
+        self.save()
     }
 
     /// Accounts per spawn site (`n` sites).
@@ -378,7 +436,49 @@ impl Accounts {
             bail!("unknown account {name}");
         };
         a.admin = admin;
-        self.save(&accounts)
+        drop(accounts);
+        self.save()
+    }
+}
+
+/// The writer of the simulation's changes (last positions, new spawn points): applied in
+/// memory as they come, so that a login reads them at once, and written at most once every
+/// `min_interval` (`write_durable` off the tick). Returns once every sender is gone, after a
+/// last write.
+pub fn writer(accounts: Arc<Accounts>, rx: Receiver<Vec<Change>>, min_interval: Duration) {
+    let mut dirty = false;
+    let mut written: Option<Instant> = None;
+    loop {
+        let due = written.map_or(Duration::ZERO, |w| {
+            (w + min_interval).saturating_duration_since(Instant::now())
+        });
+        let wait = if dirty {
+            due
+        } else {
+            Duration::from_secs(3_600)
+        };
+        match rx.recv_timeout(wait) {
+            Ok(changes) => {
+                dirty |= accounts.apply(&changes);
+                while let Ok(more) = rx.try_recv() {
+                    dirty |= accounts.apply(&more);
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                if dirty && let Err(e) = accounts.save() {
+                    crate::say_err!("accounts: last positions not written: {e:#}");
+                }
+                return;
+            }
+        }
+        if dirty && written.is_none_or(|w| w.elapsed() >= min_interval) {
+            if let Err(e) = accounts.save() {
+                crate::say_err!("accounts: last positions not written: {e:#}");
+            }
+            dirty = false;
+            written = Some(Instant::now());
+        }
     }
 }
 
@@ -468,5 +568,66 @@ mod tests {
         assert_eq!(format_duration(90_000), "2 min");
         assert_eq!(format_duration(86_400_000), "1 d");
         assert_eq!(format_duration(1), "1 s");
+    }
+
+    fn stats(label: &str, mut ms: Vec<f64>) {
+        ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "{label}: min {:.3} ms, median {:.3} ms, max {:.3} ms",
+            ms[0],
+            ms[ms.len() / 2],
+            ms[ms.len() - 1]
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn write_cost_500_accounts() {
+        let dir = std::env::temp_dir().join(format!("nascio-accounts-cost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = Accounts::open_with(&dir, cheap()).unwrap();
+        for i in 0..500usize {
+            let name = format!("player_{i:03}");
+            a.token_login(&name, 0).unwrap();
+            a.apply(&[
+                Change::Spawn(
+                    name.clone(),
+                    AccountSpawn {
+                        site: (i % 10) as u32,
+                        x: 12_345 + i as i32,
+                        z: 67_890 - i as i32,
+                    },
+                ),
+                Change::Last(
+                    name,
+                    Some([
+                        12_345.678_901_234_5 + i as f64 * 0.1,
+                        87.123_456_789,
+                        67_890.987_654_321,
+                    ]),
+                ),
+            ]);
+        }
+        let mut write = Vec::new();
+        for _ in 0..20 {
+            let t = Instant::now();
+            a.save().unwrap();
+            write.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        let size = std::fs::metadata(dir.join("accounts.toml")).unwrap().len();
+        println!("accounts.toml: {size} bytes");
+        stats("full save", write);
+        let mut ser = Vec::new();
+        for _ in 0..20 {
+            let t = Instant::now();
+            let s = toml::to_string(&File {
+                accounts: a.lock().values().cloned().collect(),
+            })
+            .unwrap();
+            ser.push(t.elapsed().as_secs_f64() * 1e3);
+            std::hint::black_box(s);
+        }
+        stats("serialization only", ser);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

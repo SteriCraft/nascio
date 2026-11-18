@@ -173,6 +173,24 @@ pub fn standing(terrain: &Terrain, p: Point) -> [f64; 3] {
     [x, f64::from((top + 1).max(terrain.water_top(x, z))), z]
 }
 
+/// Where a player appears (login without a last position, respawn).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Home {
+    /// Standing on the point.
+    pub pos: [f64; 3],
+    /// The account's point (`None`: the fixed point of every player).
+    pub spawn: Option<AccountSpawn>,
+}
+
+/// Fresh randomness: the points of the accounts are not derived from the world seed.
+fn system_rng() -> anyhow::Result<ChaCha8Rng> {
+    let mut seed = [0u8; 32];
+    SystemRandom::new()
+        .fill(&mut seed)
+        .map_err(|_| anyhow::anyhow!("no system randomness"))?;
+    Ok(ChaCha8Rng::from_seed(seed))
+}
+
 /// The spawn points of a running server.
 pub struct Spawns {
     terrain: Arc<Terrain>,
@@ -228,18 +246,17 @@ impl Spawns {
 
     /// Where `name` appears: the fixed point, or the account's point, drawn (and kept) at its
     /// first login.
-    pub fn of(&self, accounts: &Accounts, name: &str) -> anyhow::Result<[f64; 3]> {
+    pub fn of(&self, accounts: &Accounts, name: &str) -> anyhow::Result<Home> {
         if let Some(p) = self.fixed {
-            return Ok(standing(&self.terrain, p));
+            return Ok(Home {
+                pos: standing(&self.terrain, p),
+                spawn: None,
+            });
         }
         let s = match accounts.spawn(name) {
             Some(s) => s,
             None => {
-                let mut seed = [0u8; 32];
-                SystemRandom::new()
-                    .fill(&mut seed)
-                    .map_err(|_| anyhow::anyhow!("no system randomness"))?;
-                let mut rng = ChaCha8Rng::from_seed(seed);
+                let mut rng = system_rng()?;
                 let site = rng.random_range(0..self.sites.len());
                 let p = draw_point(
                     &self.terrain,
@@ -257,6 +274,36 @@ impl Spawns {
                 s
             }
         };
-        Ok(standing(&self.terrain, Point { x: s.x, z: s.z }))
+        Ok(Home {
+            pos: standing(&self.terrain, Point { x: s.x, z: s.z }),
+            spawn: Some(s),
+        })
+    }
+
+    /// Another point for a player whose point is blocked (no free place within 10 m): drawn
+    /// at random within `spawn_radius_m` of the same site (of the fixed point, without keeping
+    /// it). The caller keeps the account's new point.
+    pub fn redraw(&self, home: &Home) -> anyhow::Result<Home> {
+        let mut rng = system_rng()?;
+        let (site, index) = match (home.spawn, self.fixed) {
+            (Some(s), _) => (
+                self.sites
+                    .get(s.site as usize)
+                    .copied()
+                    .unwrap_or(Point { x: s.x, z: s.z }),
+                Some(s.site),
+            ),
+            (None, Some(p)) => (p, None),
+            (None, None) => anyhow::bail!("no spawn site"),
+        };
+        let p = draw_point(&self.terrain, site, self.radius_m, self.rules, &mut rng);
+        Ok(Home {
+            pos: standing(&self.terrain, p),
+            spawn: index.map(|site| AccountSpawn {
+                site,
+                x: p.x,
+                z: p.z,
+            }),
+        })
     }
 }

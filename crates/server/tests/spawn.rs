@@ -103,7 +103,22 @@ fn an_account_keeps_its_point() {
     };
     let f = Spawns::new(t.clone(), world, "fp", &fixed, &dir).unwrap();
     let p = f.of(&accounts, "alice").unwrap();
-    assert_eq!((p[0], p[2]), (1_000.5, 2_000.5));
+    assert_eq!((p.pos[0], p.pos[2]), (1_000.5, 2_000.5));
+    assert_eq!(p.spawn, None);
+    // A blocked point: another one around the same site (around the fixed point, not kept).
+    for _ in 0..20 {
+        let r = spawns.redraw(&a).unwrap();
+        let s = r.spawn.unwrap();
+        assert_eq!(s.site, kept.site);
+        assert!(torus::distance((s.x, s.z), (site.x, site.z)) < 300.0);
+        assert_eq!(
+            (r.pos[0], r.pos[2]),
+            (f64::from(s.x) + 0.5, f64::from(s.z) + 0.5)
+        );
+        let q = f.redraw(&p).unwrap();
+        assert_eq!(q.spawn, None);
+        assert!(torus::distance_f64((q.pos[0], q.pos[2]), (1_000.5, 2_000.5)) < 300.0);
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

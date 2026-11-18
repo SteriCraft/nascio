@@ -104,6 +104,9 @@ pub struct ServerConfig {
     /// Columns the simulation keeps decoded to move the players (about; each holds tens to
     /// hundreds of KB).
     pub sim_columns: usize,
+    /// The last position of the players online is kept with their account this often, s
+    /// (also at departure and at a clean stop; 0: only then).
+    pub position_save_s: u32,
     /// Journal size above which the modified regions are written to their files, bytes.
     pub checkpoint_bytes: u64,
     /// The physics of the players (`[player]`), sent to the clients at the handshake.
@@ -157,6 +160,7 @@ impl Default for ServerConfig {
             input_datagrams_burst: 40.0,
             edit_reach_m: 5.0,
             sim_columns: 2_048,
+            position_save_s: 60,
             player: PlayerParams::default(),
         }
     }

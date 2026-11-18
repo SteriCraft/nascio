@@ -18,7 +18,8 @@ use nascio_chunk::BlockId;
 use nascio_chunk::mesh::LAYER_H;
 use nascio_core::torus;
 use nascio_physics::{
-    BlockSource, Input, Mode, PlayerParams, Shape, Shapes, State, Stuck, Unloaded, step, unstuck,
+    BlockSource, Input, Mode, Placed, PlayerParams, Shape, Shapes, State, Stuck, Unloaded,
+    free_place, step, unstuck,
 };
 use nascio_protocol::messages::DeathCause;
 use nascio_protocol::player::InputQueue;
@@ -27,8 +28,9 @@ use nascio_protocol::player::InputQueue;
 pub const CREDIT_TICKS: u32 = 3;
 /// Ticks without any command before the server moves the body without keys (250 ms).
 pub const STARVE_TICKS: u32 = 5;
-/// Cells an arriving body may rise to get out of blocks.
-pub const ARRIVAL_RISE: i32 = 64;
+/// An arriving body inside blocks is put in the nearest free place within this distance of
+/// its feet, m; the server loads the columns within one metre more first.
+pub const FREE_RADIUS_M: f64 = 10.0;
 /// Eye positions kept, by command number (one second of steps).
 pub const EYES_KEPT: usize = 64;
 /// Gap that counts as touching a deadly block, m.
@@ -47,12 +49,24 @@ pub struct Body {
     /// Datagrams of commands seen (`InputQueue::pushes`) at the last tick.
     pushes: u64,
     pub dead: bool,
-    /// To be freed from the blocks before moving (arrival, respawn).
-    pub settle: bool,
+    /// To be placed before moving (arrival, respawn): see [`Settle`].
+    pub settle: Option<Settle>,
+    /// To be freed by `unstuck` (shut in by an edit while its cells were unknown).
+    pub unstick: bool,
     /// The last command applied: steps without commands keep its heading and flight speed.
     pub last: Input,
     /// Eyes after each recent command, oldest first.
     eyes: VecDeque<(u32, [f64; 3])>,
+}
+
+/// Where an arriving body is placed ([`free_place`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Settle {
+    /// At its last position (login): no free place kills it (suffocation).
+    Last,
+    /// At its spawn point (first login, respawn): no free place, another point is drawn
+    /// (`redraws` so far).
+    Home { redraws: u32 },
 }
 
 /// What a tick did to a body.
@@ -65,6 +79,8 @@ pub struct Advance {
     /// A command waits for unknown cells.
     pub waiting: bool,
     pub died: Option<DeathCause>,
+    /// The body was being placed and no free place was found (the caller decides).
+    pub nowhere: Option<Settle>,
 }
 
 /// What the physics needs, shared by every body.
@@ -77,26 +93,39 @@ pub struct Rules<'a> {
 }
 
 impl Body {
+    /// A body arriving at its spawn point.
     pub fn new(pos: [f64; 3]) -> Self {
+        Self::arriving(pos, Settle::Home { redraws: 0 })
+    }
+
+    /// A body arriving at `pos`, placed as `settle` says.
+    pub fn arriving(pos: [f64; 3], settle: Settle) -> Self {
         Self {
             state: State::new(pos, Mode::Walk),
             credit: 0,
             idle: 0,
             pushes: 0,
             dead: false,
-            settle: true,
+            settle: Some(settle),
+            unstick: false,
             last: Input::default(),
             eyes: VecDeque::with_capacity(EYES_KEPT),
         }
     }
 
-    /// Back to life at `pos`.
+    /// Back to life at its spawn point `pos`.
     pub fn respawn(&mut self, pos: [f64; 3]) {
+        self.restart(pos, Settle::Home { redraws: 0 });
+    }
+
+    /// Starts again at `pos`, placed as `settle` says (keeps the credit, the last command
+    /// and the mode).
+    pub fn restart(&mut self, pos: [f64; 3], settle: Settle) {
         let mode = self.state.mode;
         *self = Self {
             credit: self.credit,
             last: self.last,
-            ..Self::new(pos)
+            ..Self::arriving(pos, settle)
         };
         self.state.mode = mode;
     }
@@ -141,31 +170,13 @@ impl Body {
         })
     }
 
-    /// Arrival or respawn: freed from the blocks like [`Self::unstuck`], but a body shut in
-    /// under a solid block is not killed: it rises to the first free place above (at most
-    /// [`ARRIVAL_RISE`] cells), where it falls. A spawn point inside a tree trunk, or under
-    /// blocks built over it, would otherwise kill the player at every respawn.
-    pub fn arrive(
-        &mut self,
-        r: &Rules,
-        src: &impl BlockSource,
-    ) -> Result<Option<DeathCause>, Unloaded> {
-        let start = self.state;
-        if self.unstuck(r, src)?.is_none() {
-            return Ok(None);
-        }
-        for dy in 1..=ARRIVAL_RISE {
-            self.state = start;
-            self.state.pos[1] = start.pos[1].floor() + f64::from(dy);
-            if self.unstuck(r, src)?.is_none() {
-                return Ok(None);
-            }
-        }
-        self.state = start;
-        Ok(Some(DeathCause::Suffocation))
+    /// Arrival or respawn: the body is put in the nearest place where it fits within
+    /// [`FREE_RADIUS_M`] ([`free_place`]; unknown cells count as taken). False: nowhere.
+    pub fn place(&mut self, r: &Rules, src: &impl BlockSource) -> bool {
+        free_place(&mut self.state, r.params, r.shapes, src, FREE_RADIUS_M) != Placed::Nowhere
     }
 
-    /// One tick: credit, settling, the queued commands, then steps without commands if the
+    /// One tick: credit, placing, the queued commands, then steps without commands if the
     /// client went quiet. A dead body only drains its queue (acknowledged, without effect).
     pub fn advance(&mut self, q: &mut InputQueue, r: &Rules, src: &impl BlockSource) -> Advance {
         let mut a = Advance::default();
@@ -176,20 +187,12 @@ impl Body {
             self.idle = 0;
             return a;
         }
-        if self.settle {
-            match self.arrive(r, src) {
-                Ok(died) => {
-                    self.settle = false;
-                    if died.is_some() {
-                        a.died = died;
-                        return a;
-                    }
-                }
-                Err(Unloaded) => {
-                    a.waiting = !q.is_empty();
-                    return a;
-                }
+        if let Some(settle) = self.settle {
+            if !self.place(r, src) {
+                a.nowhere = Some(settle);
+                return a;
             }
+            self.settle = None;
         }
         // Commands waiting, or a datagram came (even one bringing only commands already
         // filled): the client is still sending, the server does not step for it.
@@ -297,6 +300,7 @@ mod tests {
     use nascio_protocol::player::Commands;
 
     const GROUND: i32 = 10;
+    const WORLD: f64 = nascio_core::consts::WORLD_SIZE as f64;
     const MAGMA: BlockId = 2;
 
     fn shapes() -> Shapes {
@@ -370,7 +374,7 @@ mod tests {
         let (p, s) = (PlayerParams::default(), shapes());
         let r = rules(&p, &s);
         let mut b = Body::new([0.5, 30.0, 0.5]);
-        b.settle = false;
+        b.settle = None;
         let mut q = InputQueue::new(64);
         // Nothing before the first command: the body waits where it is.
         for _ in 0..10 {
@@ -415,7 +419,9 @@ mod tests {
         let (p, s) = (PlayerParams::default(), shapes());
         let r = rules(&p, &s);
         let unknown = |_: i32, _: i32, _: i32| None;
+        // Placed already (the simulation places a body once its columns are there).
         let mut b = Body::new([0.5, 11.0, 0.5]);
+        b.settle = None;
         let mut q = InputQueue::new(64);
         push(&mut q, 0, vec![forward(0.0); 3]);
         let a = b.advance(&mut q, &r, &unknown);
@@ -448,11 +454,11 @@ mod tests {
         assert!(q.is_empty() && q.applied() == Some(508));
         assert_eq!(b.state.pos, x);
         b.respawn([0.5, 11.0, 0.5]);
-        assert!(!b.dead && b.settle);
+        assert!(!b.dead && b.settle == Some(Settle::Home { redraws: 0 }));
     }
 
     #[test]
-    fn an_arrival_inside_blocks_rises_out_of_them() {
+    fn an_arrival_inside_blocks_is_put_beside_them() {
         let (p, s) = (PlayerParams::default(), shapes());
         let r = rules(&p, &s);
         // A trunk of stone from 11 to 20 at x = 0, z = 0 over the flat ground.
@@ -463,17 +469,21 @@ mod tests {
                 flat(x, y, z)
             }
         };
-        let mut b = Body::new([0.5, 11.0, 0.5]);
-        assert_eq!(b.arrive(&r, &trunk), Ok(None));
-        assert_eq!(b.state.pos[1], 21.0, "on top of the trunk");
+        let mut b = Body::arriving([0.5, 11.0, 0.5], Settle::Last);
+        let mut q = InputQueue::new(64);
+        assert_eq!(b.advance(&mut q, &r, &trunk), Advance::default());
+        assert_eq!(b.state.pos, [WORLD - 0.5, 11.0, 0.5], "beside the trunk");
+        assert_eq!(b.settle, None);
         // The same body shut in by an edit suffocates.
         let mut b = Body::new([0.5, 11.0, 0.5]);
         assert_eq!(b.unstuck(&r, &trunk), Ok(Some(DeathCause::Suffocation)));
-        // Nowhere to go: dies.
+        // Nowhere to go: the caller decides (death, or another spawn point).
         let solid = |_: i32, _: i32, _: i32| Some(1);
-        let mut b = Body::new([0.5, 11.0, 0.5]);
-        assert_eq!(b.arrive(&r, &solid), Ok(Some(DeathCause::Suffocation)));
-        assert_eq!(b.state.pos[1], 11.0);
+        let mut b = Body::arriving([0.5, 11.0, 0.5], Settle::Last);
+        let a = b.advance(&mut q, &r, &solid);
+        assert_eq!(a.nowhere, Some(Settle::Last));
+        assert_eq!(b.state.pos, [0.5, 11.0, 0.5]);
+        assert!(!b.dead && b.settle.is_some());
     }
 
     #[test]

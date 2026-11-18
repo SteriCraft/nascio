@@ -21,9 +21,11 @@ use nascio_voxel::DeltaStore;
 use rayon::prelude::*;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::accounts::Change;
 use crate::columns::{ColumnCache, wrap_column};
-use crate::movement::{Body, Rules, reach, solid_top};
+use crate::movement::{Body, FREE_RADIUS_M, Rules, Settle, reach, solid_top};
 use crate::replicate::{Entity, Grid, ReplConfig, Replicator};
+use crate::spawn::{Home, Spawns};
 use crate::world_view::WorldView;
 
 /// Block changes of one chunk in a tick: number of the last edit, `(index, block)` in order.
@@ -42,8 +44,10 @@ pub struct View {
 pub struct PlayerLink {
     pub id: u32,
     pub name: String,
-    /// The account's spawn point (arrival and respawn).
-    pub spawn: [f64; 3],
+    /// The account's spawn point (respawn; arrival without a last position).
+    pub home: Home,
+    /// Where the player left (the arrival point when `Some`).
+    pub last: Option<[f64; 3]>,
     /// Address of the connection (abuse log).
     pub ip: std::net::IpAddr,
     /// Control messages to the player.
@@ -147,6 +151,8 @@ struct Edit {
 struct Player {
     link: Arc<PlayerLink>,
     body: Body,
+    /// The spawn point (a new one is drawn when it is blocked).
+    home: Home,
     edits: VecDeque<Edit>,
     /// Edits refused out of reach (the first and every hundredth are logged).
     out_of_reach: u64,
@@ -175,10 +181,27 @@ pub struct Sim {
     /// The runtime that builds the columns.
     pub rt: tokio::runtime::Handle,
     pub abuse: Arc<crate::security::AbuseLog>,
+    /// Spawn points: another one is drawn for a player whose point is blocked.
+    pub spawns: Arc<Spawns>,
+    /// Last positions and new points, to the accounts' writer.
+    pub accounts: std::sync::mpsc::Sender<Vec<Change>>,
+    /// Last positions of the players online kept this often, s (0: at departure only).
+    pub position_save_s: u32,
 }
 
 /// Slack of the reach for rounding, m.
 const REACH_SLACK_M: f64 = 0.01;
+/// Spawn points drawn for a player whose point is blocked, before it suffocates.
+pub const MAX_REDRAWS: u32 = 8;
+
+/// What a player leaves to its account: its position, or nothing when dead (it comes back at
+/// its point).
+fn last_of(p: &Player) -> Change {
+    Change::Last(
+        p.link.name.clone(),
+        (!p.body.dead).then_some(p.body.state.pos),
+    )
+}
 
 impl Sim {
     pub fn run(self, rx: Receiver<Input>, stop: Arc<AtomicBool>) {
@@ -197,6 +220,10 @@ impl Sim {
         };
         let mut next = Instant::now();
         let mut tick: u32 = 0;
+        // Players gone, by name, with what they left: a login handled before the account
+        // has it (one tick) still arrives there.
+        let mut departed: BTreeMap<String, Option<[f64; 3]>> = BTreeMap::new();
+        let save_every = self.position_save_s.saturating_mul(self.tick_hz);
         while !stop.load(Ordering::Relaxed) {
             next += self.tick;
             tick = tick.wrapping_add(1).max(1);
@@ -209,7 +236,10 @@ impl Sim {
                 Input::Leave(id) | Input::Msg(id, _) => *id,
             });
             for input in inputs {
-                self.input(input, tick, &mut players, &mut world);
+                self.input(input, tick, &mut players, &mut world, &mut departed);
+            }
+            if save_every > 0 && tick.is_multiple_of(save_every) && !players.is_empty() {
+                let _ = self.accounts.send(players.values().map(last_of).collect());
             }
             let (edits, refused, changed) = self.edits(tick, &mut players, &mut world);
             let m0 = Instant::now();
@@ -251,6 +281,8 @@ impl Sim {
                 None => next = Instant::now(),
             }
         }
+        // Clean stop: every player online keeps its position.
+        let _ = self.accounts.send(players.values().map(last_of).collect());
     }
 
     fn input(
@@ -259,15 +291,23 @@ impl Sim {
         tick: u32,
         players: &mut BTreeMap<u32, Player>,
         world: &mut WorldView,
+        departed: &mut BTreeMap<String, Option<[f64; 3]>>,
     ) {
         match input {
             Input::Join(link) => {
-                let pos = link.view.lock().unwrap_or_else(|e| e.into_inner()).pos;
-                world.want_around(pos[0], pos[2], 2.0);
+                let last = departed.remove(&link.name).unwrap_or(link.last);
+                let body = match last {
+                    Some(pos) => Body::arriving(pos, Settle::Last),
+                    None => Body::new(link.home.pos),
+                };
+                let pos = body.state.pos;
+                world.want_around(pos[0], pos[2], FREE_RADIUS_M + 1.0);
+                link.view.lock().unwrap_or_else(|e| e.into_inner()).pos = pos;
                 players.insert(
                     link.id,
                     Player {
-                        body: Body::new(pos),
+                        body,
+                        home: link.home,
                         link,
                         edits: VecDeque::new(),
                         out_of_reach: 0,
@@ -277,7 +317,13 @@ impl Sim {
                 );
             }
             Input::Leave(id) => {
-                players.remove(&id);
+                if let Some(p) = players.remove(&id) {
+                    let change = last_of(&p);
+                    if let Change::Last(name, pos) = &change {
+                        departed.insert(name.clone(), *pos);
+                    }
+                    let _ = self.accounts.send(vec![change]);
+                }
             }
             Input::Msg(id, msg) => {
                 let Some(p) = players.get_mut(&id) else {
@@ -296,9 +342,9 @@ impl Sim {
                         since: tick,
                     }),
                     ClientMsg::Respawn if p.body.dead => {
-                        let at = p.link.spawn;
+                        let at = p.home.pos;
                         p.body.respawn(at);
-                        world.want_around(at[0], at[2], 2.0);
+                        world.want_around(at[0], at[2], FREE_RADIUS_M + 1.0);
                         p.link.view.lock().unwrap_or_else(|e| e.into_inner()).pos =
                             p.body.state.pos;
                         let _ = p.link.out.send(ServerMsg::Respawned {
@@ -454,27 +500,69 @@ impl Sim {
         for p in players.values_mut() {
             let b = &mut p.body;
             let pos = b.state.pos;
-            // The cells a step may reach (2 m at 120 m/s), asked ahead.
-            world.want_around(pos[0], pos[2], 2.5);
+            // The cells a step may reach (2 m at 120 m/s), asked ahead; around a body being
+            // placed, every column within reach of its free places.
+            let placing = b.settle.is_some() && !b.dead;
+            let margin = if placing { FREE_RADIUS_M + 1.0 } else { 2.5 };
+            world.want_around(pos[0], pos[2], margin);
             let mut died = None;
-            // Shut in by a block changed this tick.
+            // Shut in by a block changed this tick (or earlier, its cells then unknown).
             if !b.dead
-                && !b.settle
-                && changed
-                    .iter()
-                    .any(|(c, top)| b.overlaps_cell(&self.player, *c, *top))
+                && b.settle.is_none()
+                && (b.unstick
+                    || changed
+                        .iter()
+                        .any(|(c, top)| b.overlaps_cell(&self.player, *c, *top)))
             {
                 match b.unstuck(rules, &*world) {
-                    Ok(d) => died = d,
-                    Err(_) => b.settle = true,
+                    Ok(d) => {
+                        died = d;
+                        b.unstick = false;
+                    }
+                    Err(_) => b.unstick = true,
                 }
             }
             let mut q = p.link.inputs.lock().unwrap_or_else(|e| e.into_inner());
-            if died.is_none() {
+            // A body is placed once every column around it is there.
+            let ready = !placing || world.has_around(pos[0], pos[2], margin);
+            if died.is_none() && ready {
                 let a = b.advance(&mut q, rules, &*world);
                 steps += u64::from(a.applied);
                 filled += u64::from(a.filled);
                 died = a.died;
+                match a.nowhere {
+                    None => {}
+                    Some(Settle::Home { redraws }) if redraws < MAX_REDRAWS => {
+                        match self.spawns.redraw(&p.home) {
+                            Ok(home) => {
+                                crate::say!(
+                                    "{}: spawn point blocked, another one drawn at {:.0}, {:.0}",
+                                    p.link.name,
+                                    home.pos[0],
+                                    home.pos[2]
+                                );
+                                if let Some(s) = home.spawn {
+                                    let _ = self
+                                        .accounts
+                                        .send(vec![Change::Spawn(p.link.name.clone(), s)]);
+                                }
+                                p.home = home;
+                                b.restart(
+                                    home.pos,
+                                    Settle::Home {
+                                        redraws: redraws + 1,
+                                    },
+                                );
+                                world.want_around(home.pos[0], home.pos[2], margin);
+                            }
+                            Err(e) => {
+                                crate::say_err!("{}: no other spawn point: {e:#}", p.link.name);
+                                died = Some(DeathCause::Suffocation);
+                            }
+                        }
+                    }
+                    Some(_) => died = Some(DeathCause::Suffocation),
+                }
             }
             if let Some(cause) = died {
                 b.dead = true;
