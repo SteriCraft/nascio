@@ -121,7 +121,7 @@ Plan validé par l'auteur. `crates/client/src/player.rs` ; le client dépend de 
 - **Réconciliation** :
   - un état n'est accepté qu'à tick croissant ; la prédiction repart toujours de l'état du serveur et rejoue toutes les commandes non acquittées ;
   - une correction est un changement au bit près de l'état prédit présent ;
-  - un acquittement au-delà de la dernière commande vide la file, et la commande suivante prend `ack + 1`.
+  - un acquittement au-delà de la dernière commande vide la file, et la commande suivante prend `ack + 1 + ⌈RTT × 60⌉ + 3` : un aller-retour de pas d'avance sur ceux que le serveur comble encore (décision de l'auteur ; le serveur saute le trou).
 - **Cellules inconnues** : la prédiction s'arrête sur la première commande qui en lit une et la retente à chaque pas. Le joueur est figé tant qu'elle est arrêtée, ou au-delà de 60 commandes non acquittées ; les répétitions continuent de partir.
 - **Lissage** : affiché = prédit + décalage ; une correction ajoute (ancienne − nouvelle prédiction, sur le tore) ; décroissance τ = 100 ms, nulle sous 1 mm.
   - Recalage immédiat au-delà de 2 m, à la mort, à la réapparition, au changement de mode et à la renumérotation.
@@ -142,12 +142,10 @@ Plan validé par l'auteur. `crates/client/src/player.rs` ; le client dépend de 
 | 8 s en cercle, en sautant, sans édition | **0 correction**, ≈ 4 400 commandes rejouées, aucun état périmé, cadence 1,00 |
 | Mur posé 1,2 m devant, en marchant dessus | 1 correction, 0 dans les 1,5 dernières secondes, arrêté à 0,3 m du mur (au mm près) |
 | Gel du client de 500 ms | 12 à 15 pas comblés par le serveur, 0 renumérotation, 4 à 5 corrections, 0 dans les 2 dernières secondes |
-| Gel du client de 1 s | 42 à 45 pas comblés, 7 à 8 renumérotations (un aller simple), 11 à 15 corrections, 0 dans les 2 dernières secondes |
+| Gel du client de 1 s | 42 à 45 pas comblés, **1 renumérotation**, 14 corrections, 0 dans les 2 dernières secondes (avec `ack + 1` : 7 à 8 renumérotations) |
 | Mort (enterré) puis `Respawn` | `Died` puis `Snapped` ; `Respawned` puis `Snapped` ; 0 correction ensuite |
 
-- **Renumérotation en rafale** : après un gel plus long que 2 × latence + 300 ms, le serveur comble au-delà de la dernière commande du client. Le client se renumérote à chaque état jusqu'à ce que ses nouvelles commandes atteignent le serveur, puis tout se stabilise.
-  - Sous ce seuil (500 ms à 150 ms de latence), les pas comblés restent derrière la numérotation du client : quelques corrections, sans renumérotation.
-  - **À proposer à l'auteur** : renuméroter à `ack + 1 + RTT × 60`, pour un seul recalage.
+- **Renumérotation** : elle n'a lieu qu'après un gel plus long que 2 × latence + 300 ms, quand le serveur comble au-delà de la dernière commande du client. Sous ce seuil (500 ms à 150 ms de latence), les pas comblés restent derrière la numérotation du client : quelques corrections, sans renumérotation. Avec la règle du plan (`ack + 1`), le client se renumérotait à chaque état pendant un aller simple (7 à 8 fois) ; l'avance d'un aller-retour, validée par l'auteur, n'en laisse qu'une.
 
 Limites connues :
 - Le visualiseur n'est pas encore branché sur `Player` (5.5). Il ne vide pas `take_resends` : la liste reste vide sauf après un creusement sous la plage d'une colonne.

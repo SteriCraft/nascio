@@ -404,12 +404,19 @@ impl Player {
         if let Some(a) = s.ack {
             let newest = self.next.checked_sub(1);
             if newest.is_none_or(|n| a > n) {
-                // The server stepped for us beyond our newest command: number after it.
-                if newest.is_some() {
+                // The server stepped for us beyond our newest command, and goes on until our
+                // next commands reach it: number them one round trip of steps (and one send)
+                // ahead, so that they stay ahead of its own. The numbers in between are a gap
+                // the server skips.
+                let lead = if newest.is_some() {
                     self.stats.renumbered += 1;
                     snap = true;
-                }
-                self.next = a.wrapping_add(1);
+                    (self.rtt.as_secs_f64() * f64::from(self.params.step_hz)).ceil() as u32
+                        + STEPS_PER_SEND
+                } else {
+                    0
+                };
+                self.next = a.wrapping_add(1).wrapping_add(lead);
                 self.pending.clear();
             } else {
                 while self.pending.front().is_some_and(|c| c.0 <= a) {

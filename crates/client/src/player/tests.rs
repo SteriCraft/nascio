@@ -188,7 +188,8 @@ fn replays_the_commands_not_acknowledged() {
     assert_eq!(p.stats().corrections, 0);
     assert!(same_bits(&before, p.state()));
     assert!(p.last_cmd() >= Some(c.last));
-    // An acknowledgement beyond the newest command: numbering goes on after it.
+    // An acknowledgement beyond the newest command: numbering goes on one round trip of
+    // steps (here none) and one send after it.
     p.on_state(&state(3, Some(500), start), &m);
     assert_eq!(p.stats().renumbered, 1);
     assert_eq!(p.unacked(), 0);
@@ -196,7 +197,16 @@ fn replays_the_commands_not_acknowledged() {
     for i in 61..=70 {
         next = p.update(ms(t0, i * 1_000 / 60), &fwd, &m).or(next);
     }
-    assert_eq!(next.unwrap().numbered().next().unwrap().0, 501);
+    assert_eq!(next.unwrap().numbered().next().unwrap().0, 504);
+    // With 100 ms of round trip: 6 steps more.
+    p.set_rtt(Duration::from_millis(100));
+    p.on_state(&state(4, Some(900), start), &m);
+    let mut next = None;
+    for i in 71..=80 {
+        next = p.update(ms(t0, i * 1_000 / 60), &fwd, &m).or(next);
+    }
+    assert_eq!(next.unwrap().numbered().next().unwrap().0, 910);
+    assert_eq!(p.stats().renumbered, 2);
 }
 
 #[test]

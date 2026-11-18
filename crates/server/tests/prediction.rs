@@ -284,10 +284,10 @@ async fn prediction_through_latency() {
 
     // 3. The client freezes. For 500 ms, the server steps for it (no command for 250 ms)
     // but its numbers stay behind the client's: corrections, then agreement. For 1 s, they
-    // pass the client's (beyond 2 × 150 ms + 300 ms): the client renumbers at each state
-    // until its new commands reach the server (one way, about 6 states), then no more.
+    // pass the client's (beyond 2 × 150 ms + 300 ms): the client renumbers once, one round
+    // trip of steps ahead of the server's, then agrees again.
     let mut seen = 0;
-    for (freeze, renumbered) in [(500, 0..=0), (1_000, 1..=12)] {
+    for (freeze, renumbered) in [(500, 0..=0), (1_000, 1..=1)] {
         let walk = Instant::now();
         while walk.elapsed() < Duration::from_secs(1) {
             a.run(50, circle(10.0 + walk.elapsed().as_secs_f64())).await;
