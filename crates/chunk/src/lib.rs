@@ -10,7 +10,9 @@ pub mod horizon;
 pub mod mesh;
 pub mod tint;
 
-pub use block::{AIR, BlockDef, BlockId, BlockRegistry, Blocks, Matter};
+pub use block::{
+    AIR, BlockDef, BlockId, BlockRegistry, BlockTextures, Blocks, FaceTexture, FaceTint, Matter,
+};
 pub use chunk::{Chunk, PaddedChunk};
 pub use mesh::{ChunkMesh, MeshData, mesh_chunk};
 pub use tint::ChunkTint;
