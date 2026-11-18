@@ -109,7 +109,7 @@ Je propose **19 → 20** : le catalogue par défaut, les blocs du registre et le
 - Tests : `above_names_an_earlier_type_with_a_probability` (catalogue) ; `crates/worldgen/tests/deposits_above.rs` (monde au 1/25 : chaque chapeau est sur un porphyre, les autres types ne bougent pas, déterminisme).
 
 ## G3 — les huit types, le monde d'essai et les vérifications (fait)
-Monde d'essai : `out/gisements/world-42` (graine 42, échelle 1, `generator_version` 20, hachage `b9eab955…`, retrouvé à l'identique par une seconde génération). Images de vérification dans `out/gisements/` : `new-types.png` (les huit types sur le relief), `section-copper-cap.png`, `section-bog-iron.png`, et `world-42/previews/deposits.png` (carte générale).
+Premier monde d'essai : `out/gisements/world-42` (hachage `b9eab955…`, retrouvé à l'identique par une seconde génération), remplacé depuis par la version figée ci-dessous.
 
 ### Mesures, avant (`out/m7/world-42`, v19) et après
 | Mesure | Avant | Après |
@@ -145,3 +145,23 @@ Le silex affleure dans les 20 premiers mètres à moins de 2 km de 42 % des colo
 
 ### Tests
 `surface_bodies_cross_the_seam` (manteau et lentille de part et d'autre de x = 0), `deposits_above.rs` (G2), test du catalogue par défaut ; valeurs dorées : hachage du monde au 1/25 `df7468cf…`, chunks témoins inchangés.
+
+## Version 20 figée (après la validation de G1 à G3)
+Demandes de l'auteur : le fer des marais remplace le sol pour affleurer juste sous la surface ; un contexte « terre ferme » place les chapeaux de cuivre et l'uranium en front d'oxydation surtout à terre.
+
+- Contexte `land` (part de terre de la cellule) ; `requires = ["land"]` pour `copper_oxide` et `uranium_rollfront`.
+- Champ `replaces_soil` (manteaux) : le corps remplace le sol sauf le bloc de surface ; fer des marais centré à 1-3 m.
+- Monde de référence : `out/server/world-42` (hachage `44aaf7fe…`), servi par `out/server/run_server.bat`. Images : `out/gisements/new-types.png`, `section-copper-cap.png`, `section-bog-iron.png`, `out/server/world-42/previews/deposits.png`.
+
+| Mesure | v19 (`out/m7`) | G3 | Version figée |
+|---|---|---|---|
+| Part du minerai (500 premiers m) | 0,1270 % | 0,1303 % | 0,1285 % (+ limonite du sol : 0,0030 %) |
+| Colonnes à moins de 2 km d'un affleurement de cuivre | 8,3 % | 15,4 % | 15,4 % |
+| … de fer | 0 % | 25,8 % | 31,4 % |
+| … des deux | 0 % | 2,6 % | 3,8 % |
+| Chapeaux de cuivre sous la mer | — | 383 sur 495 (77 %) | **0 sur 102** |
+| Uranium en front d'oxydation | — | 82 corps, dont une partie en mer | 39 corps, à terre |
+
+Images : sur la carte, les chapeaux ne restent qu'à terre (côte ouest du continent central au pied de la chaîne, bande du sud-ouest, quelques îles) ; la coupe du fer des marais montre la limonite directement sous le gazon, dans le sol rouge, sur environ 450 m ; la coupe du chapeau est inchangée (il était déjà à terre).
+
+Tests : `bog_iron_replaces_the_soil_under_the_surface_block` (monde au 1/5 : limonite dans le sol, jamais en bloc de surface), `only_blankets_replace_the_soil` (catalogue) ; hachage du monde au 1/25 `cd444c8f…`, chunks témoins inchangés.

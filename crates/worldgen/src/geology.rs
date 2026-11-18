@@ -308,6 +308,7 @@ pub fn run(
             set(Context::Tropical, tropical);
             set(Context::RiverSource, f64::from(river_ctx[k]));
             set(Context::Coast, f64::from(coast[k]));
+            set(Context::Land, 1.0 - sea);
             w
         })
         .collect();

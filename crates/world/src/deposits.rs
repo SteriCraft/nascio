@@ -135,6 +135,10 @@ pub struct DepositType {
     /// any rock its shape allows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_rock: Vec<String>,
+    /// Blankets only: the body also replaces the soil under the surface block (bog iron
+    /// right under the turf). The surface block itself stays.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replaces_soil: bool,
     pub depth_m: [f64; 2],
     pub size_m: [f64; 2],
     pub thickness_m: [f64; 2],
@@ -220,6 +224,10 @@ impl DepositType {
         anyhow::ensure!(
             self.host_rock.iter().all(|r| !r.trim().is_empty()),
             "deposit {n}: empty host_rock name"
+        );
+        anyhow::ensure!(
+            !self.replaces_soil || self.shape == Shape::Blanket,
+            "deposit {n}: only a blanket may replace the soil"
         );
         if let Some(c) = &self.cap {
             anyhow::ensure!(
@@ -638,6 +646,16 @@ abundance = 500
         // Absent from a written catalogue when empty.
         assert!(!toml::to_string(&plain).unwrap().contains("host_rock"));
         assert!(Catalog::parse(&flint(r#"host_rock = [" "]"#)).is_err());
+    }
+
+    #[test]
+    fn only_blankets_replace_the_soil() {
+        assert!(Catalog::parse(&flint("replaces_soil = true")).is_err());
+        let blanket = flint("replaces_soil = true").replace("\"lens\"", "\"blanket\"");
+        let c = Catalog::parse(&blanket).unwrap();
+        assert!(c.deposits[0].replaces_soil);
+        let plain = Catalog::parse(&flint("")).unwrap();
+        assert!(!toml::to_string(&plain).unwrap().contains("replaces_soil"));
     }
 
     /// A cap of type `cap` above `parent`, with `extra` lines.

@@ -29,10 +29,12 @@ pub enum Context {
     Tropical,
     RiverSource,
     Coast,
+    /// Share of dry land in the cell (generator 20): deposits that form above sea level.
+    Land,
 }
 
 /// Number of contexts.
-pub const CONTEXTS: usize = 20;
+pub const CONTEXTS: usize = 21;
 
 impl Context {
     pub const ALL: [Context; CONTEXTS] = [
@@ -56,6 +58,7 @@ impl Context {
         Context::Tropical,
         Context::RiverSource,
         Context::Coast,
+        Context::Land,
     ];
 
     pub fn name(self) -> &'static str {
@@ -80,6 +83,7 @@ impl Context {
             Context::Tropical => "tropical",
             Context::RiverSource => "river_source",
             Context::Coast => "coast",
+            Context::Land => "land",
         }
     }
 

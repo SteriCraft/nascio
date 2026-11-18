@@ -178,6 +178,7 @@ fn stats(world: &World, columns: usize, depth: i32) -> anyhow::Result<()> {
     let mut per_block: BTreeMap<u16, u64> = BTreeMap::new();
     let mut per_class: BTreeMap<&str, u64> = BTreeMap::new();
     let (mut rock, mut ore, mut sampled, mut tries) = (0u64, 0u64, 0usize, 0u64);
+    let mut soil_ore: BTreeMap<u16, u64> = BTreeMap::new();
     while sampled < columns && tries < 50 * columns as u64 {
         tries += 1;
         let h = mix64(0xC0FF_EE00 ^ tries);
@@ -203,6 +204,10 @@ fn stats(world: &World, columns: usize, depth: i32) -> anyhow::Result<()> {
             }
             let (b, class) = terrain.rock_block(&col, bx, bz, top, slope, moho, d);
             if class == Class::Soil {
+                // Not rock, but a blanket may replace it (bog iron).
+                if let Some(id) = g.ore(&bodies, class, b, bx, y, bz, top) {
+                    *soil_ore.entry(id).or_default() += 1;
+                }
                 continue;
             }
             rock += 1;
@@ -226,6 +231,13 @@ fn stats(world: &World, columns: usize, depth: i32) -> anyhow::Result<()> {
         "{sampled} continental land columns, first {depth} m: {rock} rock blocks, ore share {:.4} %",
         ore as f64 / rock.max(1) as f64 * 100.0
     );
+    for (id, n) in &soil_ore {
+        println!(
+            "  ore in the soil: {} {n} blocks ({:.4} % of the rock blocks)",
+            blocks.def(*id).name,
+            *n as f64 / rock.max(1) as f64 * 100.0
+        );
+    }
     for (c, n) in &per_class {
         println!("  {c:<16} {:6.2} %", *n as f64 / rock.max(1) as f64 * 100.0);
     }

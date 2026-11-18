@@ -125,6 +125,63 @@ fn ore_bodies_replace_rock_only() {
     assert!(found.iter().all(|&f| f), "ore found per shape: {found:?}");
 }
 
+/// Bog iron (`replaces_soil`) lies right under the surface block, in the soil, and never takes
+/// the surface block itself.
+#[test]
+fn bog_iron_replaces_the_soil_under_the_surface_block() {
+    let t = terrain();
+    let blocks = t.blocks();
+    let limonite = (0..blocks.len() as u16)
+        .find(|&id| blocks.def(id).name == "limonite")
+        .expect("limonite in the registry");
+    let (mut in_soil, mut at_surface) = (0, 0);
+    for b in t
+        .geology()
+        .bodies()
+        .iter()
+        .filter(|b| b.shape == Shape::Blanket)
+        .take(60)
+    {
+        let (cx, cz) = (
+            (b.x / f64::from(CHUNK_SIZE)) as i32,
+            (b.z / f64::from(CHUNK_SIZE)) as i32,
+        );
+        let col = ColumnSet::new(t, cx, cz);
+        let top = col.top(16, 16);
+        let cy = top.div_euclid(CHUNK_SIZE);
+        for dy in -1..=0 {
+            let c = generate_chunk(t, ChunkPos::new(cx, cy + dy, cz));
+            for z in 0..32u8 {
+                for x in 0..32u8 {
+                    let (lx, lz) = (i32::from(x), i32::from(z));
+                    let top = col.top(lx, lz);
+                    for y in 0..32u8 {
+                        let wy = (cy + dy) * CHUNK_SIZE + i32::from(y);
+                        if c.get(LocalPos { x, y, z }) != limonite {
+                            continue;
+                        }
+                        if wy == top {
+                            at_surface += 1;
+                        }
+                        let (_, class) = t.rock_block(
+                            col.geo(lx, lz),
+                            cx * CHUNK_SIZE + lx,
+                            cz * CHUNK_SIZE + lz,
+                            top,
+                            col.slope(lx, lz),
+                            col.moho(lx, lz),
+                            top - wy,
+                        );
+                        in_soil += usize::from(class == Class::Soil);
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(at_surface, 0, "limonite as the surface block");
+    assert!(in_soil > 0, "no limonite in the soil");
+}
+
 /// The border of a chunk equals its neighbour's blocks across both seams, rock and ore.
 #[test]
 fn geology_continuous_across_the_seams() {

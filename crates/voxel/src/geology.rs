@@ -82,6 +82,8 @@ struct Ore {
     cap: Option<(BlockId, f64)>,
     /// Rocks the body may replace (`host_rock`); empty: any rock of its class.
     host_rock: Vec<BlockId>,
+    /// Blankets that also replace the soil under the surface block.
+    replaces_soil: bool,
 }
 
 /// The bodies of the types placed `above` another first, the rest after, each in its order:
@@ -197,6 +199,7 @@ impl Geology {
                     blocks: list,
                     cap,
                     host_rock,
+                    replaces_soil: d.replaces_soil,
                 });
             }
         }
@@ -464,10 +467,11 @@ impl Geology {
     ) -> impl Iterator<Item = (&'a Body, &'a Ore, f64, f64)> + 'a {
         let (fx, fy, fz) = (f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(z) + 0.5);
         bodies.iter().filter_map(move |b| {
-            if class == Class::Soil {
+            let ore = self.ores.get(usize::from(b.kind))?;
+            // The soil only for the blankets that replace it, and never the surface block.
+            if class == Class::Soil && !(ore.replaces_soil && y < top) {
                 return None;
             }
-            let ore = self.ores.get(usize::from(b.kind))?;
             let host_ok = match ore.shape {
                 Shape::Vein | Shape::Stock | Shape::Lens => {
                     matches!(class, Class::Weathered | Class::Sediment | Class::Basement)
@@ -476,7 +480,7 @@ impl Geology {
                     Host::Sediment => class == Class::Sediment,
                     Host::Basement => class == Class::Basement,
                 },
-                Shape::Blanket => class == Class::Weathered,
+                Shape::Blanket => matches!(class, Class::Weathered | Class::Soil),
                 Shape::Placer => matches!(class, Class::Loose | Class::Weathered | Class::Sediment),
                 Shape::Trap => false,
             };
