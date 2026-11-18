@@ -26,6 +26,68 @@ pub struct Account {
     pub p: u32,
     /// Creation time, ms since the Unix epoch.
     pub created_unix_ms: i64,
+    /// An administrator (may log in with the secret when `secret_login = "admin"`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub admin: bool,
+    /// The account is banned (an expired ban is kept but ignored).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ban: Option<Ban>,
+}
+
+/// A ban of an account, temporary or permanent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ban {
+    /// When it was decided, ms since the Unix epoch.
+    pub since_unix_ms: i64,
+    /// When it ends, ms since the Unix epoch; `None`: permanent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_unix_ms: Option<i64>,
+    pub reason: String,
+}
+
+impl Ban {
+    /// Still in force at `now`.
+    pub fn active(&self, now_unix_ms: i64) -> bool {
+        self.until_unix_ms.is_none_or(|u| now_unix_ms < u)
+    }
+
+    /// What the player is told.
+    pub fn message(&self, now_unix_ms: i64) -> String {
+        let until = match self.until_unix_ms {
+            None => "permanently".to_owned(),
+            Some(u) => format!("for {}", format_duration(u - now_unix_ms)),
+        };
+        if self.reason.is_empty() {
+            format!("banned {until}")
+        } else {
+            format!("banned {until}: {}", self.reason)
+        }
+    }
+}
+
+/// `30s`, `30m`, `12h`, `7d` or `2w` in milliseconds.
+pub fn parse_duration(s: &str) -> Option<i64> {
+    let unit = match s.chars().last()? {
+        's' => 1_000,
+        'm' => 60_000,
+        'h' => 3_600_000,
+        'd' => 86_400_000,
+        'w' => 7 * 86_400_000,
+        _ => return None,
+    };
+    let n: i64 = s[..s.len() - 1].parse().ok()?;
+    (n > 0).then(|| n.checked_mul(unit)).flatten()
+}
+
+/// A duration for a person: the largest whole unit, rounded up.
+pub fn format_duration(ms: i64) -> String {
+    let ms = ms.max(0);
+    for (unit, name) in [(86_400_000, "d"), (3_600_000, "h"), (60_000, "min")] {
+        if ms >= unit {
+            return format!("{} {name}", (ms + unit - 1) / unit);
+        }
+    }
+    format!("{} s", (ms + 999) / 1_000)
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -163,6 +225,8 @@ impl Accounts {
                 t: self.params.t_cost(),
                 p: self.params.p_cost(),
                 created_unix_ms: now_unix_ms,
+                admin: false,
+                ban: None,
             },
         );
         self.save(&accounts)
@@ -188,6 +252,73 @@ impl Accounts {
         let h = hash(&params, secret, &unhex(&a.salt)?)?;
         ensure!(same(&h, &unhex(&a.hash)?), "wrong secret");
         Ok(Login::Ok)
+    }
+
+    /// The ban in force on `name` at `now`, if any.
+    pub fn banned(&self, name: &str, now_unix_ms: i64) -> Option<Ban> {
+        self.lock()
+            .get(name)?
+            .ban
+            .clone()
+            .filter(|b| b.active(now_unix_ms))
+    }
+
+    /// Bans an account until `until` (`None`: permanently); replaces a former ban.
+    pub fn ban(
+        &self,
+        name: &str,
+        until_unix_ms: Option<i64>,
+        reason: &str,
+        now_unix_ms: i64,
+    ) -> anyhow::Result<Ban> {
+        let mut accounts = self.lock();
+        let Some(a) = accounts.get_mut(name) else {
+            bail!("unknown account {name}");
+        };
+        let ban = Ban {
+            since_unix_ms: now_unix_ms,
+            until_unix_ms,
+            reason: reason.to_owned(),
+        };
+        a.ban = Some(ban.clone());
+        self.save(&accounts)?;
+        Ok(ban)
+    }
+
+    /// Lifts the ban of an account; false if it was not banned at `now`.
+    pub fn unban(&self, name: &str, now_unix_ms: i64) -> anyhow::Result<bool> {
+        let mut accounts = self.lock();
+        let Some(a) = accounts.get_mut(name) else {
+            bail!("unknown account {name}");
+        };
+        let was = a.ban.take().is_some_and(|b| b.active(now_unix_ms));
+        self.save(&accounts)?;
+        Ok(was)
+    }
+
+    /// The bans in force at `now`, by name.
+    pub fn bans(&self, now_unix_ms: i64) -> Vec<(String, Ban)> {
+        self.lock()
+            .values()
+            .filter_map(|a| {
+                let b = a.ban.as_ref().filter(|b| b.active(now_unix_ms))?;
+                Some((a.name.clone(), b.clone()))
+            })
+            .collect()
+    }
+
+    pub fn is_admin(&self, name: &str) -> bool {
+        self.lock().get(name).is_some_and(|a| a.admin)
+    }
+
+    /// Makes an account an administrator or a player.
+    pub fn set_admin(&self, name: &str, admin: bool) -> anyhow::Result<()> {
+        let mut accounts = self.lock();
+        let Some(a) = accounts.get_mut(name) else {
+            bail!("unknown account {name}");
+        };
+        a.admin = admin;
+        self.save(&accounts)
     }
 }
 
@@ -230,6 +361,45 @@ mod tests {
         );
         let text = std::fs::read_to_string(dir.join("accounts.toml")).unwrap();
         assert!(!text.contains("correct horse"));
+        assert!(!text.contains("ban") && !text.contains("admin"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bans_are_kept_and_expire() {
+        let dir = std::env::temp_dir().join(format!("nascio-bans-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = Accounts::open_with(&dir, cheap()).unwrap();
+        a.create("alice", "correct horse", 0).unwrap();
+        a.create("bob", "battery staple", 0).unwrap();
+        assert!(a.ban("carol", None, "", 0).is_err(), "unknown");
+        a.ban("alice", Some(1_000), "spam", 0).unwrap();
+        a.ban("bob", None, "", 0).unwrap();
+        a.set_admin("bob", true).unwrap();
+        // Reopened: the bans and the admin flag are there.
+        let b = Accounts::open_with(&dir, cheap()).unwrap();
+        assert_eq!(b.bans(500).len(), 2);
+        assert_eq!(b.banned("alice", 999).unwrap().reason, "spam");
+        assert!(b.banned("alice", 1_000).is_none(), "expired");
+        assert_eq!(b.bans(1_000).len(), 1);
+        assert!(b.is_admin("bob") && !b.is_admin("alice"));
+        assert!(b.banned("bob", i64::MAX).is_some(), "permanent");
+        assert!(b.unban("bob", 2_000).unwrap());
+        assert!(!b.unban("alice", 2_000).unwrap(), "already expired");
+        assert!(b.bans(0).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn durations() {
+        assert_eq!(parse_duration("30m"), Some(1_800_000));
+        assert_eq!(parse_duration("7d"), Some(604_800_000));
+        assert_eq!(parse_duration("2w"), Some(1_209_600_000));
+        for bad in ["", "m", "0m", "-3h", "3x", "1.5h", "spam"] {
+            assert_eq!(parse_duration(bad), None, "{bad}");
+        }
+        assert_eq!(format_duration(90_000), "2 min");
+        assert_eq!(format_duration(86_400_000), "1 d");
+        assert_eq!(format_duration(1), "1 s");
     }
 }

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
-use nascio_server::{RunningServer, ServerConfig};
+use nascio_server::{RunningServer, ServerConfig, accounts};
 use nascio_world::world_io::World;
 
 #[derive(Parser)]
@@ -26,6 +26,9 @@ struct Cli {
     /// Overrides `bind`.
     #[arg(long)]
     bind: Option<std::net::SocketAddr>,
+    /// An unknown name creates its account at login (development: `swarm`, the viewer).
+    #[arg(long)]
+    open_registration: bool,
 }
 
 #[tokio::main]
@@ -38,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(b) = cli.bind {
         cfg.bind = b;
     }
+    cfg.open_registration |= cli.open_registration;
     let world = World::load(&cli.world)?;
     let data = cli.data.clone().unwrap_or_else(|| cli.world.clone());
     let server = RunningServer::start(&world, cfg, &data)?;
@@ -58,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         })?;
-    println!("console: help, list, kick <name> [reason], stats, adduser <name> <secret>, stop");
+    println!("console: {HELP}");
     let mut every = tokio::time::interval(Duration::from_secs(10));
     loop {
         tokio::select! {
@@ -101,15 +105,15 @@ fn print_stats(server: &RunningServer) {
     );
 }
 
+const HELP: &str = "help · list · kick <name> [reason] · ban <name> [30m|12h|7d|2w] [reason] · unban <name> · bans · admin <name> on|off · stats · adduser <name> <secret> · stop";
+
 /// Runs a console command; false to stop the server.
 fn command(server: &RunningServer, line: &str) -> bool {
     let mut words = line.split_whitespace();
     let sh = &server.shared;
     match words.next() {
         None => {}
-        Some("help") => {
-            println!("list · kick <name> [reason] · stats · adduser <name> <secret> · stop")
-        }
+        Some("help") => println!("{HELP}"),
         Some("list") => {
             let players = sh.list();
             println!("{} players online", players.len());
@@ -132,6 +136,55 @@ fn command(server: &RunningServer, line: &str) -> bool {
                 }
             }
             None => println!("kick <name> [reason]"),
+        },
+        Some("ban") => match words.next() {
+            Some(name) => {
+                let mut rest: Vec<&str> = words.collect();
+                let now = nascio_server::net::unix_ms();
+                // A first word that reads as a duration is one; otherwise the ban is permanent.
+                let until = match rest.first().and_then(|w| accounts::parse_duration(w)) {
+                    Some(d) => {
+                        rest.remove(0);
+                        Some(now.saturating_add(d))
+                    }
+                    None => None,
+                };
+                match sh.ban(name, until, &rest.join(" ")) {
+                    Ok((ban, kicked)) => {
+                        println!("{name} {}", ban.message(now));
+                        if kicked {
+                            println!("{name} kicked");
+                        }
+                    }
+                    Err(e) => println!("refused: {e:#}"),
+                }
+            }
+            None => println!("ban <name> [30m|12h|7d|2w] [reason]"),
+        },
+        Some("unban") => match words.next() {
+            Some(name) => match sh.accounts.unban(name, nascio_server::net::unix_ms()) {
+                Ok(true) => println!("{name} unbanned"),
+                Ok(false) => println!("{name} was not banned"),
+                Err(e) => println!("refused: {e:#}"),
+            },
+            None => println!("unban <name>"),
+        },
+        Some("bans") => {
+            let now = nascio_server::net::unix_ms();
+            let bans = sh.accounts.bans(now);
+            println!("{} accounts banned", bans.len());
+            for (name, ban) in bans {
+                println!("  {name}: {}", ban.message(now));
+            }
+        }
+        Some("admin") => match (words.next(), words.next()) {
+            (Some(name), Some(flag @ ("on" | "off"))) => {
+                match sh.accounts.set_admin(name, flag == "on") {
+                    Ok(()) => println!("{name}: admin {flag}"),
+                    Err(e) => println!("refused: {e:#}"),
+                }
+            }
+            _ => println!("admin <name> on|off"),
         },
         Some("stats") => print_stats(server),
         Some("adduser") => match (words.next(), words.next()) {

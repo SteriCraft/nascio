@@ -59,6 +59,7 @@ async fn motion_is_smooth_through_150_ms_of_latency() {
         spawn_xz: [0.0, 0.0],
         // The mover jumps from the spawn onto its circle.
         max_speed_m_s: 0.0,
+        open_registration: true,
         ..ServerConfig::default()
     };
     let server = RunningServer::start(&world, cfg, &dir).unwrap();

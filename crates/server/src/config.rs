@@ -40,7 +40,7 @@ pub struct ServerConfig {
     /// Spawn point (x, z in metres); y is the surface plus two blocks.
     pub spawn_xz: [f64; 2],
     /// An unknown name creates its account at login (otherwise accounts are made with the
-    /// console's `adduser`).
+    /// console's `adduser`). For development and tests; off by default.
     pub open_registration: bool,
     /// Argon2id cost of new accounts: memory (KiB) and passes.
     pub account_hash_kib: u32,
@@ -91,7 +91,7 @@ impl Default for ServerConfig {
             max_players: 1_000,
             spawn_xz: [50_000.0, 50_000.0],
             checkpoint_bytes: 16 << 20,
-            open_registration: true,
+            open_registration: false,
             account_hash_kib: 19 * 1024,
             account_hash_passes: 2,
             account_hash_concurrency: 0,

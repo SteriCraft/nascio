@@ -18,6 +18,7 @@ fn cfg() -> ServerConfig {
         generation_threads: 4,
         // The edit far away must reach the "not loaded" check.
         edit_reach_m: 0.0,
+        open_registration: true,
         ..ServerConfig::default()
     }
 }

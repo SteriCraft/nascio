@@ -29,6 +29,7 @@ fn cfg() -> ServerConfig {
         kick_after_violations: 300,
         max_speed_m_s: 20.0,
         edit_reach_m: 16.0,
+        open_registration: true,
         ..ServerConfig::default()
     }
 }

@@ -83,6 +83,20 @@ impl Shared {
         true
     }
 
+    /// Bans an account (`until`: `None` is permanent) and kicks it if online; gives the ban
+    /// and whether the player was kicked.
+    pub fn ban(
+        &self,
+        name: &str,
+        until_unix_ms: Option<i64>,
+        reason: &str,
+    ) -> anyhow::Result<(crate::accounts::Ban, bool)> {
+        let now = unix_ms();
+        let ban = self.accounts.ban(name, until_unix_ms, reason, now)?;
+        let kicked = self.kick(name, &ban.message(now));
+        Ok((ban, kicked))
+    }
+
     fn input(&self, i: Input) {
         let _ = self
             .inputs
@@ -411,6 +425,11 @@ async fn login(shared: &Arc<Shared>, ip: IpAddr, name: &str, secret: &str) -> Re
         Ok(login) => {
             if login == Login::Created {
                 println!("account {name} created ({ip})");
+            }
+            // Only once the secret is right, like the session check below.
+            if let Some(ban) = shared.accounts.banned(name, unix_ms()) {
+                shared.abuse.log(unix_ms(), ip, name, "login", "banned");
+                return Err(ban.message(unix_ms()));
             }
             // Only once the secret is right: a stranger does not learn who is online.
             if shared

@@ -23,24 +23,24 @@ Phase Serveur et réseau validée par l'auteur, S6 compris : mesure sur deux mac
 ## Prochaine action
 Chantiers décidés par l'auteur (`decisions.md`, décisions du 2026-11-18), dans l'ordre proposé :
 1. ~~crate `nascio-chunk` séparée de la génération (définitions des blocs envoyées à la connexion, protocole v5)~~ fait (`chantier-1.md`) ; texte proposé pour `CLAUDE.md` dans le rapport ;
-2. comptes : invitation, bannissement, jetons Ed25519 émis par le site — **plan présenté le 2026-11-18, en attente de l'accord de l'auteur** (CI de `fbdf2ea` verte ; `bd0b035`, CLAUDE.md + note feuillage, commité localement, non poussé) :
+2. comptes : invitation, bannissement, jetons Ed25519 émis par le site — **plan validé le 2026-11-18, en cours sans supervision** (`chantier-2.md`) ; `bd0b035` poussé. Réponses : jeton 5 min usage unique ; secret réservé aux admins (`secret_login = "admin"`) ; bannissement par compte, sans IP ; invitation sur le site. Ajout : refuser tout jeton émis avant le démarrage du serveur (moins la tolérance d'horloge). **2.1 fait.**
    - jeton = postcard {version, nom, audience `server_id`, émis/expire ms UTC, nonce 16 o} + signature Ed25519 64 o, en base64url ; vérif. signature → audience → date (±30 s) → nonce non rejoué (gardé en mémoire jusqu'à expiration). `ring` suffit, pas de nouvelle dépendance ;
    - 2.1 bannissement + inscription fermée : console `ban <nom> [30m|7d] [raison]`, `unban`, `bans` ; champs facultatifs dans `accounts.toml` ; expulse si en ligne ; `open_registration` = faux par défaut ;
    - 2.2 module jeton + bin `site` (`keygen`, `token --name --server --ttl`), tests unitaires (signature, expiration, audience, nom, rejeu) ;
    - 2.3 protocole v6 : `ClientHello { protocol, name, auth: Secret | Token }` ; config `site_public_key`, `server_id` ; jeton valide crée le compte ; échecs dans `LoginGuard`/`abuse.log` ; visualiseur `--token` ; `swarm --site-key` fabrique ses jetons ; test `crates/server/tests/accounts.rs` ;
    - 2.4 docs : `chantier-2.md`, format du jeton dans `spec-proposee.md` §7, `decisions.md`, procédure S6 ;
-   - questions posées (bloquent 2.2) : validité (reco. 5 min, usage unique ; alt. 24 h réutilisable) ; connexion par secret (reco. comptes `admin` seulement, `secret_login` = `"admin"`/`"all"`/`"none"`) ; bannissement (reco. par compte seulement, pas d'IP) ; invitation (reco. sur le site, le serveur fait confiance aux jetons). 2.1 n'en dépend pas.
 3. sites d'apparition et point par compte (calculés au démarrage du serveur, sans toucher `generator_version`) ;
 4. horizon en tuiles et climat réduit envoyés par le serveur ;
 5. mouvement autoritaire, avec prédiction et réconciliation.
 
 À faire au prochain changement de format du monde (décision de l'auteur, 2026-11-18) : le feuillage devient une propriété de `blocks.toml` (aujourd'hui déduit du nom, `nascio_chunk::block::FOLIAGE`).
 
-Questions encore ouvertes pour l'auteur : la définition exacte des classes de terrain des sites ; la physique du joueur, et si le vol libre reste un droit d'administrateur ; la durée de validité et l'usage unique des jetons.
+Questions encore ouvertes pour l'auteur : la définition exacte des classes de terrain des sites ; la physique du joueur, et si le vol libre reste un droit d'administrateur .
 
 Ancienne note de la nuit (la synthèse a été faite) : Le matin, il demandera une synthèse de tous les rapports (`serveur-C0.md` … `serveur-S7.md`, `spec-proposee.md`) : ce qui est fait, mesures clés, décisions, et la liste regroupée des questions ouvertes (hébergement, budget, rayons, gameplay : point d'apparition, mouvement/collision, vitesse/portée ; invariant 5 : ciel/horizon du client, types de chunk ; inscription, bannissement ; seconde machine pour S6). Rien n’est poussé : 10 commits locaux de la phase (C0 à S7, S4 en deux).
 
 ## Décisions prises
+- Chantier 2.1 : bannissement par compte dans `accounts.toml` (vérifié après le secret, expulse, `abuse.log`) ; console `ban`/`unban`/`bans`/`admin` ; `open_registration` faux par défaut, `--open-registration` pour le développement.
 - Chantier 1 : crate `nascio-chunk` (blocs, chunks, teinte, maillage ; sans zstd ni bruit), réexportée par `world`/`voxel` ; codec v2 et `Column` restent dans `protocol` ; v5 = définitions des blocs dans `ServerHello` ; garde-fou `crates/client/tests/no_generation.rs`.
 - C0 : écriture durable (tmp, fsync, rename, fsync du dossier sous Unix) ; pas de fsync du dossier sous Windows.
 - S0 : codec v2 = varint dans l'ordre des indices + zstd-3 par colonne ; crate `zstd` ; fsync groupé toutes les 50 ms ; budget de 128 Ko/s par client.
