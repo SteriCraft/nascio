@@ -13,6 +13,7 @@ mod god;
 mod horizon;
 mod map;
 mod perf;
+mod remote;
 mod sky;
 mod stars;
 
@@ -96,6 +97,13 @@ struct Args {
     /// Disable vsync (measure the real frame cost).
     #[arg(long)]
     no_vsync: bool,
+    /// Network mode: chunk columns come from this server (`nascio-server`), edits go to it.
+    /// Sky and horizon still come from the local world, which must be the server's.
+    #[arg(long)]
+    connect: Option<std::net::SocketAddr>,
+    /// Server certificate (DER) for `--connect` (default: `<world>/server/cert.der`).
+    #[arg(long)]
+    cert: Option<PathBuf>,
     /// Run a scripted benchmark path (TOML, see `bench/default.toml`), then quit.
     /// Implies the 3D mode, 1920x1080, no vsync and the file's settings.
     #[arg(long)]
@@ -189,7 +197,9 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     let terrain = Arc::new(Terrain::from_world(&world, gen_cfg.voxel.clone())?);
     // Player modifications (god mode), `world-<seed>/deltas/`. Deltas of another world are
     // left untouched: edits then stay in memory, as under `--dev-override` (other chunks).
-    let opened = if gen_cfg.dev_override {
+    let opened = if args.connect.is_some() {
+        Err(anyhow::anyhow!("network mode: the server holds the edits"))
+    } else if gen_cfg.dev_override {
         Err(anyhow::anyhow!(
             "{DEV_OVERRIDE_MARK}: chunks differ from the world's"
         ))
@@ -280,6 +290,28 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         ..default()
     };
 
+    let mut settings = settings;
+    let remote = match args.connect {
+        Some(addr) => {
+            let cert = args
+                .cert
+                .clone()
+                .unwrap_or_else(|| args.world.join("server").join("cert.der"));
+            let r = remote::Remote::start(
+                addr,
+                &cert,
+                terrain.blocks(),
+                [cam.pos.x, cam.pos.y, cam.pos.z],
+            )?;
+            // Only the columns the server sends can be shown, and a column is meshed once its
+            // neighbours arrived: keep one column inside the radius.
+            settings.view_distance_m = settings.view_distance_m.min(r.radius_m as f32 - 64.0);
+            info!("connected to {addr}, columns within {} m", r.radius_m);
+            Some(r)
+        }
+        None => None,
+    };
+
     let horizon_cfg = horizon::HorizonConfig::default();
     horizon::check_layout(&horizon_cfg);
 
@@ -297,7 +329,13 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     }
 
     let mut window = Window {
-        title: format!("{}Nascio viewer — {}", gen_cfg.mark(), args.world.display()),
+        title: format!(
+            "{}Nascio viewer — {}{}",
+            gen_cfg.mark(),
+            args.world.display(),
+            args.connect
+                .map_or(String::new(), |a| format!(" — server {a}"))
+        ),
         present_mode: if args.no_vsync {
             PresentMode::AutoNoVsync
         } else {
@@ -357,6 +395,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             (
                 fly::fly_input,
                 god::god_input,
+                remote::remote_sync,
                 fly::stream_chunks,
                 horizon::update_horizon,
                 fly::column_visibility,
@@ -376,6 +415,9 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     .add_systems(OnEnter(Mode::Map), hide_scene);
     if args.fly {
         app.insert_state(Mode::Fly);
+    }
+    if let Some(r) = remote {
+        app.insert_resource(r);
     }
     if let Some(file) = bench_file {
         app.insert_resource(bench::Bench::new(file, args.bench_out.clone()))

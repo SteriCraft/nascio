@@ -5,7 +5,7 @@
 **Consignes de la nuit (2026-11-18)** : étapes dans l'ordre (C0, S0, S1, S2…) ; décisions dans `decisions.md` (raison + alternative écartée) ; rapport court `docs/reports/serveur-<étape>.md` par étape ; un commit par étape, **pas de push** ; spec inchangée (texte proposé dans `docs/reports/spec-proposee.md`) ; ne pas décider ce qui touche au gameplay, aux invariants de `CLAUDE.md` ou à `generator_version` (le noter, continuer) ; tests verts avant l'étape suivante ; ce fichier à jour à chaque commit. Le matin : synthèse de tous les rapports. Reprise automatique prévue à 2 h 15 (tâche de session).
 
 ## Étape en cours
-S4b — mode réseau du visualiseur (S4a fait).
+S5 — entités (S4b fait).
 
 ## Fait
 - Roadmap serveur écrite (`docs/roadmap-serveur.md`).
@@ -15,9 +15,10 @@ S4b — mode réseau du visualiseur (S4a fait).
 - S2 : crate `crates/protocol` (`chunk` v2 + `Column` zstd, `messages` postcard, `frame`, `entity` quantifié 1/64 m, `clock`, `varint`) ; colonne v2 = 1 290 o terre / 481 o mer. Rapport `serveur-S2.md`.
 - S3 : `crates/server` (config TOML, cache de colonnes partagé, sim 20 Hz, QUIC quinn/rustls-ring, certificat épinglé, flush 50 ms), `crates/client` (connect headless + `Mirror`), `netbot`, test d'intégration `crates/server/tests/edit.rs` (édition vue par 2 clients, refus hors colonnes, client tardif, redémarrage). Arrivée 797 colonnes en 5,3 s (mer, 128 Ko/s). Rapport `serveur-S3.md`.
 - S4a : `ChunkTint` dans la colonne (protocole v2), `Mirror::padded_chunk`, test `crates/server/tests/mesh.rs` : maillage réseau = maillage local (2 sites, 95 chunks, 17 763 quads). Rapport `serveur-S4a.md`. Question ouverte (invariant 5) : ciel et horizon du client autonome.
+- S4b : `crates/viewer/src/remote.rs`, `--connect <addr> [--cert]` : colonnes du serveur maillées depuis le `Mirror`, remaillage à l'arrivée et sur `Blocks`, mode dieu → `SetBlock`, `Move` 4×/s, vue ≤ rayon − 64 m. Vérifié par `--screenshot` (`out/s4b-net.png`, 613 colonnes, 0 manquante). Rapport `serveur-S4b.md`.
 
 ## Prochaine action
-S4b : dans `crates/viewer`, option `--connect <addr> --cert <der>` : `Streamer` (fly.rs, `spawn_column`) prend ses colonnes d'un `nascio_client::Connection` (runtime tokio dans un fil à part, canal vers Bevy) + `Mirror` ; maillage via `Mirror::padded_chunk` et `Column.tint` ; remaillage des voisines à l'arrivée d'une colonne et sur `Blocks` ; god mode → `ClientMsg::SetBlock` ; `Move` envoyé depuis la caméra. Ciel/horizon : monde local (outil de dev). Vérifier avec `--screenshot` du visualiseur (jamais de capture du bureau).
+S5 (entités) : dans `crates/server`, une entité par joueur (position, orientation, vitesse) ; grille spatiale de 32 m ; par client, accumulateur de priorité (distance, ancienneté) : 64 entités à 20 Hz, les autres ≥ 5 Hz ; envoi en datagrammes QUIC (`nascio_protocol::entity`, différences par rapport au dernier état confirmé, quantification 1/64 m, `torus::delta`) ; côté client : tampon d'interpolation (~100 ms) dans `nascio-client`, test sous latence simulée (150 ms). Collision minimale : à noter seulement si elle touche au gameplay (vitesse, gravité = gameplay → ne pas décider, utiliser des valeurs de test en config). Rapport `serveur-S5.md`.
 
 ## Décisions prises
 - C0 : écriture durable (tmp, fsync, rename, fsync du dossier sous Unix) ; pas de fsync du dossier sous Windows.
@@ -25,9 +26,12 @@ S4b : dans `crates/viewer`, option `--connect <addr> --cert <der>` : `Streamer` 
 - S1 : journal global, écriture immédiate + `flush` groupé ; fin invalide du dernier segment retirée, ailleurs refus ; le visualiseur fait un `flush` à chaque édition.
 - S2 : postcard pour le contrôle, formats sur mesure pour chunks et entités ; v2 dans `protocol`, v1 reste dans `voxel` ; entités au 1/64 m. Question ouverte (invariant 5) : séparer les types de chunk de la génération pour le client.
 - S3 : version de colonne = LSN de région lu avant les chunks ; abonnement avant lecture ; un flux uni par colonne ; ring + certificat épinglé ; crate `nascio-client` ; air au-dessus d'une colonne. Questions : budget 128 vs 256 Ko/s, point d'apparition (gameplay), portée des éditions (gameplay, S7).
+- S4b : fil réseau + `Mirror` sous mutex ; édition affichée après confirmation du serveur (prédiction = question de ressenti) ; vue ≤ rayon − 64 m.
 - S4a : teinte et profondeur d'eau envoyées avec la colonne (f32 exacts) ; sous la plage, répéter le bloc le plus bas ; S4 découpé en S4a/S4b ; source du ciel/horizon du client non décidée (invariant 5).
 
 ## Pièges rencontrés
+- `use bevy::prelude::*` avec `anyhow::Context` : `.context`/`.with_context` ambigus (E0034, `ContextExt` de Bevy) ; importer seulement les noms utiles du prélude.
+- `--screenshot` attend `missing == 0` : en mode réseau, les colonnes du bord sans voisines bloquaient jusqu'au délai maximal.
 - PowerShell `Get-Content`/`Set-Content` cassent l'UTF-8 : écrire avec l'outil Write/Edit.
 - Les chunks de `chunk_range` sont à 85 % uniformes : mesurer le non uniforme à part.
 - Python via Bash : ouvrir en écriture avec `newline='\n'` pour garder LF. Éviter les gros heredocs avec des apostrophes françaises dans une même commande Bash (erreur de quoting) : passer par Write.

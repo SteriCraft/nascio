@@ -151,6 +151,7 @@ pub fn god_input(
     mut god: ResMut<God>,
     mut streamer: ResMut<Streamer>,
     mut gizmos: Gizmos,
+    remote: Option<Res<crate::remote::Remote>>,
 ) {
     if cam.scripted {
         return;
@@ -200,6 +201,28 @@ pub fn god_input(
     let Some((q, id)) = edit else {
         return;
     };
+    if let Some(remote) = remote {
+        // Network mode: the server decides; its change comes back and the column is meshed
+        // again then. (The target ray reads the local generator: a development shortcut.)
+        remote.send(nascio_protocol::messages::ClientMsg::SetBlock {
+            pos: [q.x, q.y, q.z],
+            block: id,
+        });
+        let refused = std::mem::take(&mut *remote.status.lock().unwrap_or_else(|e| e.into_inner()));
+        god.status = if refused.is_empty() {
+            format!(
+                "sent to the server: {} at {} {} {}",
+                blocks.def(id).name,
+                q.x,
+                q.y,
+                q.z
+            )
+        } else {
+            refused
+        };
+        god.target = None;
+        return;
+    }
     // Rare edits: each one is made durable at once (one `fsync`, under a millisecond).
     let result = deltas.0.set(q, id).and_then(|_| deltas.0.flush());
     god.status = match result {

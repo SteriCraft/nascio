@@ -30,6 +30,8 @@ use nascio_core::torus::{delta, delta_chunks};
 use nascio_voxel::mesh::MeshData;
 use nascio_voxel::{ChunkMesh, ColumnSet, DeltaStore, Terrain, mesh_chunk};
 
+use crate::remote::Remote;
+
 use crate::curvature::{self, CurvedMaterial};
 use crate::perf::FrameStats;
 
@@ -210,7 +212,8 @@ struct ColumnResult {
     key: (i32, i32),
     /// Request number: only the latest request of a column is kept.
     request: u64,
-    meshes: Vec<(i32, ChunkMesh)>,
+    /// `None`: not meshable yet (network mode: a neighbouring column is missing).
+    meshes: Option<Vec<(i32, ChunkMesh)>>,
 }
 
 enum Slot {
@@ -306,17 +309,28 @@ impl Streamer {
     }
 }
 
-/// Generates and meshes column `key` (with its deltas) on the worker pool.
+/// Generates and meshes column `key` (with its deltas) on the worker pool; in network mode,
+/// meshes it from the columns the server sent instead (no generation).
 fn spawn_column(
     workers: &Workers,
     terrain: &Arc<Terrain>,
     deltas: Arc<DeltaStore>,
+    remote: Option<Remote>,
     tx: Sender<ColumnResult>,
     key: (i32, i32),
     request: u64,
 ) {
     let terrain = terrain.clone();
     workers.pool.spawn(move || {
+        if let Some(remote) = remote {
+            let meshes = remote.mesh_column(key, terrain.blocks());
+            let _ = tx.send(ColumnResult {
+                key,
+                request,
+                meshes,
+            });
+            return;
+        }
         let underground = terrain.config().underground_chunks;
         let col = ColumnSet::new(&terrain, key.0, key.1);
         let mut tint = terrain.chunk_tint(key.0, key.1);
@@ -338,7 +352,7 @@ fn spawn_column(
         let _ = tx.send(ColumnResult {
             key,
             request,
-            meshes,
+            meshes: Some(meshes),
         });
     });
 }
@@ -421,7 +435,9 @@ pub fn stream_chunks(
     origin: Res<RenderOrigin>,
     materials: Res<TerrainMaterials>,
     mut meshes: ResMut<Assets<Mesh>>,
+    remote: Option<Res<Remote>>,
 ) {
+    let remote = remote.map(|r| r.clone());
     let s = &mut *streamer;
     s.set_radius((settings.view_distance_m / CHUNK_SIZE as f32).ceil() as i32);
     let cam_block = cam.pos.block();
@@ -441,6 +457,18 @@ pub fn stream_chunks(
     for r in results {
         s.in_flight -= 1;
         let in_range = s.within(r.key, keep);
+        let Some(column_meshes) = r.meshes else {
+            // Not meshable yet: a pending column is asked again later; a shown one keeps its
+            // mesh until the next change.
+            match s.slots.get_mut(&r.key) {
+                Some(Slot::Pending(q)) if *q == r.request => {
+                    s.slots.remove(&r.key);
+                }
+                Some(Slot::Ready { remesh, .. }) if *remesh == Some(r.request) => *remesh = None,
+                _ => {}
+            }
+            continue;
+        };
         match s.slots.get_mut(&r.key) {
             Some(Slot::Pending(q)) if *q == r.request => {
                 if !in_range {
@@ -453,7 +481,7 @@ pub fn stream_chunks(
                     &materials,
                     &origin,
                     r.key,
-                    r.meshes,
+                    column_meshes,
                     false,
                 );
                 s.quads += quads;
@@ -483,7 +511,7 @@ pub fn stream_chunks(
                     &materials,
                     &origin,
                     r.key,
-                    r.meshes,
+                    column_meshes,
                     *shown,
                 );
                 s.quads = s.quads - *quads + n;
@@ -509,6 +537,7 @@ pub fn stream_chunks(
             &workers,
             &terrain.0,
             deltas.snapshot(),
+            remote.clone(),
             s.tx.clone(),
             key,
             request,
@@ -544,13 +573,24 @@ pub fn stream_chunks(
             Some(Slot::Pending(_)) => missing += 1,
             None => {
                 missing += 1;
+                if remote.as_ref().is_some_and(|r| !r.can_mesh(key)) {
+                    continue;
+                }
                 if s.in_flight < max_in_flight {
                     s.in_flight += 1;
                     s.requests += 1;
                     let request = s.requests;
                     s.slots.insert(key, Slot::Pending(request));
                     let d = snapshot.get_or_insert_with(|| deltas.snapshot()).clone();
-                    spawn_column(&workers, &terrain.0, d, s.tx.clone(), key, request);
+                    spawn_column(
+                        &workers,
+                        &terrain.0,
+                        d,
+                        remote.clone(),
+                        s.tx.clone(),
+                        key,
+                        request,
+                    );
                 }
             }
         }

@@ -4389,12 +4389,15 @@ dependencies = [
  "bevy",
  "bevy_egui",
  "clap",
+ "nascio-client",
  "nascio-core",
+ "nascio-protocol",
  "nascio-tools",
  "nascio-voxel",
  "nascio-worldgen",
  "rayon",
  "serde",
+ "tokio",
  "toml",
 ]
 
