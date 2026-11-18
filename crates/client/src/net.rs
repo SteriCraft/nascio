@@ -27,8 +27,9 @@ use tokio::sync::mpsc;
 pub enum Event {
     Msg(ServerMsg),
     Column(Box<Column>),
-    /// A horizon tile asked with `ClientMsg::Tiles`.
-    Tile(Box<HorizonTile>),
+    /// A horizon tile asked with `ClientMsg::Tiles`, with its compressed bytes (for the disk
+    /// cache).
+    Tile(Box<HorizonTile>, Vec<u8>),
     /// The sky and far ground asked with `ClientMsg::Sky`, with its compressed bytes (for the
     /// disk cache).
     Sky(Box<WorldSky>, Vec<u8>),
@@ -218,7 +219,7 @@ pub async fn connect_with(
                         .map(|c| Event::Column(Box::new(c)))
                         .map_err(|e| format!("bad column: {e:#}")),
                     UniKind::Tile => decode_tile(&bytes)
-                        .map(|t| Event::Tile(Box::new(t)))
+                        .map(|t| Event::Tile(Box::new(t), bytes))
                         .map_err(|e| format!("bad horizon tile: {e:#}")),
                     UniKind::Sky => WorldSky::decompress(&bytes)
                         .map(|s| Event::Sky(Box::new(s), bytes))

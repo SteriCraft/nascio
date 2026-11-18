@@ -1,12 +1,14 @@
-//! God mode (future server tool): destroy and place blocks in the 3D view. Edits go to the
-//! world's [`DeltaStore`] (`world-<seed>/deltas/`, journal forced to the disk at each edit),
-//! and the touched columns are meshed again.
+//! God mode (future server tool): destroy and place blocks in the 3D view. In local flight,
+//! edits go to the world's [`DeltaStore`] (`world-<seed>/deltas/`, journal forced to the disk
+//! at each edit), and the touched columns are meshed again; connected, they go to the server
+//! and the ray reads the blocks it sent.
 //!
 //! G toggles the mode. The mouse then turns the view (cursor captured) and a cross marks the
 //! centre of the screen: left click destroys the block under it, right click places the
 //! selected block against it, the wheel picks the block. G or Escape leaves.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
@@ -24,6 +26,10 @@ const REACH: f64 = 20.0;
 const CACHE: usize = 64;
 /// Deepest search for the floor under the camera, blocks.
 const FLOOR_SEARCH: i32 = 256;
+
+/// The block table in use: the local world's, or the server's once connected.
+#[derive(Resource, Clone)]
+pub struct BlockTable(pub Arc<nascio_chunk::Blocks>);
 
 #[derive(Resource)]
 pub struct God {
@@ -146,8 +152,9 @@ pub fn god_input(
     scroll: Res<AccumulatedMouseScroll>,
     cam: Res<FlyCam>,
     origin: Res<RenderOrigin>,
-    terrain: Res<SharedTerrain>,
-    deltas: Res<SharedDeltas>,
+    terrain: Option<Res<SharedTerrain>>,
+    deltas: Option<Res<SharedDeltas>>,
+    table: Option<Res<BlockTable>>,
     mut god: ResMut<God>,
     mut streamer: ResMut<Streamer>,
     mut gizmos: Gizmos,
@@ -166,7 +173,8 @@ pub fn god_input(
     if !god.on {
         return;
     }
-    let blocks = terrain.0.blocks();
+    let Some(table) = table else { return };
+    let blocks = &*table.0;
     // Wheel: next / previous block (air excluded).
     if scroll.delta.y != 0.0 {
         let notches = match scroll.unit {
@@ -178,13 +186,21 @@ pub fn god_input(
         god.block = ((i32::from(god.block) - 1 + step).rem_euclid(n) + 1) as BlockId;
     }
     let p = cam.pos;
-    let store = deltas.snapshot();
-    let t = &terrain.0;
     let g = &mut *god;
-    g.target = raycast([p.x, p.y, p.z], cam.forward(), |q| {
-        let b = g.block_at(t, &store, q);
-        t.blocks().is_solid(b)
-    });
+    g.target = match (&remote, &terrain, &deltas) {
+        // Connected: the blocks the server sent (a column not held stops nothing).
+        (Some(r), _, _) => raycast([p.x, p.y, p.z], cam.forward(), |q| {
+            r.block(q).is_some_and(|b| blocks.is_solid(b))
+        }),
+        (None, Some(t), Some(d)) => {
+            let store = d.snapshot();
+            raycast([p.x, p.y, p.z], cam.forward(), |q| {
+                let b = g.block_at(&t.0, &store, q);
+                blocks.is_solid(b)
+            })
+        }
+        _ => None,
+    };
     let Some((hit, front)) = god.target else {
         return;
     };
@@ -205,7 +221,7 @@ pub fn god_input(
     };
     if let Some(remote) = remote {
         // Network mode: the server decides; its change comes back and the column is meshed
-        // again then. (The target ray reads the local generator: a development shortcut.)
+        // again then.
         remote.send(nascio_protocol::messages::ClientMsg::SetBlock {
             pos: [q.x, q.y, q.z],
             block: id,
@@ -225,6 +241,7 @@ pub fn god_input(
         god.target = None;
         return;
     }
+    let Some(deltas) = deltas else { return };
     // Rare edits: each one is made durable at once (one `fsync`, under a millisecond).
     let result = deltas.0.set(q, id).and_then(|_| deltas.0.flush());
     god.status = match result {
@@ -240,8 +257,8 @@ pub fn god_input(
 pub fn god_ui(
     mut contexts: EguiContexts,
     god: Res<God>,
-    terrain: Res<SharedTerrain>,
-    deltas: Res<SharedDeltas>,
+    table: Option<Res<BlockTable>>,
+    deltas: Option<Res<SharedDeltas>>,
 ) {
     if !god.on {
         return;
@@ -257,8 +274,14 @@ pub fn god_ui(
     let stroke = egui::Stroke::new(2.0, egui::Color32::from_white_alpha(220));
     painter.line_segment([c - egui::vec2(9.0, 0.0), c + egui::vec2(9.0, 0.0)], stroke);
     painter.line_segment([c - egui::vec2(0.0, 9.0), c + egui::vec2(0.0, 9.0)], stroke);
-    let blocks = terrain.0.blocks();
-    let chunks = deltas.0.loaded_chunk_count();
+    let Some(table) = table else { return };
+    let blocks = &*table.0;
+    let modified = deltas.map_or(String::new(), |d| {
+        format!(
+            "{} modified chunks (loaded regions) · ",
+            d.0.loaded_chunk_count()
+        )
+    });
     egui::Window::new("God mode")
         .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -12.0])
         .resizable(false)
@@ -266,9 +289,6 @@ pub fn god_ui(
         .show(ctx, |ui| {
             ui.label("Left click: destroy · right click: place · wheel: block · G / Esc: leave");
             ui.heading(blocks.def(god.block).name.as_str());
-            ui.label(format!(
-                "{chunks} modified chunks (loaded regions) · {}",
-                god.status
-            ));
+            ui.label(format!("{modified}{}", god.status));
         });
 }

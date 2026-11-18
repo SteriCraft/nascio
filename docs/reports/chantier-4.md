@@ -15,7 +15,9 @@ Avant l'étape 1, le travail « Interfaces » encore non commité (fenêtre du s
 - Test `crates/voxel/tests/horizon.rs` : même sommet de part et d'autre de la couture (niveaux 0 et 1), hauteur et eau égales au terrain, nature cohérente, déterminisme. **Écrit mais pas lancé** (consigne : aucun essai avant la fin des chantiers 4 et 5 ; le lancement a été refusé).
 - fmt et clippy verts (`--workspace --all-targets`).
 
-## Étape 2 — Protocole v8 et serveur
+## Étapes 2 et 3 — Protocole v8 et serveur
+
+Les étapes 2 (protocole) et 3 (serveur) du plan sont regroupées : les volumes demandés ne se mesurent qu'avec un serveur qui construit les tuiles.
 
 - **Protocole v8** :
   - un octet `UniKind` en tête de chaque flux unidirectionnel (colonne 0, tuile 1, ciel 2) ;
@@ -55,3 +57,26 @@ Avant l'étape 1, le travail « Interfaces » encore non commité (fenêtre du s
 À 128 Ko/s, une première connexion coûte environ 3 s pour `WorldSky`, puis rien grâce au cache. L'horizon complet prend environ 2,7 s, après les colonnes proches. Un déplacement de 512 m prend environ 0,1 s. C'est nettement moins que l'estimation du plan (0,7 Mo et 35 tuiles par déplacement).
 
 - fmt et clippy verts (`--workspace --all-targets`).
+
+## Étape 4 — Client sans monde local
+
+- En réseau (menu ou `--connect`), le client **ne lit plus aucun monde** : l'argument `world` ne sert plus qu'au vol libre (`--fly`, `--bench`) et à `--generate`. `--fly` et `--connect` ne vont plus ensemble. Un `.exe` lancé n'importe où peut se connecter.
+- **Cache disque** `client-cache/g<generator_version>-<empreinte>/` à côté de l'exécutable :
+  - `sky-p8.bin`, le `WorldSky` compressé ;
+  - `tiles-f1/<niveau>_<i>_<j>.bin`, les tuiles.
+  - Le nom inclut `generator_version`, la version du protocole (pour le ciel) et le format des tuiles. Une empreinte de serveur qui ne serait pas purement hexadécimale (128 caractères au plus) désactive le cache, car elle deviendrait un chemin.
+- **Connexion** (`remote.rs`) :
+  - après la poignée de main, le ciel vient du cache, sinon il est demandé au serveur ;
+  - la connexion n'est rendue au menu qu'une fois le ciel reçu (délai porté de 20 à 60 s) ;
+  - les tuiles reçues sont écrites dans le cache et passées au magasin de tuiles.
+- **Tuiles** (`tiles.rs`, source `Remote`) : une tuile absente est d'abord cherchée dans le cache disque, sinon demandée par lots de 64. Elle est redemandée si elle n'est pas arrivée au bout de 10 s, par exemple si la file du serveur était pleine.
+- **À la connexion** (`adopt_remote`), les valeurs du serveur remplacent les valeurs d'attente : réglages du monde (`WorldInfo`), climat réduit (même texture, redimensionnée en 125²), sol lointain, couleurs de l'eau et de la glace, table des blocs, source des tuiles, bloc du mode dieu. Avant la connexion : ciel clair et sol neutre (le menu ne les montre pas).
+- **Ce qui lisait le terrain local lit désormais les blocs reçus** :
+  - plancher de la caméra : premier bloc solide sous elle ; pas de plancher là où rien n'est encore arrivé ;
+  - HUD : hauteur et bloc du sol ;
+  - sous terre : profondeur et bloc ; **plus de température de la roche ni d'alerte magma en réseau**, car elles demandent la géologie ;
+  - rayon du mode dieu.
+  - La téléportation du panneau F3 est grisée en réseau : le serveur refuserait le saut. La graine n'est plus affichée en réseau, puisque le serveur ne la donne pas.
+- Le contrôle « table des blocs du serveur = table du monde local » disparaît, puisqu'il n'y a plus de monde local.
+- En vol libre, rien ne change : terrain, deltas, climat en 625², tuiles calculées sur place.
+- fmt et clippy verts (`--workspace --all-targets`). **Rien n'a été lancé.**

@@ -195,6 +195,11 @@ impl Horizon {
         }
     }
 
+    /// Colours of water and ice from the server's block table (network mode).
+    pub fn set_colors(&mut self, colors: WaterColors) {
+        self.colors = colors;
+    }
+
     /// Whether a horizon is on screen.
     pub fn is_displayed(&self) -> bool {
         self.center.is_some()
@@ -439,7 +444,7 @@ pub fn update_horizon(
     mut stats: ResMut<HorizonStats>,
     streamer: Res<Streamer>,
     workers: Res<Workers>,
-    mut tiles: ResMut<TileStore>,
+    tiles: Option<ResMut<TileStore>>,
     settings: Res<FlySettings>,
     cam: Res<FlyCam>,
     origin: Res<crate::fly::RenderOrigin>,
@@ -448,6 +453,8 @@ pub fn update_horizon(
     mut meshes: ResMut<Assets<Mesh>>,
     mut vis: Query<&mut Visibility>,
 ) {
+    // Network mode: no tiles before the connection.
+    let Some(mut tiles) = tiles else { return };
     let h = &mut *horizon;
     let now = time.elapsed_secs_f64();
 
@@ -560,7 +567,7 @@ pub fn update_horizon(
         if let Some(target) = h.target
             && !h.started
         {
-            if tiles.ensure(&h.target_tiles, &workers)
+            if tiles.ensure(&h.target_tiles, &workers, now)
                 && let Some(levels) = (0..h.cfg.levels)
                     .map(|level| level_heights(&tiles, &h.cfg, level, target))
                     .collect::<Option<Vec<Heights>>>()

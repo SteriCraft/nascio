@@ -21,7 +21,6 @@ use std::time::Duration;
 use anyhow::Context;
 use bevy::prelude::{AppExit, Commands, MessageWriter, NextState, ResMut, Resource, Result, info};
 use bevy_egui::{EguiContexts, egui};
-use nascio_chunk::Blocks;
 use nascio_client::Auth;
 use nascio_client::discovery::{self, Found};
 use serde::{Deserialize, Serialize};
@@ -40,8 +39,6 @@ pub struct Login {
     pub cert: Option<PathBuf>,
     /// Certificates pinned by address.
     pub known: PathBuf,
-    /// Block table of the local world (the server's must be the same).
-    pub blocks: Blocks,
 }
 
 #[derive(Resource)]
@@ -141,7 +138,7 @@ pub fn connect(address: &str, login: &Login) -> anyhow::Result<Remote> {
             (addr, found.info.cert_der)
         }
     };
-    Remote::start(addr, cert, &login.name, login.auth.clone(), &login.blocks)
+    Remote::start(addr, cert, &login.name, login.auth.clone())
 }
 
 /// The result of a thread, if it came.

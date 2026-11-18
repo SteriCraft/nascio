@@ -158,52 +158,124 @@ fn harmonics(world: &World, name: &str) -> Option<Vec<Harmonics>> {
     )
 }
 
-impl ClimateMaps {
-    /// Reads the harmonics (a world without climate gets clear skies and no snow).
-    pub fn new(world: &World, images: &mut Assets<Image>) -> Self {
+/// What [`ClimateMaps`] is built from: the local world's layers, or the server's reduced
+/// climate.
+pub struct ClimateParts {
+    res: usize,
+    cloud: Vec<Harmonics>,
+    snow: Vec<Harmonics>,
+    temperature: Vec<Harmonics>,
+    humidity: Vec<Harmonics>,
+    diurnal: Vec<f64>,
+    height_m: Vec<f64>,
+}
+
+impl ClimateParts {
+    /// The harmonics of a local world (a world without climate gets clear skies and no snow).
+    pub fn from_world(world: &World) -> Self {
         let res = world.layer("cloud_cover_x0").map_or(1, |l| l.width);
-        let cloud = harmonics(world, "cloud_cover").unwrap_or_else(|| vec![Harmonics::default()]);
-        let snow = harmonics(world, "snow_fraction").unwrap_or_else(|| vec![Harmonics::default()]);
-        let temperature = harmonics(world, "temperature").unwrap_or_default();
-        let humidity = harmonics(world, "humidity").unwrap_or_default();
-        let diurnal = world.layer("diurnal_range").map_or_else(Vec::new, |l| {
-            (0..l.width * l.height).map(|k| l.data.get_f64(k)).collect()
-        });
-        let height_m = cell_heights(world, res);
-        let height = height_m
+        Self {
+            res,
+            cloud: harmonics(world, "cloud_cover").unwrap_or_else(|| vec![Harmonics::default()]),
+            snow: harmonics(world, "snow_fraction").unwrap_or_else(|| vec![Harmonics::default()]),
+            temperature: harmonics(world, "temperature").unwrap_or_default(),
+            humidity: harmonics(world, "humidity").unwrap_or_default(),
+            diurnal: world.layer("diurnal_range").map_or_else(Vec::new, |l| {
+                (0..l.width * l.height).map(|k| l.data.get_f64(k)).collect()
+            }),
+            height_m: cell_heights(world, res),
+        }
+    }
+
+    /// The reduced climate of the server's `WorldSky`.
+    pub fn from_sky(c: nascio_protocol::sky::Climate) -> Self {
+        let mut h = c.harmonics.into_iter();
+        let mut next = || h.next().unwrap_or_default();
+        Self {
+            res: nascio_protocol::sky::CLIMATE_RES,
+            cloud: next(),
+            snow: next(),
+            temperature: next(),
+            humidity: next(),
+            diurnal: c.diurnal_range,
+            height_m: c.cell_height,
+        }
+    }
+
+    /// Clear skies, no snow, no weather (network mode before the connection).
+    pub fn clear() -> Self {
+        Self {
+            res: 1,
+            cloud: vec![Harmonics::default()],
+            snow: vec![Harmonics::default()],
+            temperature: Vec::new(),
+            humidity: Vec::new(),
+            diurnal: Vec::new(),
+            height_m: vec![0.0],
+        }
+    }
+}
+
+/// Empty climate texture of `res²` texels (filled by [`update_light_and_clear`]).
+fn climate_image(res: usize) -> Image {
+    let mut image = Image::new_fill(
+        Extent3d {
+            width: res as u32,
+            height: res as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[0, 0, 0, 255],
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    image
+}
+
+impl ClimateMaps {
+    pub fn new(parts: ClimateParts, images: &mut Assets<Image>) -> Self {
+        let texture = images.add(climate_image(parts.res));
+        let mut maps = Self {
+            res: 1,
+            cloud: Vec::new(),
+            snow: Vec::new(),
+            temperature: Vec::new(),
+            humidity: Vec::new(),
+            diurnal: Vec::new(),
+            height_m: Vec::new(),
+            height: Vec::new(),
+            texture,
+            last_day: None,
+        };
+        maps.replace(parts, images);
+        maps
+    }
+
+    /// Takes another climate, keeping the texture handle (the materials hold it).
+    pub fn replace(&mut self, parts: ClimateParts, images: &mut Assets<Image>) {
+        self.height = parts
+            .height_m
             .iter()
             .map(|h| ((h / CLIMATE_HEIGHT_M).clamp(0.0, 1.0) * 255.0).round() as u8)
             .collect();
-        let mut image = Image::new_fill(
-            Extent3d {
-                width: res as u32,
-                height: res as u32,
-                depth_or_array_layers: 1,
-            },
-            TextureDimension::D2,
-            &[0, 0, 0, 255],
-            TextureFormat::Rgba8Unorm,
-            RenderAssetUsages::default(),
-        );
-        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-            address_mode_u: ImageAddressMode::Repeat,
-            address_mode_v: ImageAddressMode::Repeat,
-            mag_filter: ImageFilterMode::Linear,
-            min_filter: ImageFilterMode::Linear,
-            ..default()
-        });
-        Self {
-            res,
-            cloud,
-            snow,
-            temperature,
-            humidity,
-            diurnal,
-            height_m,
-            height,
-            texture: images.add(image),
-            last_day: None,
+        self.res = parts.res;
+        self.cloud = parts.cloud;
+        self.snow = parts.snow;
+        self.temperature = parts.temperature;
+        self.humidity = parts.humidity;
+        self.diurnal = parts.diurnal;
+        self.height_m = parts.height_m;
+        if let Some(mut image) = images.get_mut(&self.texture) {
+            *image = climate_image(self.res);
         }
+        self.last_day = None;
     }
 
     /// Weather cloud cover at a world position (nearest cell).
@@ -457,35 +529,55 @@ pub struct GroundAlbedo(pub Handle<Image>);
 /// Side of the [`GroundAlbedo`] texture, texels (195 m each).
 const GROUND_RES: usize = 512;
 
+/// The far ground texture from `res²` sRGB triplets.
+fn ground_image(res: usize, rgb: &[u8]) -> Image {
+    let bytes: Vec<u8> = rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .flat_map(|c| [c[0], c[1], c[2], 255])
+        .collect();
+    let mut image = Image::new(
+        Extent3d {
+            width: res as u32,
+            height: res as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        bytes,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    image
+}
+
 impl GroundAlbedo {
-    /// Builds the texture from the terrain (sRGB, repeat sampler).
-    pub fn new(terrain: &nascio_voxel::Terrain, images: &mut Assets<Image>) -> Self {
-        let res = GROUND_RES;
-        let bytes: Vec<u8> = nascio_voxel::horizon::ground_colors(terrain, res)
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .flat_map(|c| [c[0], c[1], c[2], 255])
-            .collect();
-        let mut image = Image::new(
-            Extent3d {
-                width: res as u32,
-                height: res as u32,
-                depth_or_array_layers: 1,
-            },
-            TextureDimension::D2,
-            bytes,
-            TextureFormat::Rgba8UnormSrgb,
-            RenderAssetUsages::default(),
-        );
-        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-            address_mode_u: ImageAddressMode::Repeat,
-            address_mode_v: ImageAddressMode::Repeat,
-            mag_filter: ImageFilterMode::Linear,
-            min_filter: ImageFilterMode::Linear,
-            ..default()
-        });
-        Self(images.add(image))
+    /// Builds the texture from the local terrain (sRGB, repeat sampler).
+    pub fn from_terrain(terrain: &nascio_voxel::Terrain, images: &mut Assets<Image>) -> Self {
+        let rgb = nascio_voxel::horizon::ground_colors(terrain, GROUND_RES);
+        Self(images.add(ground_image(GROUND_RES, &rgb)))
+    }
+
+    /// A neutral grey-green ground (network mode before the connection).
+    pub fn neutral(images: &mut Assets<Image>) -> Self {
+        Self(images.add(ground_image(1, &[90, 100, 80])))
+    }
+
+    /// Takes the server's far ground, keeping the handle (the materials hold it).
+    pub fn replace(&self, ground: &nascio_protocol::sky::GroundColors, images: &mut Assets<Image>) {
+        let res = nascio_protocol::sky::GROUND_RES;
+        if ground.rgb.len() == res * res * 3
+            && let Some(mut image) = images.get_mut(&self.0)
+        {
+            *image = ground_image(res, &ground.rgb);
+        }
     }
 }
 

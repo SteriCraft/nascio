@@ -46,8 +46,8 @@ use fly::{FlyCam, FlySettings, RenderOrigin};
 #[derive(Parser, Debug)]
 #[command(about = "Nascio world viewer")]
 struct Args {
-    /// World directory (from `nascio-worldgen generate`). The server's world: the sky and the
-    /// horizon still come from it (until the server sends them).
+    /// World directory (from `nascio-worldgen generate`), read only by local flight (`--fly`,
+    /// `--bench`) and written by `--generate`. Connected, everything comes from the server.
     #[arg(default_value = "out/server/world-42")]
     world: PathBuf,
     /// Fly over the local world without a server (development).
@@ -106,8 +106,7 @@ struct Args {
     /// Disable vsync (measure the real frame cost).
     #[arg(long)]
     no_vsync: bool,
-    /// Connect at once to this server (`ip`, `ip:port`), without the menu. Sky and horizon
-    /// still come from the local world, which must be the server's.
+    /// Connect at once to this server (`ip`, `ip:port`), without the menu.
     #[arg(long)]
     connect: Option<String>,
     /// Server certificate (DER). Default: the one the server gives with its answer to the
@@ -192,18 +191,15 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         let w = &b.waypoint[0];
         args.pos = Some(vec![w.x, w.z]);
     }
-    let world = World::load(&args.world).map_err(|e| {
-        anyhow::anyhow!(
-            "cannot load world from {}: {e:#}\ngenerate one first: cargo run -p nascio-worldgen --release -- generate --seed 42 --scale 1",
-            args.world.display()
-        )
-    })?;
+    anyhow::ensure!(
+        !(args.fly && args.connect.is_some()),
+        "--fly flies over a local world: it does not go with --connect"
+    );
     let gen_cfg = GenConfig::load(args.voxel_config.as_deref(), args.dev_override)?;
     if let Some(p) = args.screenshot.take() {
         args.screenshot = Some(gen_cfg.mark_path(p));
     }
     args.bench_out = gen_cfg.mark_path(args.bench_out.clone());
-    let fingerprint = gen_cfg.fingerprint(&world);
     let mut render_cfg = match &args.render_config {
         Some(p) => curvature::RenderConfig::from_toml(&std::fs::read_to_string(p)?)?,
         None => curvature::RenderConfig::default(),
@@ -211,85 +207,29 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     if let Some(r) = args.curvature_radius {
         render_cfg.curvature_radius_m = r;
     }
-    let delta_cfg = nascio_voxel::DeltaConfig {
-        palette_above: gen_cfg.voxel.delta_palette_above,
-        ..Default::default()
-    };
-    let terrain = Arc::new(Terrain::from_world(&world, gen_cfg.voxel.clone())?);
-    // Player modifications (god mode), `world-<seed>/deltas/`. Deltas of another world are
-    // left untouched: edits then stay in memory, as under `--dev-override` (other chunks).
-    let opened = if args.connect.is_some() {
-        Err(anyhow::anyhow!("network mode: the server holds the edits"))
-    } else if gen_cfg.dev_override {
-        Err(anyhow::anyhow!(
-            "{DEV_OVERRIDE_MARK}: chunks differ from the world's"
-        ))
+    // The local world only for local flight: connected, everything comes from the server.
+    let mut local = if args.fly {
+        Some(LocalWorld::load(&args.world, &gen_cfg)?)
     } else {
-        DeltaStore::open(
-            &args.world.join("deltas"),
-            nascio_worldgen::config::GENERATOR_VERSION,
-            &fingerprint,
-            terrain.blocks(),
-            delta_cfg.clone(),
-        )
+        None
     };
-    let deltas = match opened {
-        Ok((d, warnings)) => {
-            for w in warnings {
-                warn!("deltas: {w}");
-            }
-            d
-        }
-        Err(e) => {
-            error!("deltas not loaded, edits will not be saved: {e:#}");
-            DeltaStore::new(
-                nascio_worldgen::config::GENERATOR_VERSION,
-                "",
-                terrain.blocks(),
-                delta_cfg,
-            )
-        }
-    };
-    let god = god::God::new(terrain.blocks().id("granite").unwrap_or(1));
-    // Cloud, snow, temperature and humidity harmonics, the diurnal range and the fine elevation
-    // (snow line, HUD weather) for the 3D mode.
-    let climate_world = World {
-        config: world.config.clone(),
-        layers: world
-            .layers
-            .iter()
-            .filter(|l| {
-                [
-                    "cloud_cover_",
-                    "snow_fraction_",
-                    "temperature_",
-                    "humidity_",
-                ]
-                .iter()
-                .any(|p| l.name.starts_with(p))
-                    || l.name == "elevation"
-                    || l.name == "diurnal_range"
-            })
-            .cloned()
-            .collect(),
-        files: Default::default(),
-    };
-    let info = fly::WorldInfo {
-        astro: world.config.astro,
-        clock: world.config.clock,
-        seed: world.config.seed,
-        lapse_rate_c_per_m: world.config.climate.lapse_rate_c_per_m,
-        atmosphere: world.config.atmosphere,
-        geotherm: world.config.geotherm,
-    };
+    let god = god::God::new(
+        local
+            .as_ref()
+            .and_then(|l| l.terrain.blocks().id("granite"))
+            .unwrap_or(1),
+    );
 
     let (x, z, y) = match args.pos.as_deref() {
         Some([x, z]) => (*x, *z, None),
         Some([x, y, z]) => (*x, *z, Some(*y)),
         _ => (WORLD_SIZE_F64 / 2.0, WORLD_SIZE_F64 / 2.0, None),
     };
-    let ground = terrain.height(x, z).max(0.0);
+    let ground = local
+        .as_ref()
+        .map_or(0.0, |l| l.terrain.height(x, z).max(0.0));
     // An explicit height may be underground (HUD checks); the default stays above it.
+    // Connected, the server's spawn point replaces it.
     let y = y.unwrap_or(ground + 60.0);
     let cam = FlyCam {
         pos: WorldPos::new(x, y, z),
@@ -334,7 +274,6 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         },
         cert: args.cert.clone(),
         known: args.known_servers.clone(),
-        blocks: terrain.blocks().table().clone(),
     };
     let mut cam = cam;
     let remote = match &args.connect {
@@ -358,14 +297,13 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     horizon::check_layout(&horizon_cfg);
 
     let mut window = Window {
-        title: format!(
-            "{}Nascio — {}{}",
-            gen_cfg.mark(),
-            args.world.display(),
-            args.connect
-                .as_ref()
-                .map_or(String::new(), |a| format!(" — server {a}"))
-        ),
+        title: match &args.connect {
+            Some(a) => format!("Nascio — server {a}"),
+            None if local.is_some() => {
+                format!("{}Nascio — {}", gen_cfg.mark(), args.world.display())
+            }
+            None => "Nascio".to_owned(),
+        },
         present_mode: if settings.vsync {
             PresentMode::AutoVsync
         } else {
@@ -391,7 +329,11 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     .add_plugins(EguiPlugin::default())
     .add_plugins(curvature::CurvaturePlugin)
     .add_plugins(sky::SkyPlugin)
-    .insert_resource(ClimateSource(climate_world))
+    .insert_resource(ClimateSource(
+        local
+            .as_mut()
+            .and_then(|l| Some((l.climate.take()?, l.terrain.clone()))),
+    ))
     .add_plugins(perf::PerfPlugin)
     .init_state::<Mode>()
     .insert_resource(menu::Menu::new(login, saved.address.clone()))
@@ -400,19 +342,24 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     .init_resource::<pause::Pause>()
     .insert_resource(cam)
     .insert_resource(settings)
-    .insert_resource(info)
-    .insert_resource(fly::SharedTerrain(terrain.clone()))
+    .insert_resource(
+        local
+            .as_ref()
+            .map_or_else(fly::WorldInfo::unknown, |l| l.info.clone()),
+    )
     .insert_resource(fly::Workers::new())
     .insert_resource(fly::Streamer::new())
-    .insert_resource(fly::SharedDeltas(Arc::new(deltas)))
     .insert_resource(god)
     .insert_resource(horizon::Horizon::new(
         horizon_cfg,
-        horizon::WaterColors::new(terrain.blocks().table()),
+        horizon::WaterColors::new(
+            local
+                .as_ref()
+                .map_or(&nascio_chunk::Blocks::builtin(), |l| {
+                    l.terrain.blocks().table()
+                }),
+        ),
     ))
-    .insert_resource(tiles::TileStore::new(tiles::TileSource::Local(
-        terrain.clone(),
-    )))
     .insert_resource(RenderOrigin(BlockPos::new(0, 0, 0)))
     .insert_resource(ClearColor(Color::srgb(0.45, 0.64, 0.9)))
     .init_resource::<fly::UiCapture>()
@@ -463,7 +410,21 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         )
             .chain(),
     )
+    .add_systems(
+        Update,
+        adopt_remote
+            .run_if(resource_added::<remote::Remote>)
+            .before(pause::pause_input),
+    )
     .add_systems(OnEnter(Mode::Fly), fly::reset_visibility);
+    if let Some(l) = local {
+        app.insert_resource(fly::SharedTerrain(l.terrain.clone()))
+            .insert_resource(fly::SharedDeltas(Arc::new(l.deltas)))
+            .insert_resource(god::BlockTable(Arc::new(
+                l.terrain.blocks().table().clone(),
+            )))
+            .insert_resource(tiles::TileStore::new(tiles::TileSource::Local(l.terrain)));
+    }
     if args.fly || remote.is_some() {
         app.insert_state(Mode::Fly);
     }
@@ -493,9 +454,132 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Climate layers kept for the 3D sky until [`setup`] builds [`sky::ClimateMaps`].
+/// The local world's climate layers and terrain, kept for the 3D sky until [`setup`] builds
+/// [`sky::ClimateMaps`] (`None` in network mode: clear skies until [`adopt_remote`]).
 #[derive(Resource)]
-struct ClimateSource(World);
+struct ClimateSource(Option<(World, Arc<Terrain>)>);
+
+/// The local world of `--fly`: terrain, deltas, climate layers and settings.
+struct LocalWorld {
+    terrain: Arc<Terrain>,
+    deltas: DeltaStore,
+    /// Taken by [`ClimateSource`].
+    climate: Option<World>,
+    info: fly::WorldInfo,
+}
+
+impl LocalWorld {
+    fn load(dir: &std::path::Path, gen_cfg: &GenConfig) -> anyhow::Result<Self> {
+        let world = World::load(dir).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot load world from {}: {e:#}\ngenerate one first: cargo run -p nascio-worldgen --release -- generate --seed 42 --scale 1",
+                dir.display()
+            )
+        })?;
+        let fingerprint = gen_cfg.fingerprint(&world);
+        let delta_cfg = nascio_voxel::DeltaConfig {
+            palette_above: gen_cfg.voxel.delta_palette_above,
+            ..Default::default()
+        };
+        let terrain = Arc::new(Terrain::from_world(&world, gen_cfg.voxel.clone())?);
+        // Player modifications (god mode), `world-<seed>/deltas/`. Deltas of another world are
+        // left untouched: edits then stay in memory, as under `--dev-override` (other chunks).
+        let opened = if gen_cfg.dev_override {
+            Err(anyhow::anyhow!(
+                "{DEV_OVERRIDE_MARK}: chunks differ from the world's"
+            ))
+        } else {
+            DeltaStore::open(
+                &dir.join("deltas"),
+                nascio_worldgen::config::GENERATOR_VERSION,
+                &fingerprint,
+                terrain.blocks(),
+                delta_cfg.clone(),
+            )
+        };
+        let deltas = match opened {
+            Ok((d, warnings)) => {
+                for w in warnings {
+                    warn!("deltas: {w}");
+                }
+                d
+            }
+            Err(e) => {
+                error!("deltas not loaded, edits will not be saved: {e:#}");
+                DeltaStore::new(
+                    nascio_worldgen::config::GENERATOR_VERSION,
+                    "",
+                    terrain.blocks(),
+                    delta_cfg,
+                )
+            }
+        };
+        // Cloud, snow, temperature and humidity harmonics, the diurnal range and the fine
+        // elevation (snow line, HUD weather) for the 3D mode.
+        let climate = World {
+            config: world.config.clone(),
+            layers: world
+                .layers
+                .iter()
+                .filter(|l| {
+                    [
+                        "cloud_cover_",
+                        "snow_fraction_",
+                        "temperature_",
+                        "humidity_",
+                    ]
+                    .iter()
+                    .any(|p| l.name.starts_with(p))
+                        || l.name == "elevation"
+                        || l.name == "diurnal_range"
+                })
+                .cloned()
+                .collect(),
+            files: Default::default(),
+        };
+        let info = fly::WorldInfo {
+            astro: world.config.astro,
+            clock: world.config.clock,
+            seed: Some(world.config.seed),
+            lapse_rate_c_per_m: world.config.climate.lapse_rate_c_per_m,
+            atmosphere: world.config.atmosphere,
+            geotherm: world.config.geotherm,
+        };
+        Ok(Self {
+            terrain,
+            deltas,
+            climate: Some(climate),
+            info,
+        })
+    }
+}
+
+/// Once connected: the server's sky, climate, far ground, block table and horizon tiles
+/// replace the placeholders of the network mode.
+#[allow(clippy::too_many_arguments)]
+fn adopt_remote(
+    mut commands: Commands,
+    remote: Res<remote::Remote>,
+    mut maps: ResMut<sky::ClimateMaps>,
+    ground: Res<sky::GroundAlbedo>,
+    mut images: ResMut<Assets<Image>>,
+    mut horizon: ResMut<horizon::Horizon>,
+    mut god: ResMut<god::God>,
+) {
+    let sky = &remote.sky;
+    commands.insert_resource(fly::WorldInfo::from_sky(&sky.world));
+    match sky.climate.decode() {
+        Ok(c) => maps.replace(sky::ClimateParts::from_sky(c), &mut images),
+        Err(e) => error!("the server's climate: {e:#}"),
+    }
+    ground.replace(&sky.ground, &mut images);
+    horizon.set_colors(horizon::WaterColors::new(&remote.blocks));
+    commands.insert_resource(tiles::TileStore::new(tiles::TileSource::Remote(
+        (*remote).clone(),
+    )));
+    commands.insert_resource(god::BlockTable(remote.blocks.clone()));
+    god.block = remote.blocks.id("granite").unwrap_or(1);
+}
 
 fn setup(
     mut commands: Commands,
@@ -503,10 +587,17 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
     mut buffers: ResMut<Assets<bevy::render::storage::ShaderBuffer>>,
     mut materials: ResMut<Assets<curvature::CurvedMaterial>>,
-    terrain: Res<fly::SharedTerrain>,
 ) {
-    let maps = sky::ClimateMaps::new(&source.0, &mut images);
-    let ground = sky::GroundAlbedo::new(&terrain.0, &mut images);
+    let (maps, ground) = match &source.0 {
+        Some((world, terrain)) => (
+            sky::ClimateMaps::new(sky::ClimateParts::from_world(world), &mut images),
+            sky::GroundAlbedo::from_terrain(terrain, &mut images),
+        ),
+        None => (
+            sky::ClimateMaps::new(sky::ClimateParts::clear(), &mut images),
+            sky::GroundAlbedo::neutral(&mut images),
+        ),
+    };
     let ground_handle = ground.0.clone();
     commands.insert_resource(ground);
     let climate = maps.texture.clone();

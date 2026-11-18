@@ -147,13 +147,40 @@ pub struct SharedTerrain(pub Arc<Terrain>);
 pub struct WorldInfo {
     pub astro: AstroConfig,
     pub clock: GameClock,
-    pub seed: u64,
+    /// The local world's seed (`None` connected: the server does not give it).
+    pub seed: Option<u64>,
     /// Lapse rate of the world's climate, °C per m (snow line in the shader, HUD weather).
     pub lapse_rate_c_per_m: f64,
     /// Pressure profile and air above the ground (HUD weather).
     pub atmosphere: nascio_core::AtmosphereConfig,
-    /// Underground temperature (HUD below ground).
+    /// Underground temperature (HUD below ground, local world only).
     pub geotherm: nascio_core::GeothermConfig,
+}
+
+impl WorldInfo {
+    /// Before the connection: default settings, replaced by the server's `WorldSky`.
+    pub fn unknown() -> Self {
+        Self {
+            astro: AstroConfig::default(),
+            clock: GameClock::default(),
+            seed: None,
+            lapse_rate_c_per_m: 0.0065,
+            atmosphere: Default::default(),
+            geotherm: Default::default(),
+        }
+    }
+
+    /// The settings of the server's world.
+    pub fn from_sky(w: &nascio_protocol::sky::SkyWorld) -> Self {
+        Self {
+            astro: w.astro,
+            clock: w.clock,
+            seed: None,
+            lapse_rate_c_per_m: w.lapse_rate_c_per_m,
+            atmosphere: w.atmosphere,
+            geotherm: Default::default(),
+        }
+    }
 }
 
 /// Materials shared by every chunk.
@@ -312,28 +339,37 @@ impl Streamer {
     }
 }
 
+/// Where the columns come from.
+#[derive(Clone)]
+enum ColumnSource {
+    /// Generated here, with the local deltas (local flight).
+    Local(Arc<Terrain>, Arc<DeltaStore>),
+    /// Sent by the server.
+    Remote(Remote),
+}
+
 /// Generates and meshes column `key` (with its deltas) on the worker pool; in network mode,
 /// meshes it from the columns the server sent instead (no generation).
 fn spawn_column(
     workers: &Workers,
-    terrain: &Arc<Terrain>,
-    deltas: Arc<DeltaStore>,
-    remote: Option<Remote>,
+    source: ColumnSource,
     tx: Sender<ColumnResult>,
     key: (i32, i32),
     request: u64,
 ) {
-    let terrain = terrain.clone();
     workers.pool.spawn(move || {
-        if let Some(remote) = remote {
-            let meshes = remote.mesh_column(key);
-            let _ = tx.send(ColumnResult {
-                key,
-                request,
-                meshes,
-            });
-            return;
-        }
+        let (terrain, deltas) = match source {
+            ColumnSource::Remote(remote) => {
+                let meshes = remote.mesh_column(key);
+                let _ = tx.send(ColumnResult {
+                    key,
+                    request,
+                    meshes,
+                });
+                return;
+            }
+            ColumnSource::Local(t, d) => (t, d),
+        };
         let underground = terrain.config().underground_chunks;
         let col = ColumnSet::new(&terrain, key.0, key.1);
         let mut tint = terrain.chunk_tint(key.0, key.1);
@@ -431,8 +467,8 @@ pub fn stream_chunks(
     mut commands: Commands,
     mut streamer: ResMut<Streamer>,
     workers: Res<Workers>,
-    terrain: Res<SharedTerrain>,
-    deltas: Res<SharedDeltas>,
+    terrain: Option<Res<SharedTerrain>>,
+    deltas: Option<Res<SharedDeltas>>,
     settings: Res<FlySettings>,
     cam: Res<FlyCam>,
     origin: Res<RenderOrigin>,
@@ -441,6 +477,12 @@ pub fn stream_chunks(
     remote: Option<Res<Remote>>,
 ) {
     let remote = remote.map(|r| r.clone());
+    // Connected: the server's columns; else the local world (none: nothing to show yet).
+    let source = match (&remote, &terrain, &deltas) {
+        (Some(r), _, _) => ColumnSource::Remote(r.clone()),
+        (None, Some(t), Some(d)) => ColumnSource::Local(t.0.clone(), d.snapshot()),
+        _ => return,
+    };
     let s = &mut *streamer;
     s.set_radius((settings.view_distance_m / CHUNK_SIZE as f32).ceil() as i32);
     let cam_block = cam.pos.block();
@@ -536,15 +578,7 @@ pub fn stream_chunks(
             None => continue,
         }
         s.in_flight += 1;
-        spawn_column(
-            &workers,
-            &terrain.0,
-            deltas.snapshot(),
-            remote.clone(),
-            s.tx.clone(),
-            key,
-            request,
-        );
+        spawn_column(&workers, source.clone(), s.tx.clone(), key, request);
     }
 
     // 2. Forget pending columns that left the range (their results will be discarded).
@@ -564,7 +598,6 @@ pub fn stream_chunks(
     let max_in_flight = workers.threads * 2;
     let mut missing = 0;
     let mut ready = 0;
-    let mut snapshot = None;
     for i in 0..s.offsets.len() {
         let (dx, dz) = s.offsets[i];
         let key = (
@@ -584,16 +617,7 @@ pub fn stream_chunks(
                     s.requests += 1;
                     let request = s.requests;
                     s.slots.insert(key, Slot::Pending(request));
-                    let d = snapshot.get_or_insert_with(|| deltas.snapshot()).clone();
-                    spawn_column(
-                        &workers,
-                        &terrain.0,
-                        d,
-                        remote.clone(),
-                        s.tx.clone(),
-                        key,
-                        request,
-                    );
+                    spawn_column(&workers, source.clone(), s.tx.clone(), key, request);
                 }
             }
         }
@@ -674,8 +698,9 @@ pub fn fly_input(
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
     ui: Res<UiCapture>,
-    terrain: Res<SharedTerrain>,
-    deltas: Res<SharedDeltas>,
+    terrain: Option<Res<SharedTerrain>>,
+    deltas: Option<Res<SharedDeltas>>,
+    remote: Option<Res<Remote>>,
     mut god: ResMut<crate::god::God>,
     mut cam: ResMut<FlyCam>,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
@@ -745,13 +770,21 @@ pub fn fly_input(
         (p.x.floor() as i32).div_euclid(CHUNK_SIZE),
         (p.z.floor() as i32).div_euclid(CHUNK_SIZE),
     );
-    let store = deltas.snapshot();
-    let ground = if store.column_modified(cx, cz) {
-        // From the higher of the old and new heights: a fast fall cannot start inside a block.
-        god.floor_below(&terrain.0, &store, p.x, p.y.max(cam.pos.y), p.z)
-            .unwrap_or(f64::NEG_INFINITY)
-    } else {
-        terrain.0.height(p.x, p.z)
+    // From the higher of the old and new heights: a fast fall cannot start inside a block.
+    let from = p.y.max(cam.pos.y);
+    let ground = match (&remote, &terrain, &deltas) {
+        // Connected: the blocks the server sent (no floor where nothing came yet).
+        (Some(r), _, _) => r.floor_below(p.x, from, p.z).unwrap_or(f64::NEG_INFINITY),
+        (None, Some(terrain), Some(deltas)) => {
+            let store = deltas.snapshot();
+            if store.column_modified(cx, cz) {
+                god.floor_below(&terrain.0, &store, p.x, from, p.z)
+                    .unwrap_or(f64::NEG_INFINITY)
+            } else {
+                terrain.0.height(p.x, p.z)
+            }
+        }
+        _ => f64::NEG_INFINITY,
     };
     p.y = p.y.max(ground.max(0.0) + GROUND_CLEARANCE);
     cam.pos = p;
@@ -825,7 +858,8 @@ pub fn hud(
     workers: Res<Workers>,
     horizon: Option<Res<crate::horizon::HorizonStats>>,
     stats: Res<FrameStats>,
-    terrain: Res<SharedTerrain>,
+    terrain: Option<Res<SharedTerrain>>,
+    remote: Option<Res<Remote>>,
     info: Res<WorldInfo>,
     sky: Res<crate::sky::SkyState>,
     climate: Option<Res<crate::sky::ClimateMaps>>,
@@ -833,6 +867,14 @@ pub fn hud(
     let ctx = contexts.ctx_mut()?;
     let p = cam.pos;
     let avg = stats.average();
+    // Ground under the camera: the local terrain, or the blocks the server sent.
+    let surface = match (&remote, &terrain) {
+        (Some(r), _) => r
+            .surface(p.x, p.z)
+            .map(|(y, b)| (f64::from(y + 1), r.blocks.def(b).name.clone())),
+        (None, Some(t)) => Some(local_surface(&t.0, p.x, p.z)),
+        _ => None,
+    };
     if ctx.input(|i| i.key_pressed(egui::Key::F3)) {
         hud.shown = !hud.shown;
     }
@@ -849,25 +891,23 @@ pub fn hud(
                 longitude(p.x).to_degrees(),
                 seam_distance(p.z)
             ));
-            ui.monospace(format!(
-                "ground {:7.1} m   heading {:5.1}°",
-                terrain.0.height(p.x, p.z),
-                cam.yaw.to_degrees()
-            ));
-            ui.monospace(format!("speed {:7.1} m/s (wheel)", cam.speed));
-            let (bx, bz) = (p.x.floor() as i32, p.z.floor() as i32);
-            let top = terrain.0.height(p.x, p.z).floor() as i32;
-            let slope = (terrain.0.height(p.x + 2.0, p.z) - terrain.0.height(p.x - 2.0, p.z))
-                .hypot(terrain.0.height(p.x, p.z + 2.0) - terrain.0.height(p.x, p.z - 2.0))
-                / 4.0;
-            let blocks = terrain.0.blocks();
-            let ground_block = terrain.0.top_block(
-                nascio_core::torus::wrap(bx),
-                nascio_core::torus::wrap(bz),
-                top,
-                slope,
-            );
-            ui.monospace(format!("ground block {}", blocks.def(ground_block).name));
+            match &surface {
+                Some((h, block)) => {
+                    ui.monospace(format!(
+                        "ground {h:7.1} m   heading {:5.1}°",
+                        cam.yaw.to_degrees()
+                    ));
+                    ui.monospace(format!("speed {:7.1} m/s (wheel)", cam.speed));
+                    ui.monospace(format!("ground block {block}"));
+                }
+                None => {
+                    ui.monospace(format!(
+                        "ground   (not loaded)   heading {:5.1}°",
+                        cam.yaw.to_degrees()
+                    ));
+                    ui.monospace(format!("speed {:7.1} m/s (wheel)", cam.speed));
+                }
+            }
             ui.separator();
             ui.monospace(format!(
                 "frame {:6.2} ms  ({:5.1} i/s)",
@@ -932,7 +972,8 @@ pub fn hud(
                 100.0 * sky.cloud,
                 100.0 * sky.moon_lit
             ));
-            ui.horizontal(|ui| {
+            // Local flight only: the server refuses a jump (speed check).
+            ui.add_enabled_ui(terrain.is_some(), |ui| ui.horizontal(|ui| {
                 ui.label("x");
                 ui.add(egui::TextEdit::singleline(&mut hud.teleport.0).desired_width(60.0));
                 ui.label("z");
@@ -942,19 +983,24 @@ pub fn hud(
                         hud.teleport.0.trim().parse::<f64>(),
                         hud.teleport.1.trim().parse::<f64>(),
                     )
+                    && let Some(t) = &terrain
                 {
-                    let ground = terrain.0.height(x, z).max(0.0);
+                    let ground = t.0.height(x, z).max(0.0);
                     cam.pos = WorldPos::new(x, ground + 60.0, z);
                 }
-            });
+            }));
             ui.small(format!(
-                "Right drag: look · WASD/ZQSD: move · Space/Shift: up/down · F3: this panel · Esc: menu · seed {}",
-                info.seed
+                "Right drag: look · WASD/ZQSD: move · Space/Shift: up/down · F3: this panel · Esc: menu{}",
+                info.seed.map_or(String::new(), |s| format!(" · seed {s}"))
             ));
         });
     hud.shown = shown;
-    let ground = terrain.0.height(p.x, p.z).max(0.0);
-    let under = underground(&terrain.0, &info, climate.as_deref(), p);
+    let ground = surface.as_ref().map_or(0.0, |s| s.0.max(0.0));
+    let under = match (&remote, &terrain) {
+        (Some(r), _) => remote_underground(r, p),
+        (None, Some(t)) => underground(&t.0, &info, climate.as_deref(), p),
+        _ => None,
+    };
     clock(
         ctx,
         &info,
@@ -999,6 +1045,40 @@ fn hhmm(frac: f64) -> String {
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
+/// Ground height under `(x, z)` and its top block, from the local terrain.
+fn local_surface(t: &Terrain, x: f64, z: f64) -> (f64, String) {
+    let top = t.height(x, z).floor() as i32;
+    let slope = (t.height(x + 2.0, z) - t.height(x - 2.0, z))
+        .hypot(t.height(x, z + 2.0) - t.height(x, z - 2.0))
+        / 4.0;
+    let block = t.top_block(
+        nascio_core::torus::wrap(x.floor() as i32),
+        nascio_core::torus::wrap(z.floor() as i32),
+        top,
+        slope,
+    );
+    (t.height(x, z), t.blocks().def(block).name.clone())
+}
+
+/// Below the ground, connected: depth under the highest solid block and the block at the
+/// camera, from the blocks the server sent (no geology: no rock temperature).
+fn remote_underground(r: &Remote, p: WorldPos) -> Option<(f64, Option<f64>, String, bool)> {
+    let (top, _) = r.surface(p.x, p.z)?;
+    let top = f64::from(top + 1);
+    if p.y >= top {
+        return None;
+    }
+    let at = nascio_core::coords::BlockPos::new(
+        p.x.floor() as i32,
+        p.y.floor() as i32,
+        p.z.floor() as i32,
+    );
+    let name = r
+        .block(at)
+        .map_or_else(|| "?".to_owned(), |b| r.blocks.def(b).name.clone());
+    Some(((top - p.y).floor(), None, name, false))
+}
+
 /// Top-right clock: local solar time at the camera and time of the origin meridian (λ = 0,
 /// the game's reference time, spec §2.3), with the game date. Follows the fixed hour and day.
 /// Below the time: air temperature, relative humidity and pressure at the camera (§4.3).
@@ -1008,7 +1088,7 @@ fn underground(
     info: &WorldInfo,
     climate: Option<&crate::sky::ClimateMaps>,
     p: WorldPos,
-) -> Option<(f64, f64, String, bool)> {
+) -> Option<(f64, Option<f64>, String, bool)> {
     let top = terrain.height(p.x, p.z).floor();
     if p.y >= top + 1.0 {
         return None;
@@ -1052,7 +1132,7 @@ fn underground(
             .rock_block(&col, bx, bz, top_i, 0.0, moho, depth as i32)
             .0
     };
-    Some((depth, t, blocks.def(block).name.clone(), magma))
+    Some((depth, Some(t), blocks.def(block).name.clone(), magma))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1063,7 +1143,7 @@ fn clock(
     cam: &FlyCam,
     climate: Option<&crate::sky::ClimateMaps>,
     ground: f64,
-    under: Option<(f64, f64, String, bool)>,
+    under: Option<(f64, Option<f64>, String, bool)>,
 ) {
     let (day, t_days, h) = crate::sky::instant(info, settings, cam.pos.x);
     let local = (h + std::f64::consts::PI) / TAU;
@@ -1087,10 +1167,12 @@ fn clock(
                 ui.separator();
                 if let Some((depth, t, block, magma)) = &under {
                     ui.monospace(format!("underground {depth:6.0} m ({block})"));
-                    ui.monospace(format!("rock        {t:6.0} °C"));
+                    if let Some(t) = t {
+                        ui.monospace(format!("rock        {t:6.0} °C"));
+                    }
                     if *magma {
                         ui.colored_label(egui::Color32::from_rgb(255, 90, 40), "MAGMA: DEADLY");
-                    } else if *t > 60.0 {
+                    } else if t.is_some_and(|t| t > 60.0) {
                         ui.colored_label(egui::Color32::from_rgb(255, 160, 60), "hot rock");
                     }
                     return;
