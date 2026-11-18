@@ -20,6 +20,8 @@
 //!   is frozen); the waiting ones are still sent.
 //! - **Sending**: every 3 steps, the 32 newest commands not acknowledged; [`Player::update`]
 //!   returns them and the caller sends them.
+//! - **Respawn**: states come by datagrams, `Respawned` by the control stream; until a state
+//!   acknowledges a command made after `Respawned`, states may predate it and are ignored.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -133,6 +135,9 @@ pub struct Player {
     started: bool,
     last_tick: Option<u32>,
     dead: bool,
+    /// After a respawn: states that do not acknowledge this command yet may predate the
+    /// respawn (datagrams overtake the control stream) and are ignored.
+    fence: Option<u32>,
     /// Shown position − predicted position, m.
     offset: [f64; 3],
     now: Instant,
@@ -178,6 +183,7 @@ impl Player {
             started: false,
             last_tick: None,
             dead: false,
+            fence: None,
             offset: [0.0; 3],
             now,
             acc: 0.0,
@@ -396,6 +402,15 @@ impl Player {
             self.stats.stale += 1;
             return;
         }
+        // A state that may come from before the respawn: the server had respawned the player
+        // before it applied any command made after `Respawned` reached us.
+        if let Some(f) = self.fence {
+            if s.ack.is_none_or(|a| a.wrapping_sub(f) > u32::MAX / 2) {
+                self.stats.stale += 1;
+                return;
+            }
+            self.fence = None;
+        }
         self.last_tick = Some(s.tick);
         let first = !self.started;
         self.started = true;
@@ -490,6 +505,7 @@ impl Player {
             }
             ServerMsg::Respawned { pos } => {
                 self.dead = false;
+                self.fence = Some(self.next);
                 self.predicted = State::new(*pos, self.predicted.mode);
                 self.applied = self.pending.len();
                 self.events.push(PlayerEvent::Respawned);

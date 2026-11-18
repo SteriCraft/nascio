@@ -148,8 +148,8 @@ Plan validé par l'auteur. `crates/client/src/player.rs` ; le client dépend de 
 - **Renumérotation** : elle n'a lieu qu'après un gel plus long que 2 × latence + 300 ms, quand le serveur comble au-delà de la dernière commande du client. Sous ce seuil (500 ms à 150 ms de latence), les pas comblés restent derrière la numérotation du client : quelques corrections, sans renumérotation. Avec la règle du plan (`ack + 1`), le client se renumérotait à chaque état pendant un aller simple (7 à 8 fois) ; l'avance d'un aller-retour, validée par l'auteur, n'en laisse qu'une.
 
 Limites connues :
-- Le visualiseur n'est pas encore branché sur `Player` (5.5). Il ne vide pas `take_resends` : la liste reste vide sauf après un creusement sous la plage d'une colonne.
-- `Respawned` arrive par le flux de contrôle, les états par datagrammes : un état d'avant la réapparition reçu après elle peut ramener la vue une fraction de seconde au lieu de la mort (rare, recalé par l'état suivant).
+- ~~Le visualiseur n'est pas encore branché sur `Player`~~ (fait en 5.5, avec `take_resends`).
+- ~~`Respawned` arrive par le flux de contrôle, les états par datagrammes : un état d'avant la réapparition reçu après elle peut ramener la vue une fraction de seconde au lieu de la mort~~ (traité en 5.5).
 - La mesure à 500 bots avec de vraies commandes (bots sur une autre machine) reste à faire.
 
 Texte proposé pour la spec (§8.1, §8.4 et §8.5), mis à jour en 5.3, à intégrer en 5.6 :
@@ -158,3 +158,23 @@ Texte proposé pour la spec (§8.1, §8.4 et §8.5), mis à jour en 5.3, à int�
 - §8.4 (suite, **arrivée, mort et vol**) : un joueur revient à sa dernière position (gardée avec son compte au départ, à l'arrêt du serveur et toutes les 60 s ; un joueur mort au départ revient à son point). À l'arrivée et à la réapparition, un joueur dans des blocs va à la place libre la plus proche à 10 m au plus ; sans place, il meurt d'étouffement à sa dernière position, ou reçoit un autre point près du même site s'il était à son point. Un joueur qu'une édition enferme est posé sur les blocs, sauf si la rangée au-dessus de sa tête est solide : il meurt d'étouffement. Toucher le magma tue. `Died { cause }` prévient le client ; un mort ne bouge plus et n'est plus vu des autres ; `Respawn` le ramène au point de son compte (`Respawned`). Le vol est réservé aux administrateurs (`Fly`, ou la commande de console `fly`), sans gravité, sans traverser les blocs.
 - §8.4 (suite, **prédiction**) : le client prédit son joueur avec la même physique sur les blocs de son miroir, rejoue ses commandes non acquittées sur chaque état du serveur et lisse les corrections (τ = 100 ms, recalage au-delà de 2 m). Une édition sous la plage d'une colonne lui fait oublier la colonne, qu'il redemande (`ClientMsg::Resend`).
 - §8.5 : « les positions (`Move`) et » disparaît ; le point « Un déplacement plus rapide… (`Correct`) » est remplacé par : le serveur simule lui-même le joueur, et un seau de jetons limite les datagrammes de commandes (`input_datagrams_per_s`). La portée d'édition (`edit_reach_m`, 5 m) se mesure des yeux, tels qu'ils étaient après la commande que porte `SetBlock.cmd`, au point le plus proche de la cellule ; une édition qui précède sa commande attend au plus une seconde ; un bloc qui fait obstacle ne se pose pas dans un joueur.
+
+## 5.5 — Le visualiseur sur `Player`
+- **Mode connecté** (`crates/viewer/src/player.rs`, `remote.rs`) : un `Player` est créé depuis le `Hello` et partagé entre le fil réseau et l'image (verrou du joueur toujours pris avant celui du miroir).
+  - Le fil réseau lui passe chaque `PlayerState` (`on_state`, après `set_rtt` avec le RTT de QUIC), `Died` et `Respawned` (`on_msg`). Il vide `Mirror::take_resends()` en `ClientMsg::Resend` après chaque lot de blocs.
+  - À chaque image, le système `walk` fait `update` avec les touches, envoie les `Commands` en datagramme, lit les événements et place la caméra aux yeux (`eye()`). L'ancien envoi de commandes sans touche disparaît.
+- **Touches** : ZQSD (touches physiques WASD), Espace (sauter, monter en nageant ou en vol), Maj (s'accroupir, descendre). Deux appuis sur Z en 300 ms font courir ; le champ de vision passe de 42° à 60° (τ = 0,15 s). La souris tourne la vue, capturée pendant le jeu, libérée par Échap, le tchat et la mort. La molette règle la vitesse de vol.
+- **Vol** : **F** envoie `ClientMsg::Fly` (proposition de touche). Sans changement de mode 2 s après, la vue affiche « Vol refusé (administrateurs seulement) ». Le passage s'affiche « Vol » ou « Marche ».
+- **Saut automatique** : case « Saut automatique » des paramètres, enregistrée dans `client-settings.toml` (`auto_jump`), décochée par défaut, passée à chaque image par `set_auto_jump`.
+- **Éditions** (outil G) : en mode connecté, le rayon part des yeux et porte à 5 m ; `SetBlock.cmd = last_cmd()` ; aucune édition pendant la mort. Le vol libre local garde ses 20 m.
+- **Mort** : voile gris, « Mort par étouffement » ou « Mort dans le magma », bouton « Réapparaître » (`ClientMsg::Respawn`, grisé en attendant la réponse) ; `Respawned` enlève le voile.
+- **État tardif après une réapparition** (limite de 5.4, traitée) : à `Respawned`, le `Player` note le numéro de sa prochaine commande. Tant qu'aucun état n'acquitte une commande au moins aussi récente, il ignore les états (comptés « périmés »). Le serveur avait réapparu le joueur avant d'appliquer toute commande créée après la réception de `Respawned` : ces états-là viennent forcément d'après la réapparition. Test unitaire ajouté (`death_and_respawn_snap`).
+- `--fly` est inchangé : sans `Remote`, ni `walk` ni le champ de vision n'agissent, et `fly_input` déplace la caméra comme avant.
+- **Vérification en réseau** (serveur `--nogui` sur `out/server/world-42`, compte `c5test`, textures de l'auteur) : trois captures, caméra aux yeux sur l'herbe, au pied d'une marche de terre de 2 m, au-dessus d'une côte (≈ 350 m). Troncs, feuillage d'épicéa et sol sont visibles (le défaut vu à la fusion des textures, sol et troncs absents, ne se voit plus). Le serveur compte tous les pas avec leurs commandes, sans abus ni mort.
+  - `out/c5-final/walk-1.png` (nord), `walk-2.png` (sud, la côte), `walk-3.png` (est, vers le bas : herbe, troncs, terrasses).
+  - **Incident** : un lancement sur quatre s'est arrêté sur `DeviceLost` (Vulkan), suivi d'une panique de wgpu-hal dans le swapchain, avant la capture. Le même lancement, refait, est passé. Cause non établie (pilote ou GPU) ; à surveiller.
+
+Limites connues :
+- Le panneau F3 n'a plus la souris en mode connecté pendant le jeu (souris capturée) : ouvrir le menu (Échap) la libère.
+- Un client qui plante n'envoie pas `Bye` : le serveur garde le compte 30 s (« already connected ») et comble ses pas.
+- La vitesse de vol affichée (molette) n'est pas plafonnée à `fly_max_speed` ; la physique la plafonne.

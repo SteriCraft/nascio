@@ -710,7 +710,9 @@ pub fn column_visibility(
 // ---------------------------------------------------------------------------------------------
 // Camera
 
-/// Mouse look (right button held), WASD/ZQSD + Space/Shift, wheel for speed.
+/// Mouse look (right button held; captured for good in god mode, and connected while alive),
+/// WASD/ZQSD + Space/Shift, wheel for speed. Connected, the keys move the player instead
+/// ([`crate::player::walk`]) and the wheel sets its flight speed.
 #[allow(clippy::too_many_arguments)]
 pub fn fly_input(
     time: Res<Time<Real>>,
@@ -727,13 +729,16 @@ pub fn fly_input(
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
     chat: Res<crate::chat::ChatBox>,
     pause: Res<crate::pause::Pause>,
+    life: Res<crate::player::Life>,
 ) {
     if cam.scripted {
         return;
     }
-    // God mode captures the mouse for good (cross at the centre, right click places); the
-    // in-game menu frees it.
-    let looking = !pause.open && (god.on || (buttons.pressed(MouseButton::Right) && !ui.0));
+    // God mode captures the mouse for good (cross at the centre, right click places), and so
+    // does playing connected; the in-game menu, the chat and death free it.
+    let playing = remote.is_some() && life.playing() && !chat.open;
+    let looking =
+        !pause.open && (god.on || playing || (buttons.pressed(MouseButton::Right) && !ui.0));
     if let Ok(mut c) = cursor.single_mut() {
         let (grab, visible) = if looking {
             (CursorGrabMode::Locked, false)
@@ -759,8 +764,8 @@ pub fn fly_input(
         cam.speed = (cam.speed * 1.25f64.powf(notches)).clamp(SPEED_MIN, SPEED_MAX);
     }
 
-    if chat.open || pause.open {
-        // The keyboard writes in the chat, or the menu is open.
+    if chat.open || pause.open || remote.is_some() {
+        // The keyboard writes in the chat, or the menu is open; connected, it moves the player.
         return;
     }
     // Physical keys: KeyW is Z on an AZERTY keyboard.
@@ -1010,10 +1015,14 @@ pub fn hud(
                     cam.pos = WorldPos::new(x, ground + 60.0, z);
                 }
             }));
-            ui.small(format!(
-                "Right drag: look · WASD/ZQSD: move · Space/Shift: up/down · F3: this panel · Esc: menu{}",
-                info.seed.map_or(String::new(), |s| format!(" · seed {s}"))
-            ));
+            ui.small(if remote.is_some() {
+                "ZQSD: walk · Z twice: run · Space: jump · Shift: crouch · F: fly (administrators) · G: edit · F3: this panel · Esc: menu".to_owned()
+            } else {
+                format!(
+                    "Right drag: look · WASD/ZQSD: move · Space/Shift: up/down · F3: this panel · Esc: menu{}",
+                    info.seed.map_or(String::new(), |s| format!(" · seed {s}"))
+                )
+            });
         });
     hud.shown = shown;
     let ground = surface.as_ref().map_or(0.0, |s| s.0.max(0.0));

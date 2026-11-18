@@ -1,7 +1,9 @@
 //! God mode (future server tool): destroy and place blocks in the 3D view. In local flight,
 //! edits go to the world's [`DeltaStore`] (`world-<seed>/deltas/`, journal forced to the disk
 //! at each edit), and the touched columns are meshed again; connected, they go to the server
-//! and the ray reads the blocks it sent.
+//! and the ray reads the blocks it sent: it starts at the player's eyes and reaches 5 m (the
+//! server's reach), and each edit names the newest command the view includes (`cmd`), from
+//! which the server measures the reach.
 //!
 //! G toggles the mode. The mouse then turns the view (cursor captured) and a cross marks the
 //! centre of the screen: left click destroys the block under it, right click places the
@@ -20,7 +22,7 @@ use nascio_voxel::{ColumnCache, DeltaStore, Terrain};
 
 use crate::fly::{FlyCam, RenderOrigin, SharedDeltas, SharedTerrain, Streamer};
 
-/// Farthest block the cross reaches, m.
+/// Farthest block the cross reaches in local flight, m.
 const REACH: f64 = 20.0;
 /// Generated columns kept for block lookups.
 const CACHE: usize = 64;
@@ -93,6 +95,7 @@ impl God {
 fn raycast(
     start: [f64; 3],
     dir: [f64; 3],
+    reach: f64,
     mut solid: impl FnMut(BlockPos) -> bool,
 ) -> Option<(BlockPos, BlockPos)> {
     let mut cell = start.map(|v| v.floor() as i64);
@@ -115,7 +118,7 @@ fn raycast(
     let pos = |c: [i64; 3]| BlockPos::new(c[0] as i32, c[1] as i32, c[2] as i32);
     let mut prev = cell;
     let mut t = 0.0;
-    while t <= REACH {
+    while t <= reach {
         if solid(pos(cell)) {
             return Some((pos(cell), pos(prev)));
         }
@@ -189,12 +192,15 @@ pub fn god_input(
     let g = &mut *god;
     g.target = match (&remote, &terrain, &deltas) {
         // Connected: the blocks the server sent (a column not held stops nothing).
-        (Some(r), _, _) => raycast([p.x, p.y, p.z], cam.forward(), |q| {
-            r.block(q).is_some_and(|b| blocks.is_solid(b))
-        }),
+        (Some(r), _, _) => raycast(
+            [p.x, p.y, p.z],
+            cam.forward(),
+            crate::player::EDIT_REACH_M,
+            |q| r.block(q).is_some_and(|b| blocks.is_solid(b)),
+        ),
         (None, Some(t), Some(d)) => {
             let store = d.snapshot();
-            raycast([p.x, p.y, p.z], cam.forward(), |q| {
+            raycast([p.x, p.y, p.z], cam.forward(), REACH, |q| {
                 let b = g.block_at(&t.0, &store, q);
                 blocks.is_solid(b)
             })
@@ -221,12 +227,19 @@ pub fn god_input(
     };
     if let Some(remote) = remote {
         // Network mode: the server decides; its change comes back and the column is meshed
-        // again then.
-        // TODO(5.5): the number of the newest command sent, once the player is simulated.
+        // again then. It measures the reach from the eyes after the newest command the view
+        // includes. A dead player edits nothing.
+        let (dead, cmd) = {
+            let p = remote.lock_player();
+            (p.dead(), p.last_cmd())
+        };
+        if dead {
+            return;
+        }
         remote.send(nascio_protocol::messages::ClientMsg::SetBlock {
             pos: [q.x, q.y, q.z],
             block: id,
-            cmd: None,
+            cmd,
         });
         let refused = std::mem::take(&mut *remote.status.lock().unwrap_or_else(|e| e.into_inner()));
         god.status = if refused.is_empty() {

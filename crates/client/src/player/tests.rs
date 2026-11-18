@@ -233,7 +233,8 @@ fn death_and_respawn_snap() {
     for i in 1..=30 {
         c = p.update(ms(t0, i * 17), &fwd, &m).or(c);
     }
-    assert!(c.unwrap().inputs.iter().all(|i| i.keys == 0));
+    let c = c.unwrap();
+    assert!(c.inputs.iter().all(|i| i.keys == 0));
     assert_eq!(p.state().pos, [16.5, 32.0, 16.5]);
     p.on_msg(&ServerMsg::Respawned {
         pos: [40.5, 32.0, 40.5],
@@ -244,6 +245,23 @@ fn death_and_respawn_snap() {
         p.events(),
         vec![PlayerEvent::Respawned, PlayerEvent::Snapped]
     );
+    // A state sent before the respawn, arriving after it (datagrams overtake the control
+    // stream): ignored, the view stays at the respawn point.
+    let stale = p.stats().stale;
+    p.on_state(&state(2, Some(c.last), [16.5, 32.0, 16.5]), &m);
+    assert_eq!(p.display_pos(), [40.5, 32.0, 40.5]);
+    assert_eq!(p.stats().stale, stale + 1);
+    // A state acknowledging a command made after the respawn is taken.
+    let idle = Controls::default();
+    let mut after = None;
+    for i in 31..=40 {
+        after = p.update(ms(t0, i * 17), &idle, &m).or(after);
+    }
+    let newest = after.unwrap().last;
+    assert!(newest > c.last);
+    p.on_state(&state(3, Some(newest), [40.5, 32.0, 40.5]), &m);
+    assert_eq!(p.stats().stale, stale + 1);
+    assert_eq!(p.state().pos, [40.5, 32.0, 40.5]);
 }
 
 #[test]

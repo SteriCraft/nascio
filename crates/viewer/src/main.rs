@@ -1,7 +1,8 @@
 //! Nascio client and development viewer.
 //!
 //! It opens on a menu ("Se connecter", "Paramètres", "Quitter"); once connected to a server,
-//! the 3D view shows the columns it sends, with the chat (Enter), a debug panel (F3) and a menu (Esc). The
+//! the 3D view shows the columns it sends, with the player walking on them ([`player`]), the
+//! chat (Enter), a debug panel (F3) and a menu (Esc). The
 //! world map lives in the server's window. The account and the display settings are kept in
 //! `client-settings.toml` next to the executable ([`settings`]); the options of the command
 //! line override them for the session. `--fly` flies over a local world without a server (development: chunks
@@ -22,6 +23,7 @@ mod horizon;
 mod menu;
 mod pause;
 mod perf;
+mod player;
 mod remote;
 mod settings;
 mod sky;
@@ -347,6 +349,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     .insert_resource(saved)
     .init_resource::<chat::ChatBox>()
     .init_resource::<pause::Pause>()
+    .init_resource::<player::Life>()
     .insert_resource(cam)
     .insert_resource(settings)
     .insert_resource(
@@ -386,6 +389,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
                 god::god_ui,
                 fly::hud,
                 chat::chat_ui,
+                player::life_ui,
                 pause::pause_ui,
                 menu::disconnected_ui,
             )
@@ -400,12 +404,14 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             (
                 pause::pause_input,
                 fly::fly_input,
+                player::walk,
                 god::god_input,
                 remote::remote_sync,
                 fly::stream_chunks,
                 horizon::update_horizon,
                 fly::column_visibility,
                 fly::place_camera,
+                player::field_of_view,
                 remote::draw_players,
                 sky::update_sky_state,
                 sky::update_light_and_clear,
@@ -429,7 +435,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     .add_systems(Last, leave_on_exit.after(bevy::window::ExitSystems))
     .add_systems(
         OnEnter(Mode::Menu),
-        (menu::leave_game, remote::clear_players),
+        (menu::leave_game, remote::clear_players, player::reset_life),
     );
     if let Some(l) = local {
         app.insert_resource(fly::SharedTerrain(l.terrain.clone()))

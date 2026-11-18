@@ -9,7 +9,9 @@
 //! A thread runs the connection on its own tokio runtime and fills a [`Mirror`]; the columns
 //! that arrive or change (and their neighbours, whose borders they are) are queued for
 //! meshing again. The other players come as entity datagrams ([`Entities`], acknowledged at
-//! once) and are drawn as boxes at their interpolated positions (S5).
+//! once) and are drawn as boxes at their interpolated positions (S5). The player's own
+//! movement is predicted by a [`Player`] shared with the frame ([`crate::player`]): this thread
+//! gives it the server's states, death and respawn, and the round trip time (chantier 5.5).
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -19,21 +21,20 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, ensure};
 use bevy::prelude::{
     Assets, Color, Commands, Component, Cuboid, Entity, Handle, LinearRgba, Local, Mesh, Mesh3d,
-    MeshMaterial3d, Quat, Query, Res, ResMut, Resource, StandardMaterial, Time, Transform, Vec3,
+    MeshMaterial3d, Quat, Query, Res, ResMut, Resource, StandardMaterial, Transform, Vec3,
 };
 use nascio_chunk::horizon::{HorizonTile, TileKey};
 use nascio_chunk::{Blocks, ChunkMesh, mesh_chunk};
-use nascio_client::{Auth, Entities, Event, Mirror, connect_with};
+use nascio_client::{Auth, Entities, Event, Mirror, Player, connect_with};
 use nascio_core::consts::CHUNKS_PER_AXIS;
 use nascio_core::coords::{BlockPos, ChunkPos, WorldPos};
-use nascio_physics::Input;
-use nascio_protocol::entity::quantize_pitch;
+use nascio_physics::Shapes;
 use nascio_protocol::messages::Chat;
 use nascio_protocol::messages::{ClientMsg, ServerMsg};
 use nascio_protocol::player::Commands as PlayerCommands;
 use nascio_protocol::sky::WorldSky;
 
-use crate::fly::{FlyCam, RenderOrigin, Streamer};
+use crate::fly::{RenderOrigin, Streamer};
 
 /// What the Bevy side hands to the network thread.
 enum Out {
@@ -45,6 +46,8 @@ enum Out {
 #[derive(Resource, Clone)]
 pub struct Remote {
     pub mirror: Arc<Mutex<Mirror>>,
+    /// The player, predicted. Lock it before the mirror, never the other way.
+    player: Arc<Mutex<Player>>,
     out: tokio::sync::mpsc::UnboundedSender<Out>,
     dirty: Arc<Mutex<BTreeSet<(i32, i32)>>>,
     /// Last event worth showing (refused edit, closed connection).
@@ -152,6 +155,7 @@ impl Remote {
             [f64; 3],
             Arc<WorldSky>,
             Option<std::path::PathBuf>,
+            Arc<Mutex<Player>>,
         );
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<anyhow::Result<Ready>>();
         let (m, d, st, en) = (
@@ -180,8 +184,20 @@ impl Remote {
                     let spawn = c.hello.spawn;
                     let cache = cache_dir(&root, c.hello.generator_version, &c.hello.fingerprint);
                     let (radius, blocks) = (c.hello.chunk_radius_m, c.blocks.clone());
+                    let pl = Arc::new(Mutex::new(Player::new(
+                        &c.hello,
+                        Shapes::new(&c.blocks),
+                        Instant::now(),
+                    )));
                     let ready_with = |sky: WorldSky| -> anyhow::Result<Ready> {
-                        Ok((radius, blocks.clone(), spawn, Arc::new(sky), cache.clone()))
+                        Ok((
+                            radius,
+                            blocks.clone(),
+                            spawn,
+                            Arc::new(sky),
+                            cache.clone(),
+                            pl.clone(),
+                        ))
                     };
                     // The sky: from the disk cache, else asked (ready once it arrives).
                     let cached = cache.as_deref().and_then(|d| {
@@ -224,9 +240,26 @@ impl Remote {
                                     mark(cx, cz);
                                 }
                                 Some(Event::Msg(ServerMsg::Blocks { chunk, lsn, changes })) => {
-                                    lock(&m).blocks(chunk, lsn, changes);
+                                    let resends = {
+                                        let mut m = lock(&m);
+                                        m.blocks(chunk, lsn, changes);
+                                        m.take_resends()
+                                    };
+                                    // An edit below a column's chunks: the mirror forgot the
+                                    // column, the server sends it again.
+                                    for column in resends {
+                                        c.send(ClientMsg::Resend { column });
+                                    }
                                     mark(chunk[0], chunk[2]);
                                 }
+                                Some(Event::Player(s)) => {
+                                    let mut p = lock(&pl);
+                                    p.set_rtt(c.rtt());
+                                    p.on_state(&s, &lock(&m));
+                                }
+                                Some(Event::Msg(
+                                    msg @ (ServerMsg::Died { .. } | ServerMsg::Respawned { .. }),
+                                )) => lock(&pl).on_msg(&msg),
                                 Some(Event::Entities(bytes)) => {
                                     let now = epoch.elapsed().as_secs_f64();
                                     match lock(&en).receive(&bytes, now) {
@@ -263,8 +296,7 @@ impl Remote {
                                     lock(&cl).get_or_insert(reason);
                                     break;
                                 }
-                                // The player's state: used from chantier 5.5 on.
-                                Some(Event::Msg(_) | Event::Player(_)) => {}
+                                Some(Event::Msg(_)) => {}
                                 None => {
                                     if let Some(tx) = ready.take() {
                                         let _ = tx.send(Err(anyhow::anyhow!("connection lost")));
@@ -278,12 +310,13 @@ impl Remote {
                 });
             })?;
         // The sky may have to come first (about 400 KB once per world).
-        let (radius_m, blocks, spawn, sky, cache) = ready_rx
+        let (radius_m, blocks, spawn, sky, cache, player) = ready_rx
             .recv_timeout(Duration::from_secs(60))
             .context("no answer from the server")??;
         ensure!(radius_m >= 64, "server radius {radius_m} m too small");
         Ok(Self {
             mirror,
+            player,
             out,
             dirty,
             status,
@@ -341,6 +374,20 @@ impl Remote {
         let _ = self.out.send(Out::Msg(m));
     }
 
+    /// Sends the player's commands in a datagram.
+    pub fn send_commands(&self, c: PlayerCommands) {
+        let _ = self.out.send(Out::Commands(c));
+    }
+
+    /// The predicted player. Taken before [`Self::lock_mirror`] when both are needed.
+    pub fn lock_player(&self) -> std::sync::MutexGuard<'_, Player> {
+        lock(&self.player)
+    }
+
+    pub fn lock_mirror(&self) -> std::sync::MutexGuard<'_, Mirror> {
+        lock(&self.mirror)
+    }
+
     /// Leaves the server: tells it, and gives the message a moment to go out before the
     /// process ends.
     pub fn disconnect(&self) {
@@ -378,40 +425,15 @@ impl Remote {
     }
 }
 
-/// Columns that arrived or changed are meshed again; the camera's heading and pitch go to the
-/// server 20 times a second. Until chantier 5.5 the player stays where the server put it,
-/// which centres the columns sent.
-pub fn remote_sync(
-    remote: Option<Res<Remote>>,
-    mut streamer: ResMut<Streamer>,
-    cam: Res<FlyCam>,
-    time: Res<Time>,
-    mut since: Local<f32>,
-    mut next: Local<u32>,
-) {
+/// Columns that arrived or changed are meshed again. The player's commands go from
+/// [`crate::player::walk`].
+pub fn remote_sync(remote: Option<Res<Remote>>, mut streamer: ResMut<Streamer>) {
     let Some(remote) = remote else { return };
     let dirty: Vec<(i32, i32)> = std::mem::take(&mut *lock(&remote.dirty))
         .into_iter()
         .collect();
     if !dirty.is_empty() {
         streamer.request_remesh(dirty);
-    }
-    // Until the player is simulated (chantier 5.5): steps without keys, three every 50 ms,
-    // carrying the camera's heading and pitch for the other players.
-    *since += time.delta_secs();
-    if *since >= 0.05 {
-        *since = 0.0;
-        let step = Input {
-            keys: 0,
-            yaw: Input::quantize_yaw(cam.yaw),
-            fly_speed: 0,
-        };
-        *next += 3;
-        let _ = remote.out.send(Out::Commands(PlayerCommands {
-            last: *next - 1,
-            pitch: quantize_pitch(cam.pitch as f32),
-            inputs: vec![step; 3],
-        }));
     }
 }
 

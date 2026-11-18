@@ -1,7 +1,7 @@
 //! The client's settings, kept in `client-settings.toml` next to the executable: the account
 //! (name and secret, saved after a successful connection), the last server address, and the
 //! display settings of the "Paramètres" window (view distance, horizon, shadows, curvature,
-//! vsync, fullscreen, faintest star).
+//! vsync, fullscreen, faintest star) and of the game (automatic jump).
 //!
 //! The command line overrides them for the session without saving. Benchmarks and captures
 //! ignore the file (reproducible runs).
@@ -36,6 +36,8 @@ pub struct Saved {
     pub vsync: bool,
     pub fullscreen: bool,
     pub star_mag_limit: f64,
+    /// Jump by itself in front of a one-block step (off by default: author's decision).
+    pub auto_jump: bool,
 }
 
 impl Default for Saved {
@@ -54,6 +56,7 @@ impl Default for Saved {
             vsync: fly.vsync,
             fullscreen: false,
             star_mag_limit: fly.star_mag_limit,
+            auto_jump: false,
         }
     }
 }
@@ -206,6 +209,13 @@ pub fn settings_ui(ui: &mut egui::Ui, saved: &mut Saved) -> bool {
                     )
                     .step_by(0.1),
                 )
+                .changed();
+            ui.end_row();
+
+            ui.label("Saut automatique");
+            changed |= ui
+                .checkbox(&mut saved.auto_jump, "")
+                .on_hover_text("Saute seul devant une marche d'un bloc")
                 .changed();
             ui.end_row();
         });
