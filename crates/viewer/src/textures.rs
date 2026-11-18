@@ -24,7 +24,8 @@ pub const SPRUCE_GREEN: [u8; 3] = [56, 92, 50];
 
 /// Block name -> file stem, when they differ.
 const ALIASES: [(&str, &str); 1] = [("snow_layer", "snow")];
-/// Block name -> file stem of the bottom face.
+/// Block name -> file stem of the bottom face (besides: `<stem>_bottom`, then the top for
+/// trunks `*_log`, then `<stem>`).
 const BOTTOM: [(&str, &str); 2] = [("grass", "dirt"), ("podzol", "dirt")];
 
 /// Block textures loaded from a folder: the layers of the texture array (with their mips) and the
@@ -197,7 +198,14 @@ pub fn load(dir: &Path, blocks: &Blocks) -> Option<BlockTextureSet> {
             Some((_, s)) => (*s).to_string(),
             None => {
                 let b = format!("{stem}_bottom");
-                if exists(&b) { b } else { stem.to_string() }
+                if exists(&b) {
+                    b
+                } else if name.ends_with("_log") {
+                    // Tree trunks: the cut end on both ends.
+                    top_stem.clone()
+                } else {
+                    stem.to_string()
+                }
             }
         };
         let t = BlockTextures {
@@ -398,7 +406,7 @@ mod tests {
         let log = t("spruce_log");
         assert_eq!(layer_of(&set, log.top), "spruce_log_top");
         assert_eq!(layer_of(&set, log.side), "spruce_log");
-        assert_eq!(layer_of(&set, log.bottom), "spruce_log");
+        assert_eq!(layer_of(&set, log.bottom), "spruce_log_top");
 
         let snow = t("snow_layer");
         assert_eq!(layer_of(&set, snow.top), "snow");
