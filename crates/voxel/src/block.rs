@@ -1,17 +1,11 @@
-//! Block registry of a world (spec §5). Block ids are `u16`, assigned at generation and stored
-//! with the world (`blocks.toml`, see [`nascio_world::blocks`]); code refers to blocks by
-//! name. Colours are provisional until textures exist.
+//! Block registry of a world (spec §5) as the generator uses it: the block table of
+//! `nascio-chunk` (what meshing and the client read) plus the ids of the blocks the generator
+//! places. Block ids are `u16`, assigned at generation and stored with the world
+//! (`blocks.toml`); code refers to blocks by name.
 
-// Rendering only (colours, previews): platform maths is fine here.
-#![allow(clippy::disallowed_methods)]
-
-pub use nascio_world::blocks::{BlockDef, BlockRegistry, Matter};
-
-/// A block id.
-pub type BlockId = u16;
-
-/// Air is always id 0 (validated by the registry): empty chunks are all zeros.
-pub const AIR: BlockId = 0;
+pub use nascio_chunk::block::{
+    AIR, BUILTIN, BlockDef, BlockId, BlockRegistry, Matter, srgb_to_linear,
+};
 
 /// Ids of the rock-column blocks the generator places (resolved by name).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,20 +40,27 @@ pub struct ColumnIds {
     pub cactus: Option<BlockId>,
 }
 
-/// The registry with what meshing needs per id (matter, linear colour).
+/// The block table with the ids of the blocks the generator places. Dereferences to the
+/// table of `nascio-chunk` (meshing takes `&nascio_chunk::Blocks`).
 #[derive(Clone, Debug)]
 pub struct Blocks {
-    registry: BlockRegistry,
-    matter: Vec<Matter>,
-    linear: Vec<[f32; 3]>,
+    table: nascio_chunk::Blocks,
     pub ids: ColumnIds,
+}
+
+impl std::ops::Deref for Blocks {
+    type Target = nascio_chunk::Blocks;
+
+    fn deref(&self) -> &nascio_chunk::Blocks {
+        &self.table
+    }
 }
 
 impl Blocks {
     pub fn new(registry: BlockRegistry) -> anyhow::Result<Self> {
-        registry.validate()?;
+        let table = nascio_chunk::Blocks::new(registry)?;
         let id = |name: &str| {
-            registry
+            table
                 .id(name)
                 .ok_or_else(|| anyhow::anyhow!("block registry has no {name}"))
         };
@@ -84,25 +85,14 @@ impl Blocks {
             andesite: id("andesite")?,
             granulite: id("granulite")?,
             peridotite: id("peridotite")?,
-            ice: registry.id("ice"),
-            snow: registry.id("snow"),
-            snow_layer: registry.id("snow_layer"),
-            spruce_log: registry.id("spruce_log"),
-            spruce_leaves: registry.id("spruce_leaves"),
-            cactus: registry.id("cactus"),
+            ice: table.id("ice"),
+            snow: table.id("snow"),
+            snow_layer: table.id("snow_layer"),
+            spruce_log: table.id("spruce_log"),
+            spruce_leaves: table.id("spruce_leaves"),
+            cactus: table.id("cactus"),
         };
-        let matter = registry.blocks.iter().map(|b| b.matter).collect();
-        let linear = registry
-            .blocks
-            .iter()
-            .map(|b| b.color.map(|c| srgb_to_linear(f32::from(c) / 255.0)))
-            .collect();
-        Ok(Self {
-            registry,
-            matter,
-            linear,
-            ids,
-        })
+        Ok(Self { table, ids })
     }
 
     /// The rock-column blocks only.
@@ -110,58 +100,9 @@ impl Blocks {
         Self::new(BlockRegistry::builtin()).expect("valid built-in registry")
     }
 
-    pub fn registry(&self) -> &BlockRegistry {
-        &self.registry
-    }
-
-    pub fn len(&self) -> usize {
-        self.matter.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.matter.is_empty()
-    }
-
-    /// Definition of an id (unknown ids panic: the registry is closed).
-    pub fn def(&self, id: BlockId) -> &BlockDef {
-        &self.registry.blocks[usize::from(id)]
-    }
-
-    /// Id of a block name.
-    pub fn id(&self, name: &str) -> Option<BlockId> {
-        self.registry.id(name)
-    }
-
-    #[inline]
-    pub fn matter(&self, id: BlockId) -> Matter {
-        self.matter[usize::from(id)]
-    }
-
-    #[inline]
-    pub fn is_solid(&self, id: BlockId) -> bool {
-        self.matter(id) == Matter::Solid
-    }
-
-    /// Whether a block is foliage (tagged for the shader: its sides stay green under the
-    /// seasonal snow).
-    #[inline]
-    pub fn is_foliage(&self, id: BlockId) -> bool {
-        self.ids.spruce_leaves == Some(id)
-    }
-
-    /// Linear-light RGB of a block colour (for vertex colours).
-    #[inline]
-    pub fn linear(&self, id: BlockId) -> [f32; 3] {
-        self.linear[usize::from(id)]
-    }
-}
-
-/// sRGB transfer function, inverse.
-pub fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.040_45 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
+    /// The table alone (what the client receives).
+    pub fn table(&self) -> &nascio_chunk::Blocks {
+        &self.table
     }
 }
 
@@ -177,7 +118,7 @@ mod tests {
         assert!(b.is_solid(b.ids.granite) && !b.is_solid(b.ids.water) && !b.is_solid(AIR));
         assert_eq!(b.matter(b.ids.water), Matter::Fluid);
         let cat = nascio_world::deposits::Catalog::default_catalog();
-        let full = Blocks::new(BlockRegistry::with_catalog(&cat).unwrap()).unwrap();
+        let full = Blocks::new(nascio_world::blocks::registry_with_catalog(&cat).unwrap()).unwrap();
         assert_eq!(full.ids, b.ids);
         assert!(full.len() > b.len());
     }

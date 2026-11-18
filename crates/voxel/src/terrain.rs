@@ -22,6 +22,7 @@ use crate::climate::{ColumnClimate, SurfaceClimate};
 use crate::geology::{Class, ColumnGeo, Geology, RockNoise};
 use crate::rivers::{Gauge, RiverHit, RiverParams, Rivers};
 use crate::vegetation::{BiomePlants, Part, Plant, PlantKind, cell_draw, default_vegetation};
+pub use nascio_chunk::ChunkTint;
 use nascio_core::consts::WORLD_SIZE;
 use nascio_world::erosion::flow::NO_DIR;
 use rayon::prelude::*;
@@ -362,37 +363,6 @@ pub struct Terrain {
     plant_salt: u64,
     /// Noise of the sea and lake freezing threshold.
     ice_noise: nascio_world::noise::Fbm,
-}
-
-/// Grass tint of the four corners of a chunk column, for meshing: bilinear inside the chunk,
-/// so neighbouring chunks share their edge colours.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ChunkTint {
-    /// The tinted block (grass), `None`: no tint.
-    pub grass: Option<BlockId>,
-    /// Linear RGB at local `(0, 0)`, `(32, 0)`, `(0, 32)`, `(32, 32)`.
-    pub corners: [[f32; 3]; 4],
-    /// Water depth (blocks) of each local column, `x + 32 z`; 255: deep or unknown.
-    pub water_depth: [u8; 1024],
-}
-
-impl ChunkTint {
-    pub const NONE: Self = Self {
-        grass: None,
-        corners: [[1.0; 3]; 4],
-        water_depth: [u8::MAX; 1024],
-    };
-
-    /// Colour at local horizontal position `(x, z)` in `[0, 32]`.
-    pub fn at(&self, x: f32, z: f32) -> [f32; 3] {
-        let (u, v) = (x / 32.0, z / 32.0);
-        let c = &self.corners;
-        std::array::from_fn(|k| {
-            let a = c[0][k] + (c[1][k] - c[0][k]) * u;
-            let b = c[2][k] + (c[3][k] - c[2][k]) * u;
-            a + (b - a) * v
-        })
-    }
 }
 
 fn smoothstep(e0: f64, e1: f64, x: f64) -> f64 {
@@ -1112,7 +1082,7 @@ pub(crate) mod tests {
                 ),
             ];
         let catalog = nascio_world::deposits::Catalog::default_catalog();
-        let registry = nascio_world::blocks::BlockRegistry::with_catalog(&catalog).unwrap();
+        let registry = nascio_world::blocks::registry_with_catalog(&catalog).unwrap();
         let mut files = std::collections::BTreeMap::new();
         files.insert(
             "deposits.toml".to_string(),

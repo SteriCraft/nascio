@@ -1,7 +1,6 @@
 //! The generation pipeline: tectonics (M1), erosion (M3), then climate, final hydrology and
 //! biomes (M4).
 
-use crate::blocks::BlockRegistry;
 use crate::climate::{self, ClimateOutput};
 use crate::config::WorldConfig;
 use crate::deposits::{self, Catalog, DepositsOutput};
@@ -54,7 +53,7 @@ pub fn generate_full_with(
     progress: &Progress,
 ) -> anyhow::Result<Generated> {
     cfg.validate()?;
-    let registry = BlockRegistry::with_catalog(catalog)?;
+    let registry = nascio_world::blocks::registry_with_catalog(catalog)?;
     progress.begin(Stage::Tectonics);
     let target = cfg.tectonics.continental_fraction;
     let mut initial = target;

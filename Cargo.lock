@@ -4388,6 +4388,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nascio-chunk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "nascio-core",
+ "proptest",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "nascio-client"
 version = "0.1.0"
 dependencies = [
@@ -4491,6 +4502,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "nascio-chunk",
  "nascio-core",
  "nascio-world",
  "nascio-worldgen",
@@ -4506,6 +4518,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "nascio-chunk",
  "nascio-core",
  "proptest",
  "rand",

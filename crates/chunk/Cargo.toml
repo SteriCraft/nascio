@@ -1,0 +1,22 @@
+[package]
+name = "nascio-chunk"
+description = "Nascio chunk types without generation: block table, 32^3 chunks, grass tint, meshing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+# Kept minimal on purpose: the client depends on this crate, never on the generation crates
+# (invariant 5). `crates/client/tests/no_generation.rs` checks the dependency tree.
+[dependencies]
+nascio-core.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
