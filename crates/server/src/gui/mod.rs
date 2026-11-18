@@ -255,53 +255,55 @@ fn ui(
 
 /// The console: its lines, and a line to type commands (Enter runs it, arrows recall).
 fn console(ui: &mut egui::Ui, gui: &mut Gui) {
-    // The lines on top (they take what the line to type leaves), the line below. Not a
-    // bottom-up layout: the scroll area would lay its rows from the bottom of its content
-    // and show them far from where the offset says.
-    let input_h = ui.spacing().interact_size.y + 3.0 * ui.spacing().item_spacing.y + 2.0;
-    let height = (ui.available_height() - input_h).max(24.0);
-    let row = ui.text_style_height(&egui::TextStyle::Monospace);
-    egui::ScrollArea::vertical()
-        .auto_shrink(false)
-        .max_height(height)
-        .stick_to_bottom(true)
-        .show_rows(ui, row, gui.lines.len(), |ui, range| {
-            for l in gui.lines.range(range) {
-                ui.monospace(l);
+    // The line to type at the bottom (the panel's height is the user's), the lines above. The
+    // scroll area is in a top-down layout of its own: in a bottom-up one, it would lay its
+    // rows from the bottom of its content and show them far from where the offset says.
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+        ui.add_space(4.0);
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut gui.input)
+                .font(egui::TextStyle::Monospace)
+                .hint_text("commande (help pour la liste, message <texte> pour écrire à tous)")
+                .desired_width(f32::INFINITY),
+        );
+        if edit.has_focus() {
+            let (up, down) = ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown),
+                )
+            });
+            if up && gui.history_at > 0 {
+                gui.history_at -= 1;
+                gui.input = gui.history[gui.history_at].clone();
             }
+            if down && gui.history_at < gui.history.len() {
+                gui.history_at += 1;
+                gui.input = gui.history.get(gui.history_at).cloned().unwrap_or_default();
+            }
+        }
+        if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let line = std::mem::take(&mut gui.input);
+            if !line.trim().is_empty() {
+                gui.history.push(line.clone());
+                gui.history_at = gui.history.len();
+                gui.command(line);
+            }
+            edit.request_focus();
+        }
+        ui.separator();
+        let row = ui.text_style_height(&egui::TextStyle::Monospace);
+        ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink(false)
+                .stick_to_bottom(true)
+                .show_rows(ui, row, gui.lines.len(), |ui, range| {
+                    for l in gui.lines.range(range) {
+                        ui.monospace(l);
+                    }
+                });
         });
-    ui.separator();
-    let edit = ui.add(
-        egui::TextEdit::singleline(&mut gui.input)
-            .font(egui::TextStyle::Monospace)
-            .hint_text("commande (help pour la liste, message <texte> pour écrire à tous)")
-            .desired_width(f32::INFINITY),
-    );
-    if edit.has_focus() {
-        let (up, down) = ui.input(|i| {
-            (
-                i.key_pressed(egui::Key::ArrowUp),
-                i.key_pressed(egui::Key::ArrowDown),
-            )
-        });
-        if up && gui.history_at > 0 {
-            gui.history_at -= 1;
-            gui.input = gui.history[gui.history_at].clone();
-        }
-        if down && gui.history_at < gui.history.len() {
-            gui.history_at += 1;
-            gui.input = gui.history.get(gui.history_at).cloned().unwrap_or_default();
-        }
-    }
-    if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-        let line = std::mem::take(&mut gui.input);
-        if !line.trim().is_empty() {
-            gui.history.push(line.clone());
-            gui.history_at = gui.history.len();
-            gui.command(line);
-        }
-        edit.request_focus();
-    }
+    });
 }
 
 /// The right section: measurements on top, the players online below.
