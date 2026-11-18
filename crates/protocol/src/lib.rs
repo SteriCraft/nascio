@@ -2,8 +2,8 @@
 //!
 //! Pure data, no networking: the chunk codec v2 and column batches ([`chunk`]), framed
 //! control messages ([`messages`], [`frame`]), quantized entity states ([`entity`]), horizon
-//! tiles ([`horizon`]), the sky and far ground ([`sky`]) and the clock offset estimate of the
-//! client ([`clock`]). The transport (QUIC) lives in the server and the client.
+//! tiles ([`horizon`]), the sky and far ground ([`sky`]), the player's commands and state
+//! ([`player`]) and the clock offset estimate of the client ([`clock`]). The transport (QUIC) lives in the server and the client.
 
 pub mod chunk;
 pub mod clock;
@@ -12,6 +12,7 @@ pub mod entity;
 pub mod frame;
 pub mod horizon;
 pub mod messages;
+pub mod player;
 pub mod sky;
 pub mod varint;
 
@@ -19,11 +20,13 @@ pub mod varint;
 /// increments it. v5: the block table (definitions, not only names) in `ServerHello`. v6: `ClientHello.auth`, a
 /// secret or a token signed by the site. v7: chat (`ClientMsg::Chat`, `ServerMsg::Chat`). v8: horizon
 /// tiles and `WorldSky` ([`ClientMsg::Tiles`], [`ClientMsg::Sky`]), a [`UniKind`] byte before
-/// every unidirectional stream.
+/// every unidirectional stream. v9: authoritative movement: numbered commands and the player's
+/// state in datagrams ([`player`]), a [`ServerDatagram`] or [`ClientDatagram`] byte before every
+/// datagram, `PlayerParams` in `ServerHello`; `Move` and `Correct` removed.
 ///
 /// [`ClientMsg::Tiles`]: messages::ClientMsg::Tiles
 /// [`ClientMsg::Sky`]: messages::ClientMsg::Sky
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// First byte of a unidirectional stream from the server: what follows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,4 +49,32 @@ impl UniKind {
             _ => None,
         }
     }
+}
+
+/// First byte of a datagram from the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ServerDatagram {
+    /// Entity states ([`entity`]).
+    Entities = 0,
+    /// The player's own state ([`player::PlayerState`]).
+    PlayerState = 1,
+}
+
+impl ServerDatagram {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Entities),
+            1 => Some(Self::PlayerState),
+            _ => None,
+        }
+    }
+}
+
+/// First byte of a datagram from the client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ClientDatagram {
+    /// Numbered commands ([`player::Commands`]).
+    Input = 0,
 }

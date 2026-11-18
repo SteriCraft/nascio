@@ -37,9 +37,7 @@ impl QState {
         let q = |v: f64| (v * STEPS_PER_M as f64).round() as i64;
         let turn = std::f64::consts::TAU;
         let yaw = (f64::from(yaw).rem_euclid(turn) / turn * 65_536.0).round() as i64;
-        let half = std::f64::consts::FRAC_PI_2;
-        let pitch = ((f64::from(pitch).clamp(-half, half) + half) / std::f64::consts::PI * 255.0)
-            .round() as u8;
+        let pitch = quantize_pitch(pitch);
         Self {
             pos: [
                 q(pos[0]).rem_euclid(PERIOD),
@@ -61,8 +59,19 @@ impl QState {
     }
 
     pub fn pitch(&self) -> f32 {
-        (f64::from(self.pitch) / 255.0 * std::f64::consts::PI - std::f64::consts::FRAC_PI_2) as f32
+        pitch_radians(self.pitch)
     }
+}
+
+/// Pitch in radians (`[-π/2, π/2]`, clamped) to 1/255 of a half turn.
+pub fn quantize_pitch(radians: f32) -> u8 {
+    let half = std::f64::consts::FRAC_PI_2;
+    ((f64::from(radians).clamp(-half, half) + half) / std::f64::consts::PI * 255.0).round() as u8
+}
+
+/// Inverse of [`quantize_pitch`].
+pub fn pitch_radians(q: u8) -> f32 {
+    (f64::from(q) / 255.0 * std::f64::consts::PI - std::f64::consts::FRAC_PI_2) as f32
 }
 
 /// Shortest signed difference of two wrapped quantized coordinates (`b − a` on the torus):
@@ -97,7 +106,7 @@ const FULL: u64 = 0;
 const DELTA: u64 = 1;
 const REMOVED: u64 = 2;
 
-/// Builds a datagram: a header, then entries until the end of the datagram.
+/// Builds a datagram: a header (kind, `seq`, tick), then entries until the end of the datagram.
 #[derive(Clone, Debug)]
 pub struct Writer {
     seq: u32,
@@ -108,6 +117,7 @@ pub struct Writer {
 impl Writer {
     pub fn new(seq: u32, tick: u32) -> Self {
         let mut out = Vec::with_capacity(256);
+        out.push(crate::ServerDatagram::Entities as u8);
         put(&mut out, u64::from(seq));
         put(&mut out, u64::from(tick));
         Self {
@@ -175,6 +185,11 @@ pub fn decode(
     baseline: impl Fn(u32, u32) -> Option<QState>,
 ) -> anyhow::Result<Snapshot> {
     let mut r = Reader::new(bytes);
+    let kind = r.u8()?;
+    ensure!(
+        kind == crate::ServerDatagram::Entities as u8,
+        "not an entity datagram ({kind})"
+    );
     let seq = r.var_max(u64::from(u32::MAX))? as u32;
     let tick = r.var_max(u64::from(u32::MAX))? as u32;
     let mut snap = Snapshot {
@@ -270,7 +285,7 @@ mod tests {
         let b = QState::quantize([0.2, 64.1, 99_999.95], 0.12, 0.01);
         let now: BTreeMap<u32, QState> = [(7, b)].into();
         let bytes = encode(12, 30, &now, |_| Some((11, a)), &[]);
-        assert!(bytes.len() <= 2 + 8, "{} bytes", bytes.len());
+        assert!(bytes.len() <= 3 + 8, "{} bytes", bytes.len());
         let back = decode(&bytes, |q, id| (q == 11 && id == 7).then_some(a)).unwrap();
         assert_eq!((back.seq, back.tick), (12, 30));
         assert_eq!(back.states, now);

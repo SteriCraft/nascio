@@ -23,7 +23,10 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use nascio_client::{Auth, Entities, Event, connect_with};
 use nascio_core::torus;
+use nascio_physics::{Input, keys};
+use nascio_protocol::entity::quantize_pitch;
 use nascio_protocol::messages::{ClientMsg, ServerMsg};
+use nascio_protocol::player::Commands;
 use nascio_server::net::unix_ms;
 use nascio_server::token::{MAX_TTL_MS, SiteKey};
 
@@ -79,9 +82,6 @@ impl Lcg {
     }
 }
 
-/// Speed at which a bot walks from the spawn to its place, m/s (below the server's limit).
-const APPROACH_M_S: f64 = 80.0;
-
 /// Counters of one bot (shared with the reporter).
 #[derive(Default)]
 struct Counters {
@@ -93,7 +93,8 @@ struct Counters {
     edits: AtomicU64,
     refused: AtomicU64,
     errors: AtomicU64,
-    corrected: AtomicU64,
+    /// Authoritative states of the bot received.
+    states: AtomicU64,
 }
 
 #[tokio::main]
@@ -211,7 +212,7 @@ async fn main() -> anyhow::Result<()> {
         println!("bots seeing no entity: {}", blind.join(", "));
     }
     println!(
-        "entities seen per bot: min {}, mean {:.0}, max {}; columns received in all {}; edits {} (refused {}); corrections {}; errors {}",
+        "entities seen per bot: min {}, mean {:.0}, max {}; columns received in all {}; edits {} (refused {}); player states {}; errors {}",
         seen.iter().min().unwrap_or(&0),
         seen.iter().sum::<usize>() as f64 / n,
         seen.iter().max().unwrap_or(&0),
@@ -226,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
             .sum::<u64>(),
         counters
             .iter()
-            .map(|c| c.corrected.load(Ordering::Relaxed))
+            .map(|c| c.states.load(Ordering::Relaxed))
             .sum::<u64>(),
         counters
             .iter()
@@ -269,9 +270,10 @@ async fn bot(
     let edit_every = cli.bots as f64 / cli.edits.max(1e-9);
     let mut next_edit = rng.next() * edit_every;
     let mut placed = false;
-    // Where the server has the bot: it starts at the spawn and walks to its place in the
-    // disc below the server's speed limit (no teleport), and follows `Correct`.
+    // Where the server has the bot (its last state): it starts at the spawn and walks
+    // towards a goal wandering in the disc.
     let mut at = conn.hello.spawn;
+    let mut last_command: Option<u32> = None;
     let mut every = tokio::time::interval(Duration::from_millis(50));
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     while Instant::now() < until {
@@ -289,22 +291,18 @@ async fn bot(
                     centre[1],
                     torus::wrap_f64(centre[2] + off[1]),
                 ];
-                let d = [
-                    torus::delta_f64(at[0], goal[0]),
-                    goal[1] - at[1],
-                    torus::delta_f64(at[2], goal[2]),
-                ];
-                let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                let step = (APPROACH_M_S * 0.05).min(len);
-                if len > 0.0 {
-                    at = [
-                        torus::wrap_f64(at[0] + d[0] / len * step),
-                        at[1] + d[1] / len * step,
-                        torus::wrap_f64(at[2] + d[2] / len * step),
-                    ];
-                }
+                let d = [torus::delta_f64(at[0], goal[0]), torus::delta_f64(at[2], goal[2])];
+                // Three steps towards the goal (heading from north towards east), jumping
+                // over what stands in the way; the server moves the bot (chantier 5.3).
+                let step = Input {
+                    keys: if d[0].hypot(d[1]) > 1.0 { keys::FORWARD | keys::JUMP } else { 0 },
+                    yaw: Input::quantize_yaw(d[0].atan2(-d[1])),
+                    fly_speed: 0,
+                };
+                let last = last_command.map_or(2, |n| n + 3);
+                last_command = Some(last);
+                conn.send_commands(&Commands { last, pitch: quantize_pitch(0.0), inputs: vec![step; 3] });
                 let pos = at;
-                conn.send(ClientMsg::Move { pos, yaw: heading as f32, pitch: 0.0 });
                 let t = begin.elapsed().as_secs_f64();
                 if t >= next_edit && t > 5.0 {
                     next_edit += edit_every;
@@ -330,9 +328,9 @@ async fn bot(
                     }
                     c.seen.store(ents.len(), Ordering::Relaxed);
                 }
-                Some(Event::Msg(ServerMsg::Correct { pos })) => {
-                    at = pos;
-                    c.corrected.fetch_add(1, Ordering::Relaxed);
+                Some(Event::Player(p)) => {
+                    at = p.state.pos;
+                    c.states.fetch_add(1, Ordering::Relaxed);
                 }
                 Some(Event::Msg(ServerMsg::EditRefused { .. })) => {
                     c.refused.fetch_add(1, Ordering::Relaxed);

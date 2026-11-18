@@ -26,24 +26,31 @@ use nascio_chunk::{Blocks, ChunkMesh, mesh_chunk};
 use nascio_client::{Auth, Entities, Event, Mirror, connect_with};
 use nascio_core::consts::CHUNKS_PER_AXIS;
 use nascio_core::coords::{BlockPos, ChunkPos, WorldPos};
+use nascio_physics::Input;
+use nascio_protocol::entity::quantize_pitch;
 use nascio_protocol::messages::Chat;
 use nascio_protocol::messages::{ClientMsg, ServerMsg};
+use nascio_protocol::player::Commands as PlayerCommands;
 use nascio_protocol::sky::WorldSky;
 
 use crate::fly::{FlyCam, RenderOrigin, Streamer};
+
+/// What the Bevy side hands to the network thread.
+enum Out {
+    Msg(ClientMsg),
+    Commands(PlayerCommands),
+}
 
 /// The connection, shared with the workers.
 #[derive(Resource, Clone)]
 pub struct Remote {
     pub mirror: Arc<Mutex<Mirror>>,
-    out: tokio::sync::mpsc::UnboundedSender<ClientMsg>,
+    out: tokio::sync::mpsc::UnboundedSender<Out>,
     dirty: Arc<Mutex<BTreeSet<(i32, i32)>>>,
     /// Last event worth showing (refused edit, closed connection).
     pub status: Arc<Mutex<String>>,
     /// The other players, and the local time base of their samples.
     pub entities: Arc<Mutex<Entities>>,
-    /// Position the server put the camera back to (refused move).
-    correction: Arc<Mutex<Option<[f64; 3]>>>,
     /// Chat lines received and not yet shown.
     pub chat: Arc<Mutex<Vec<Chat>>>,
     /// Why the connection ended (`None` while it lives).
@@ -133,12 +140,11 @@ impl Remote {
         let dirty = Arc::new(Mutex::new(BTreeSet::new()));
         let status = Arc::new(Mutex::new(String::new()));
         let entities = Arc::new(Mutex::new(Entities::new(0.05)));
-        let correction = Arc::new(Mutex::new(None));
         let chat = Arc::new(Mutex::new(Vec::new()));
         let closed = Arc::new(Mutex::new(None));
         let name = name.to_owned();
         let epoch = Instant::now();
-        let (out, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<ClientMsg>();
+        let (out, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
         let tiles = Arc::new(Mutex::new(Vec::new()));
         type Ready = (
             u32,
@@ -154,7 +160,6 @@ impl Remote {
             status.clone(),
             entities.clone(),
         );
-        let co = correction.clone();
         let (ch, cl, ti) = (chat.clone(), closed.clone(), tiles.clone());
         std::thread::Builder::new()
             .name("network".into())
@@ -192,11 +197,6 @@ impl Remote {
                         }
                         None => c.send(ClientMsg::Sky),
                     }
-                    c.send(ClientMsg::Move {
-                        pos: spawn,
-                        yaw: 0.0,
-                        pitch: 0.0,
-                    });
                     let mark = |cx: i32, cz: i32| {
                         let mut d = lock(&d);
                         for dz in -1..=1 {
@@ -213,8 +213,9 @@ impl Remote {
                             Some(msg) = out_rx.recv() => match msg {
                                 // Leaving: the connection is closed, so the server sees the
                                 // player go at once (not after its 30 s idle timeout).
-                                ClientMsg::Bye => c.close(),
-                                msg => c.send(msg),
+                                Out::Msg(ClientMsg::Bye) => c.close(),
+                                Out::Msg(msg) => c.send(msg),
+                                Out::Commands(cmds) => c.send_commands(&cmds),
                             },
                             ev = c.events.recv() => match ev {
                                 Some(Event::Column(col)) => {
@@ -232,10 +233,6 @@ impl Remote {
                                         Ok(seq) => c.send(ClientMsg::Ack { seqs: vec![seq] }),
                                         Err(e) => *lock(&st) = format!("entities: {e:#}"),
                                     }
-                                }
-                                Some(Event::Msg(ServerMsg::Correct { pos })) => {
-                                    *lock(&co) = Some(pos);
-                                    *lock(&st) = "move refused: too fast".into();
                                 }
                                 Some(Event::Msg(ServerMsg::Forget { columns })) => {
                                     lock(&m).forget(&columns);
@@ -266,7 +263,8 @@ impl Remote {
                                     lock(&cl).get_or_insert(reason);
                                     break;
                                 }
-                                Some(Event::Msg(_)) => {}
+                                // The player's state: used from chantier 5.5 on.
+                                Some(Event::Msg(_) | Event::Player(_)) => {}
                                 None => {
                                     if let Some(tx) = ready.take() {
                                         let _ = tx.send(Err(anyhow::anyhow!("connection lost")));
@@ -290,7 +288,6 @@ impl Remote {
             dirty,
             status,
             entities,
-            correction,
             chat,
             closed,
             spawn,
@@ -341,7 +338,7 @@ impl Remote {
     }
 
     pub fn send(&self, m: ClientMsg) {
-        let _ = self.out.send(m);
+        let _ = self.out.send(Out::Msg(m));
     }
 
     /// Leaves the server: tells it, and gives the message a moment to go out before the
@@ -381,14 +378,16 @@ impl Remote {
     }
 }
 
-/// Columns that arrived or changed are meshed again; the camera position goes to the server
-/// 20 times a second (it centres the columns sent and is what the others see).
+/// Columns that arrived or changed are meshed again; the camera's heading and pitch go to the
+/// server 20 times a second. Until chantier 5.5 the player stays where the server put it,
+/// which centres the columns sent.
 pub fn remote_sync(
     remote: Option<Res<Remote>>,
     mut streamer: ResMut<Streamer>,
-    mut cam: ResMut<FlyCam>,
+    cam: Res<FlyCam>,
     time: Res<Time>,
     mut since: Local<f32>,
+    mut next: Local<u32>,
 ) {
     let Some(remote) = remote else { return };
     let dirty: Vec<(i32, i32)> = std::mem::take(&mut *lock(&remote.dirty))
@@ -397,17 +396,22 @@ pub fn remote_sync(
     if !dirty.is_empty() {
         streamer.request_remesh(dirty);
     }
-    if let Some(p) = lock(&remote.correction).take() {
-        cam.pos = WorldPos::new(p[0], p[1], p[2]);
-    }
+    // Until the player is simulated (chantier 5.5): steps without keys, three every 50 ms,
+    // carrying the camera's heading and pitch for the other players.
     *since += time.delta_secs();
     if *since >= 0.05 {
         *since = 0.0;
-        remote.send(ClientMsg::Move {
-            pos: [cam.pos.x, cam.pos.y, cam.pos.z],
-            yaw: cam.yaw as f32,
-            pitch: cam.pitch as f32,
-        });
+        let step = Input {
+            keys: 0,
+            yaw: Input::quantize_yaw(cam.yaw),
+            fly_speed: 0,
+        };
+        *next += 3;
+        let _ = remote.out.send(Out::Commands(PlayerCommands {
+            last: *next - 1,
+            pitch: quantize_pitch(cam.pitch as f32),
+            inputs: vec![step; 3],
+        }));
     }
 }
 

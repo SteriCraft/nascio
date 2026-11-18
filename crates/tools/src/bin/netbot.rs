@@ -1,8 +1,8 @@
 //! Headless bots against a running server: each connects, receives the columns around the
 //! spawn and reports when it holds all of them. The seed of the load test (S6).
 //!
-//! With `--walk x,y,z`, the bots then walk in circles around that point for `--hold`
-//! seconds (positions sent at 20 Hz), to be seen in the viewer (`--connect`).
+//! With `--walk`, the bots then walk in circles from their spawn for `--hold` seconds
+//! (commands sent at 20 Hz, moved by the server), to be seen in the viewer (`--connect`).
 //!
 //! ```text
 //! cargo run -p nascio-server --release -- out/m7/world-42 --bind 127.0.0.1:7777 --open-registration
@@ -14,8 +14,10 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use nascio_client::{Event, Mirror, connect};
-use nascio_core::torus;
-use nascio_protocol::messages::{ClientMsg, ServerMsg};
+use nascio_physics::{Input, keys};
+use nascio_protocol::entity::quantize_pitch;
+use nascio_protocol::messages::ServerMsg;
+use nascio_protocol::player::Commands;
 
 #[derive(Parser)]
 #[command(name = "netbot", about = "Nascio headless bots")]
@@ -28,9 +30,9 @@ struct Cli {
     /// Give up after this many seconds.
     #[arg(long, default_value_t = 120.0)]
     timeout: f64,
-    /// Walk in circles around this point (world metres) once the columns are in.
-    #[arg(long, value_delimiter = ',')]
-    walk: Option<Vec<f64>>,
+    /// Walk in circles once the columns are in.
+    #[arg(long)]
+    walk: bool,
     /// Seconds of walking.
     #[arg(long, default_value_t = 60.0)]
     hold: f64,
@@ -45,15 +47,11 @@ async fn main() -> anyhow::Result<()> {
             cli.cert.display()
         )
     })?;
-    anyhow::ensure!(
-        cli.walk.as_ref().is_none_or(|w| w.len() == 3),
-        "--walk takes x,y,z"
-    );
     let mut tasks = Vec::new();
     for k in 0..cli.bots {
         let cert = cert.clone();
         let timeout = cli.timeout;
-        let (walk, hold) = (cli.walk.clone(), cli.hold);
+        let (walk, hold) = (cli.walk, cli.hold);
         tasks.push(tokio::spawn(async move {
             let start = Instant::now();
             let mut c = connect(cli.addr, &cert, &format!("bot{k}"), "netbot-dev-secret").await?;
@@ -84,23 +82,31 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             let t = start.elapsed();
-            if let Some(w) = walk {
-                // Bot k: radius 4 + 3k m, one turn in 10 s, alternate directions.
-                let (radius, sense) = (4.0 + 3.0 * k as f64, if k % 2 == 0 { 1.0 } else { -1.0 });
+            if walk {
+                // One turn in 10 s, alternate directions (a circle of about 7 m at walking
+                // speed, from where the server has the bot).
+                let sense = if k % 2 == 0 { 1.0 } else { -1.0 };
+                // Walks along the tangent, three steps every 50 ms; the server moves it
+                // (chantier 5.3).
                 let begin = Instant::now();
                 let mut every = tokio::time::interval(Duration::from_millis(50));
+                let mut last = 2u32;
                 while begin.elapsed().as_secs_f64() < hold {
                     every.tick().await;
                     let a = sense * begin.elapsed().as_secs_f64() * std::f64::consts::TAU / 10.0;
-                    c.send(ClientMsg::Move {
-                        pos: [
-                            torus::wrap_f64(w[0] + radius * a.cos()),
-                            w[1],
-                            torus::wrap_f64(w[2] + radius * a.sin()),
-                        ],
-                        yaw: (a + sense * std::f64::consts::FRAC_PI_2) as f32,
-                        pitch: 0.0,
+                    // Direction of motion on the circle, as (dx, dz).
+                    let dir = [-sense * a.sin(), sense * a.cos()];
+                    let step = Input {
+                        keys: keys::FORWARD,
+                        yaw: Input::quantize_yaw(dir[0].atan2(-dir[1])),
+                        fly_speed: 0,
+                    };
+                    c.send_commands(&Commands {
+                        last,
+                        pitch: quantize_pitch(0.0),
+                        inputs: vec![step; 3],
                     });
+                    last += 3;
                     while c.events.try_recv().is_ok() {}
                 }
             }

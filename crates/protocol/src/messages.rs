@@ -1,10 +1,11 @@
 //! Control messages (reliable, ordered stream), serialized with `postcard` and framed by
-//! [`crate::frame`].
+//! [`crate::frame`]. The player's movement goes in datagrams ([`crate::player`]).
 //!
 //! Positions of blocks are world block coordinates; the server wraps them on the torus
 //! (`BlockPos::new`), so a client may send unwrapped ones.
 
 use nascio_chunk::BlockDef;
+use nascio_physics::{Mode, PlayerParams};
 use serde::{Deserialize, Serialize};
 
 /// First message of the client.
@@ -45,6 +46,10 @@ pub struct ServerHello {
     pub spawn: [f64; 3],
     /// Radius of the chunk columns the server sends, metres.
     pub chunk_radius_m: u32,
+    /// The physics of the players: the client predicts its own with these values.
+    pub physics: PlayerParams,
+    /// How the player moves at first.
+    pub mode: Mode,
 }
 
 /// Messages from the client.
@@ -59,13 +64,6 @@ pub enum ClientMsg {
     SetBlock {
         pos: [i32; 3],
         block: u16,
-    },
-    /// Position and view of the player. The client moves its own player (the server will
-    /// check speed and reach in S7); the server replicates it to the others.
-    Move {
-        pos: [f64; 3],
-        yaw: f32,
-        pitch: f32,
     },
     /// Entity datagrams received (their `seq`): their states can serve as baselines.
     Ack {
@@ -125,10 +123,6 @@ pub enum ServerMsg {
     Kick {
         reason: String,
     },
-    /// A `Move` was refused (too fast): the player is put back here.
-    Correct {
-        pos: [f64; 3],
-    },
     /// A line of the chat.
     Chat(Chat),
 }
@@ -178,6 +172,8 @@ mod tests {
             player: 7,
             spawn: [99_999.5, 64.0, 0.25],
             chunk_radius_m: 512,
+            physics: PlayerParams::default(),
+            mode: Mode::Walk,
         });
         let client = ClientMsg::Hello(ClientHello {
             protocol: crate::PROTOCOL_VERSION,

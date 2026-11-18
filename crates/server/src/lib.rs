@@ -156,6 +156,8 @@ impl RunningServer {
             player: 0,
             spawn: spawn_pos,
             chunk_radius_m: cfg.chunk_radius_m,
+            physics: cfg.player.clone(),
+            mode: nascio_physics::Mode::Walk,
         };
 
         let (cert_der, key_der) = certificate(&data_dir.join("server"))?;

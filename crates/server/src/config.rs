@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 
+use nascio_physics::PlayerParams;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -89,18 +90,21 @@ pub struct ServerConfig {
     pub discovery_port: u16,
     /// Refused messages (over a limit) after which a client is kicked.
     pub kick_after_violations: u32,
-    /// Positions and acks over the limit are dropped without counting as violations (a
+    /// Acks over the limit are dropped without counting as violations (a
     /// backlog after a stall of the link), but a client still over the limit after this
     /// many seconds, with no pause of `Overrun::GAP`, is kicked (0: never).
     pub overrun_kick_after_s: f64,
-    /// Fastest move accepted, m/s (0: not checked). A gameplay value, to be set by the
-    /// author; the default lets the viewer fly.
-    pub max_speed_m_s: f64,
+    /// Command datagrams (`nascio_protocol::player`) a client may send per second, and in a
+    /// burst (more are dropped; the next ones repeat their commands).
+    pub input_datagrams_per_s: f64,
+    pub input_datagrams_burst: f64,
     /// Farthest block a player may edit from their position, m (0: not checked). A
     /// gameplay value, to be set by the author.
     pub edit_reach_m: f64,
     /// Journal size above which the modified regions are written to their files, bytes.
     pub checkpoint_bytes: u64,
+    /// The physics of the players (`[player]`), sent to the clients at the handshake.
+    pub player: PlayerParams,
 }
 
 impl Default for ServerConfig {
@@ -146,8 +150,10 @@ impl Default for ServerConfig {
             discovery_port: nascio_protocol::discovery::DISCOVERY_PORT,
             kick_after_violations: 500,
             overrun_kick_after_s: 10.0,
-            max_speed_m_s: 120.0,
+            input_datagrams_per_s: 40.0,
+            input_datagrams_burst: 40.0,
             edit_reach_m: 160.0,
+            player: PlayerParams::default(),
         }
     }
 }
@@ -188,6 +194,9 @@ impl ServerConfig {
             self.spawn_radius_m >= 0.0 && self.spawn_radius_m <= 10_000.0,
             "spawn_radius_m is between 0 and 10000"
         );
+        self.player
+            .validate(self.tick_hz)
+            .map_err(anyhow::Error::msg)?;
         Ok(())
     }
 }

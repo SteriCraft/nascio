@@ -16,6 +16,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::columns::{ColumnCache, wrap_column};
 use crate::replicate::{Entity, Grid, ReplConfig, Replicator};
 use nascio_protocol::entity::QState;
+use nascio_protocol::player::InputQueue;
 use rayon::prelude::*;
 
 /// Block changes of one chunk in a tick: number of the last edit, `(index, block)` in order.
@@ -53,7 +54,12 @@ pub struct PlayerLink {
     pub entity_bytes: AtomicU64,
     /// Horizon tiles asked and not sent yet, oldest first (sent after the near columns).
     pub tiles: Mutex<std::collections::VecDeque<nascio_chunk::horizon::TileKey>>,
+    /// Movement commands received and not applied yet (applied by the simulation in 5.3).
+    pub inputs: Mutex<InputQueue>,
 }
+
+/// Commands a player may have waiting: one second of steps.
+pub const MAX_QUEUED_COMMANDS: usize = 64;
 
 pub enum Input {
     Join(Arc<PlayerLink>),

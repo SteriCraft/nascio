@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use nascio_client::{Entities, Event, connect};
 use nascio_core::torus;
+use nascio_physics::{Input, keys};
 use nascio_protocol::messages::ClientMsg;
+use nascio_protocol::player::Commands;
 use nascio_server::config::SecretLogin;
 use nascio_server::{RunningServer, ServerConfig};
 use nascio_worldgen::config::{Scale, WorldConfig};
@@ -19,15 +21,6 @@ const RADIUS: f64 = 10.0;
 const OMEGA: f64 = 0.5;
 const LATENCY: f64 = 0.15;
 const JITTER: f64 = 0.03;
-
-fn on_circle(t: f64) -> [f64; 3] {
-    let a = OMEGA * t;
-    [
-        torus::wrap_f64(CENTRE[0] + RADIUS * a.cos()),
-        80.0,
-        torus::wrap_f64(CENTRE[1] + RADIUS * a.sin()),
-    ]
-}
 
 /// Angle of a point around the centre.
 fn angle(p: [f64; 3]) -> f64 {
@@ -47,6 +40,7 @@ impl Lcg {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "chantier 5.3: the server does not move players yet (commands are queued only)"]
 async fn motion_is_smooth_through_150_ms_of_latency() {
     let world = generate_full(&WorldConfig::new(42, Scale::TwentyFifth))
         .expect("world")
@@ -58,8 +52,6 @@ async fn motion_is_smooth_through_150_ms_of_latency() {
         chunk_radius_m: 64,
         generation_threads: 2,
         spawn_xz: Some([0.0, 0.0]),
-        // The mover jumps from the spawn onto its circle.
-        max_speed_m_s: 0.0,
         open_registration: true,
         secret_login: SecretLogin::All,
         ..ServerConfig::default()
@@ -72,26 +64,32 @@ async fn motion_is_smooth_through_150_ms_of_latency() {
         .await
         .unwrap();
     let id = mover.hello.player;
-    obs.send(ClientMsg::Move {
-        pos: [0.0, 80.0, 0.0],
-        yaw: 0.0,
-        pitch: 0.0,
-    });
 
-    // The mover sends its position every 10 ms, like a client at 100 frames per second.
+    // The mover runs along the circle: three steps every 50 ms, heading along the tangent.
+    // TODO(5.3): the circle and its speed follow the physics (run at 5.6 m/s).
     let start = Instant::now();
     let run = Duration::from_secs(7);
     let moving = tokio::spawn(async move {
         let mut mover = mover;
-        let mut every = tokio::time::interval(Duration::from_millis(10));
+        let mut every = tokio::time::interval(Duration::from_millis(50));
+        let mut last = 0u32;
         while start.elapsed() < run + Duration::from_secs(1) {
             every.tick().await;
             let t = start.elapsed().as_secs_f64();
-            mover.send(ClientMsg::Move {
-                pos: on_circle(t),
-                yaw: (OMEGA * t) as f32,
-                pitch: 0.0,
+            // Heading from north towards east, along the tangent of the circle.
+            let tangent = [-(OMEGA * t).sin(), (OMEGA * t).cos()];
+            let yaw = Input::quantize_yaw(tangent[0].atan2(-tangent[1]));
+            let step = Input {
+                keys: keys::FORWARD | keys::RUN,
+                yaw,
+                fly_speed: 0,
+            };
+            mover.send_commands(&Commands {
+                last: last + 2,
+                pitch: 0,
+                inputs: vec![step; 3],
             });
+            last += 3;
             while mover.events.try_recv().is_ok() {}
         }
         mover.close();

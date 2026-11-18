@@ -1,12 +1,14 @@
 //! S7 validation: abuses are refused and logged — wrong secret, repeated failed logins, a
-//! second session, message and edit floods, edits out of reach, teleports — and the
-//! administrator can kick a player. A backlog of positions and acks sent at once (after a
-//! stall of the link) is dropped without a kick.
+//! second session, message, edit and command floods, edits out of reach — and the
+//! administrator can kick a player. A backlog of acks sent at once (after a stall of the
+//! link) is dropped without a kick.
 
 use std::time::Duration;
 
 use nascio_client::{Connection, Event, connect};
+use nascio_physics::Input;
 use nascio_protocol::messages::{ClientMsg, ServerMsg};
+use nascio_protocol::player::Commands;
 use nascio_server::config::SecretLogin;
 use nascio_server::{RunningServer, ServerConfig};
 use nascio_worldgen::config::{Scale, WorldConfig};
@@ -28,7 +30,6 @@ fn cfg() -> ServerConfig {
         edits_per_s: 5.0,
         edits_burst: 10.0,
         kick_after_violations: 300,
-        max_speed_m_s: 20.0,
         edit_reach_m: 16.0,
         open_registration: true,
         secret_login: SecretLogin::All,
@@ -123,17 +124,16 @@ async fn abuses_are_refused_and_logged() {
     .await;
     assert!(format!("{m:?}").contains("too many edits"));
 
-    // A teleport: refused, and the player is put back.
-    alice.send(ClientMsg::Move {
-        pos: [spawn[0] + 5_000.0, spawn[1], spawn[2]],
-        yaw: 0.0,
-        pitch: 0.0,
-    });
-    let m = wait_for(&mut alice, 20, |m| matches!(m, ServerMsg::Correct { .. })).await;
-    let ServerMsg::Correct { pos } = m else {
-        unreachable!()
-    };
-    assert!((pos[0] - spawn[0]).abs() < 1.0 && (pos[2] - spawn[2]).abs() < 1.0);
+    // A flood of command datagrams: those over the limit are dropped; the player stays
+    // where the server put it.
+    for k in 0..300 {
+        alice.send_commands(&Commands {
+            last: k,
+            pitch: 0,
+            inputs: vec![Input::default()],
+        });
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
     let listed = server.shared.list();
     assert!((listed[0].2[0] - spawn[0]).abs() < 1.0, "{listed:?}");
 
@@ -142,15 +142,9 @@ async fn abuses_are_refused_and_logged() {
     let m = wait_for(&mut alice, 20, |m| matches!(m, ServerMsg::Kick { .. })).await;
     assert!(format!("{m:?}").contains("test over"));
 
-    // A backlog of positions and acks after a stall of the link: dropped, never a kick
-    // (the flood below, of pings, is kicked after 300 refusals).
-    let at = erin.hello.spawn;
-    for k in 0..1_000 {
-        erin.send(ClientMsg::Move {
-            pos: [at[0] + f64::from(k % 2), at[1], at[2]],
-            yaw: 0.0,
-            pitch: 0.0,
-        });
+    // A backlog of acks after a stall of the link: dropped, never a kick (the flood below,
+    // of pings, is kicked after 300 refusals).
+    for k in 0..2_000 {
         erin.send(ClientMsg::Ack { seqs: vec![k] });
     }
     // The bucket refills (50 per second); erin still answers.
@@ -171,7 +165,9 @@ async fn abuses_are_refused_and_logged() {
 
     // Everything is in the abuse log.
     let log = std::fs::read_to_string(dir.join("server").join("abuse.log")).unwrap();
-    for kind in ["login", "reach", "edits", "speed", "flood", "kick", "burst"] {
+    for kind in [
+        "login", "reach", "edits", "inputs", "flood", "kick", "burst",
+    ] {
         assert!(
             log.lines().any(|l| l.split('\t').nth(3) == Some(kind)),
             "no {kind} in the log:\n{log}"

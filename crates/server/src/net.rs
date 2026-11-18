@@ -14,11 +14,13 @@ use nascio_chunk::horizon::MAX_LEVELS;
 use nascio_core::consts::{CHUNK_SIZE, WORLD_SIZE_F64};
 use nascio_core::torus;
 use nascio_protocol::UniKind;
+use nascio_protocol::entity::pitch_radians;
 use nascio_protocol::frame::{Deframer, MAX_CONTROL_FRAME, frame};
 use nascio_protocol::horizon::MAX_TILES_PER_REQUEST;
 use nascio_protocol::messages::{
     Auth, Chat, ClientMsg, MAX_CHAT_CHARS, ServerHello, ServerMsg, from_bytes, to_bytes,
 };
+use nascio_protocol::player::{Commands, InputQueue};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
@@ -26,7 +28,7 @@ use crate::accounts::{Accounts, Login};
 use crate::columns::{ColumnCache, wrap_column};
 use crate::config::{SecretLogin, ServerConfig};
 use crate::security::{AbuseLog, Bucket, LoginGuard, Overrun};
-use crate::sim::{Input, PlayerLink, View};
+use crate::sim::{Input, MAX_QUEUED_COMMANDS, PlayerLink, View};
 
 /// What every connection needs.
 pub struct Shared {
@@ -298,6 +300,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         send_space: usize::MAX.into(),
         entity_bytes: Default::default(),
         tiles: Default::default(),
+        inputs: Mutex::new(InputQueue::new(MAX_QUEUED_COMMANDS)),
     });
     {
         let mut sessions = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -356,6 +359,55 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         }
     });
 
+    // Movement commands, in datagrams, queued for the simulation (which applies them from
+    // 5.3 on); the orientation of the newest one is replicated to the others.
+    let (c4, l4, s4, n4) = (conn.clone(), link.clone(), shared.clone(), name.clone());
+    let inputs = tokio::spawn(async move {
+        let cfg = &s4.cfg;
+        let mut bucket = Bucket::new(
+            cfg.input_datagrams_per_s,
+            cfg.input_datagrams_burst,
+            Instant::now(),
+        );
+        let mut counts: BTreeMap<&'static str, u64> = BTreeMap::new();
+        let mut abuse = |kind: &'static str, detail: &str| {
+            let n = counts.entry(kind).or_insert(0);
+            *n += 1;
+            if *n == 1 || (*n).is_multiple_of(100) {
+                s4.abuse
+                    .log(unix_ms(), ip, &n4, kind, &format!("{detail} (#{n})"));
+            }
+        };
+        let mut newest = None;
+        while let Ok(d) = c4.read_datagram().await {
+            if !bucket.take(Instant::now()) {
+                abuse("inputs", "command datagram over the limit, dropped");
+                continue;
+            }
+            let c = match Commands::decode(&d) {
+                Ok(c) => c,
+                Err(e) => {
+                    abuse("datagram", &format!("{e:#}"));
+                    continue;
+                }
+            };
+            let r = l4.inputs.lock().unwrap_or_else(|e| e.into_inner()).push(&c);
+            if r.refused > 0 {
+                abuse("inputs", "command queue full");
+            }
+            // A late datagram does not turn the view back.
+            if newest.is_some_and(|n| c.last <= n) {
+                continue;
+            }
+            newest = Some(c.last);
+            if let Some(last) = c.inputs.last() {
+                let mut v = l4.view.lock().unwrap_or_else(|e| e.into_inner());
+                v.yaw = last.yaw_radians() as f32;
+                v.pitch = pitch_radians(c.pitch);
+            }
+        }
+    });
+
     // Reader of the control stream, with the limits of the client.
     let cfg = &shared.cfg;
     let now = Instant::now();
@@ -364,8 +416,6 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     let mut chat = Bucket::new(cfg.chat_per_s, cfg.chat_burst, now);
     let mut violations = 0u32;
     let mut overrun = Overrun::default();
-    // Last accepted position, and when.
-    let mut last_move = (sh.spawn, now);
     let mut sky_asked = false;
     // Events by kind: the first of each kind is logged, then every hundredth.
     let counts: Mutex<BTreeMap<String, u64>> = Mutex::default();
@@ -384,20 +434,19 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
             let now = Instant::now();
             if !control.take(now) {
                 let msg = from_bytes::<ClientMsg>(&f)?;
-                // A backlog sent at once after a stall of the link: positions (the next
-                // one supersedes them) and acks (advisory) are dropped without counting
-                // toward a kick; but a flood that goes on is kicked.
-                if matches!(msg, ClientMsg::Move { .. } | ClientMsg::Ack { .. }) {
+                // A backlog sent at once after a stall of the link: acks (advisory) are
+                // dropped without counting toward a kick; but a flood that goes on is kicked.
+                if matches!(msg, ClientMsg::Ack { .. }) {
                     let lasted = overrun.over(now).as_secs_f64();
                     if cfg.overrun_kick_after_s > 0.0 && lasted > cfg.overrun_kick_after_s {
-                        abuse("kick", "positions or acks over the limit for too long");
+                        abuse("kick", "acks over the limit for too long");
                         let _ = link.out.send(ServerMsg::Kick {
                             reason: "too many messages".into(),
                         });
                         tokio::time::sleep(Duration::from_millis(200)).await;
                         break;
                     }
-                    abuse("burst", "position or ack over the limit, dropped");
+                    abuse("burst", "ack over the limit, dropped");
                     continue;
                 }
                 violations += 1;
@@ -419,23 +468,6 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
                         server_unix_ms: unix_ms(),
                     });
                 }
-                ClientMsg::Move { pos, yaw, pitch } => {
-                    if !pos.iter().all(|v| v.is_finite()) {
-                        continue;
-                    }
-                    let pos = [torus::wrap_f64(pos[0]), pos[1], torus::wrap_f64(pos[2])];
-                    let d = distance(last_move.0, pos);
-                    let dt = now.saturating_duration_since(last_move.1).as_secs_f64();
-                    // Slack for jitter: half a second of motion and two metres.
-                    if cfg.max_speed_m_s > 0.0 && d > cfg.max_speed_m_s * (dt + 0.5) + 2.0 {
-                        violations += 1;
-                        abuse("speed", &format!("{d:.1} m in {dt:.2} s"));
-                        let _ = link.out.send(ServerMsg::Correct { pos: last_move.0 });
-                        continue;
-                    }
-                    last_move = (pos, now);
-                    *link.view.lock().unwrap_or_else(|e| e.into_inner()) = View { pos, yaw, pitch };
-                }
                 ClientMsg::SetBlock { pos, block } => {
                     let refused = if !edits.take(now) {
                         violations += 1;
@@ -447,7 +479,8 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
                             f64::from(pos[1]) + 0.5,
                             f64::from(pos[2]) + 0.5,
                         ];
-                        let d = distance(last_move.0, at);
+                        let here = link.view.lock().unwrap_or_else(|e| e.into_inner()).pos;
+                        let d = distance(here, at);
                         (cfg.edit_reach_m > 0.0 && d > cfg.edit_reach_m).then(|| {
                             violations += 1;
                             abuse("reach", &format!("edit {d:.0} m away"));
@@ -554,6 +587,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     streamer.abort();
     writer.abort();
     datagrams.abort();
+    inputs.abort();
     conn.close(0u32.into(), b"bye");
     result
 }

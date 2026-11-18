@@ -10,14 +10,15 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use nascio_chunk::horizon::HorizonTile;
 use nascio_chunk::{BlockRegistry, Blocks};
-use nascio_protocol::UniKind;
 use nascio_protocol::chunk::{Column, MAX_COLUMN_BYTES};
 use nascio_protocol::frame::{Deframer, MAX_CONTROL_FRAME, frame};
 use nascio_protocol::horizon::{MAX_TILE_BYTES, decode_tile};
 use nascio_protocol::messages::{
     Auth, ClientHello, ClientMsg, ServerHello, ServerMsg, from_bytes, to_bytes,
 };
+use nascio_protocol::player::{Commands, PlayerState, server_datagram_kind};
 use nascio_protocol::sky::{MAX_SKY_BYTES, WorldSky};
+use nascio_protocol::{ServerDatagram, UniKind};
 use quinn::rustls::RootCertStore;
 use quinn::rustls::pki_types::CertificateDer;
 use tokio::sync::mpsc;
@@ -35,6 +36,9 @@ pub enum Event {
     Sky(Box<WorldSky>, Vec<u8>),
     /// An entity datagram (decode with [`crate::Entities`], then acknowledge its seq).
     Entities(Vec<u8>),
+    /// The authoritative state of the player (datagrams: may come late or out of order,
+    /// keep the highest tick).
+    Player(PlayerState),
     /// The connection ended (reason).
     Closed(String),
 }
@@ -64,6 +68,12 @@ impl Connection {
             .await
             .ok()
             .flatten()
+    }
+
+    /// Sends movement commands in a datagram (unreliable: the caller repeats the commands
+    /// not acknowledged by [`Event::Player`]). A datagram the path cannot carry is dropped.
+    pub fn send_commands(&self, c: &Commands) {
+        let _ = self.conn.send_datagram(c.encode().into());
     }
 
     pub fn close(&self) {
@@ -180,11 +190,19 @@ pub async fn connect_with(
         };
         let _ = ev2.send(Event::Closed(reason));
     });
-    // Entity datagrams.
+    // Datagrams: entities and the player's state. A bad one is dropped like a lost one.
     let (c3, ev3) = (conn.clone(), ev.clone());
     tokio::spawn(async move {
         while let Ok(d) = c3.read_datagram().await {
-            if ev3.send(Event::Entities(d.to_vec())).is_err() {
+            let event = match server_datagram_kind(&d) {
+                Ok(ServerDatagram::Entities) => Event::Entities(d.to_vec()),
+                Ok(ServerDatagram::PlayerState) => match PlayerState::decode(&d) {
+                    Ok(p) => Event::Player(p),
+                    Err(_) => continue,
+                },
+                Err(_) => continue,
+            };
+            if ev3.send(event).is_err() {
                 break;
             }
         }

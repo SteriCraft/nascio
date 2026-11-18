@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 nascio-core.workspace = true
 nascio-chunk.workspace = true
+nascio-physics.workspace = true
 serde.workspace = true
 postcard.workspace = true
 zstd.workspace = true
