@@ -31,6 +31,8 @@ cargo build -p nascio-server --release
 ```
 Le binaire est `~/nascio/target/release/nascio-server`.
 
+Depuis le chantier 2, l'inscription est fermée et la connexion par secret est réservée aux administrateurs. `--open-registration` rétablit l'ancien comportement pour la mesure : les bots se connectent par secret et leurs comptes sont créés à la volée. Pour mesurer aussi la connexion par jeton, voir la fin du rapport `chantier-2.md`.
+
 ## 2. Le monde à copier
 Le serveur a besoin du monde de référence `out/m7/world-42` (364 Mo, sans deltas).
 
@@ -76,7 +78,7 @@ Vérifie aussi que le réseau du PC est classé « Privé » : Paramètres → R
 Sur Linux :
 ```bash
 cd ~/nascio
-./target/release/nascio-server ~/nascio-s6/world-42 --data ~/nascio-s6/data --bind 0.0.0.0:7777
+./target/release/nascio-server ~/nascio-s6/world-42 --data ~/nascio-s6/data --bind 0.0.0.0:7777 --open-registration
 ```
 Au premier lancement, le serveur crée son certificat dans `~/nascio-s6/data/server/cert.der`.
 - Arrête-le avec la commande `stop` (tape-la puis Entrée), ou avec Ctrl-C.
@@ -97,7 +99,7 @@ cargo build -p nascio-tools --release --bin swarm
 Sur Linux, relance le serveur avec un journal :
 ```bash
 cd ~/nascio
-./target/release/nascio-server ~/nascio-s6/world-42 --data ~/nascio-s6/data --bind 0.0.0.0:7777 2>&1 | tee ~/nascio-s6/server-test.log
+./target/release/nascio-server ~/nascio-s6/world-42 --data ~/nascio-s6/data --bind 0.0.0.0:7777 --open-registration 2>&1 | tee ~/nascio-s6/server-test.log
 ```
 Sur Windows :
 ```powershell
@@ -119,7 +121,7 @@ Le serveur affiche ses statistiques toutes les 10 s. Les percentiles du tick por
 **Linux, terminal 1 : le serveur.**
 ```bash
 cd ~/nascio
-./target/release/nascio-server ~/nascio-s6/world-42 --data ~/nascio-s6/data --bind 0.0.0.0:7777 2>&1 | tee ~/nascio-s6/server-500.log
+./target/release/nascio-server ~/nascio-s6/world-42 --data ~/nascio-s6/data --bind 0.0.0.0:7777 --open-registration 2>&1 | tee ~/nascio-s6/server-500.log
 ```
 
 **Linux, terminal 2 : CPU et mémoire du serveur toutes les 10 s.** Lance-le une fois le serveur démarré, avant les bots. Si tu relances le serveur, relance aussi `pidstat` : il suit un numéro de processus.

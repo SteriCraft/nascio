@@ -23,12 +23,7 @@ Phase Serveur et réseau validée par l'auteur, S6 compris : mesure sur deux mac
 ## Prochaine action
 Chantiers décidés par l'auteur (`decisions.md`, décisions du 2026-11-18), dans l'ordre proposé :
 1. ~~crate `nascio-chunk` séparée de la génération (définitions des blocs envoyées à la connexion, protocole v5)~~ fait (`chantier-1.md`) ; texte proposé pour `CLAUDE.md` dans le rapport ;
-2. comptes : invitation, bannissement, jetons Ed25519 émis par le site — **plan validé le 2026-11-18, en cours sans supervision** (`chantier-2.md`) ; `bd0b035` poussé. Réponses : jeton 5 min usage unique ; secret réservé aux admins (`secret_login = "admin"`) ; bannissement par compte, sans IP ; invitation sur le site. Ajout : refuser tout jeton émis avant le démarrage du serveur (moins la tolérance d'horloge). **2.1, 2.2, 2.3 faits.**
-   - jeton = postcard {version, nom, audience `server_id`, émis/expire ms UTC, nonce 16 o} + signature Ed25519 64 o, en base64url ; vérif. signature → audience → date (±30 s) → nonce non rejoué (gardé en mémoire jusqu'à expiration). `ring` suffit, pas de nouvelle dépendance ;
-   - 2.1 bannissement + inscription fermée : console `ban <nom> [30m|7d] [raison]`, `unban`, `bans` ; champs facultatifs dans `accounts.toml` ; expulse si en ligne ; `open_registration` = faux par défaut ;
-   - 2.2 module jeton + bin `site` (`keygen`, `token --name --server --ttl`), tests unitaires (signature, expiration, audience, nom, rejeu) ;
-   - 2.3 protocole v6 : `ClientHello { protocol, name, auth: Secret | Token }` ; config `site_public_key`, `server_id` ; jeton valide crée le compte ; échecs dans `LoginGuard`/`abuse.log` ; visualiseur `--token` ; `swarm --site-key` fabrique ses jetons ; test `crates/server/tests/accounts.rs` ;
-   - 2.4 docs : `chantier-2.md`, format du jeton dans `spec-proposee.md` §7, `decisions.md`, procédure S6 ;
+2. ~~comptes : bannissement, inscription fermée, jetons Ed25519 émis par le site (protocole v6)~~ fait sans supervision le 2026-11-18 (`chantier-2.md`), **en attente de la revue de l'auteur** ; commits `c7cb4f8`, `0296869`, `297e8ce` et celui de 2.4, non poussés (seul `bd0b035` l'est). Points à valider en fin de rapport : borne stricte du redémarrage (30 s de refus après un démarrage), jeton consommé même si la connexion échoue ensuite, format postcard plutôt qu'un standard pour le site, `server_id` par défaut `"dev"` ;
 3. sites d'apparition et point par compte (calculés au démarrage du serveur, sans toucher `generator_version`) ;
 4. horizon en tuiles et climat réduit envoyés par le serveur ;
 5. mouvement autoritaire, avec prédiction et réconciliation.

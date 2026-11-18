@@ -5,7 +5,7 @@
 //! seconds (positions sent at 20 Hz), to be seen in the viewer (`--connect`).
 //!
 //! ```text
-//! cargo run -p nascio-server --release -- out/m7/world-42 --bind 127.0.0.1:7777
+//! cargo run -p nascio-server --release -- out/m7/world-42 --bind 127.0.0.1:7777 --open-registration
 //! cargo run -p nascio-tools --release --bin netbot -- 127.0.0.1:7777 out/m7/world-42/server/cert.der --bots 4
 //! ```
 

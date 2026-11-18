@@ -112,3 +112,45 @@ Essai manuel : `site keygen`, puis `public` (même clé), puis `token` (141 cara
 - **redémarrage** : un jeton dépensé avant l'arrêt est refusé après le redémarrage, alors que le nouveau serveur a 0 nonce en mémoire (« before the server started »). Avec `secret_login = "none"`, même un admin est refusé par secret ; un nouveau jeton passe.
 
 `closed_registration_and_bans` (2.1) tourne désormais avec `secret_login = "all"` et vérifie que `"admin"` est la valeur par défaut.
+
+## 2.4 — Vérification de bout en bout et documentation
+**Essai avec les vrais binaires** (release, monde de référence, `--data out/s3-data`). Le serveur est configuré avec `server_id = "dev"` et la clé publique d'une clé `site keygen`.
+- Au démarrage, le serveur affiche « site tokens accepted for server_id "dev" » et « secret logins: Admin ».
+- Un jeton frais pris dans les secondes qui suivent le démarrage est refusé. Le visualiseur affiche « refused by the server: token issued before the server started: ask for a new one in 30 s ».
+- Le visualiseur avec le secret par défaut est refusé : « secret logins are for administrators: log in through the site ».
+- Après 30 s, un jeton neuf passe. `--fly --connect --token … --screenshot` donne `out/chantier2-token.png` : 613 colonnes prêtes, 0 manquante, 96 k quads. C'est la même scène qu'au chantier 1, en mer au point d'apparition, cette fois de jour. Le serveur a envoyé 797 colonnes.
+- Le même jeton rejoué est refusé : « token already used ».
+- `swarm --site-key`, 20 bots avec chacun son jeton : 0 erreur, 17 entités vues en moyenne, 173 éditions acceptées. Sans `--site-key`, les bots (secret, non admins) sont refusés, comme prévu.
+- Chaque refus figure dans `abuse.log`.
+
+**Effet de bord constaté** : un jeton valide est consommé dès qu'il est vérifié, même si la connexion échoue ensuite pour une autre raison (« déjà connecté », bannissement). Dans l'essai, la session précédente du visualiseur, tué sans fermeture, était encore comptée jusqu'au délai d'inactivité QUIC ; le jeton a été perdu. C'est cohérent avec l'usage unique, et il suffit de redemander un jeton. Rendre le nonce dans ces cas rouvrirait une petite fenêtre de rejeu : je ne l'ai pas fait.
+
+**Documentation** :
+- `spec-proposee.md` §7.2 décrit la poignée de main v6 (jeton ou secret, ordre des vérifications, règle du redémarrage, bannissement) ;
+- dans la procédure S6 (`serveur-S6-deux-machines.md`), le serveur se lance avec `--open-registration` : les bots se connectent par secret, comme lors des mesures précédentes ;
+- les en-têtes de `swarm` et de `netbot` donnent la commande du serveur avec `--open-registration`, et `swarm` montre l'usage de `--site-key` ;
+- `decisions.md` : cinq lignes pour le chantier 2.
+
+**Note** : `Cargo.lock` (nouvelle dépendance de `nascio-tools` envers `nascio-server`) n'avait pas été inclus dans le commit de 2.2. Il est dans celui de 2.4. Les commits intermédiaires compilent quand même, car cargo met le fichier à jour, mais pas avec `--locked`.
+
+## Mise en service avec le vrai site (procédure)
+1. Sur la machine du site, exécuter `site keygen <fichier>`. Garder le fichier secret : quiconque le possède peut se connecter sous n'importe quel nom.
+2. Dans la configuration de chaque serveur, renseigner `site_public_key = "…"` (la ligne affichée par `site keygen`) et un `server_id` propre à ce serveur.
+3. Le site émet un jeton par connexion (`SiteKey::issue`, ou l'équivalent dans son propre langage) : postcard des `Claims`, puis signature Ed25519, puis base64url sans remplissage, valable au plus 5 min.
+4. Créer les administrateurs depuis la console : `adduser <nom> <secret> admin`. Ils gardent un accès par secret si le site tombe.
+5. Les horloges du site et du serveur doivent rester à moins de 30 s l'une de l'autre (NTP).
+
+## Bilan et questions pour l'auteur
+Le chantier 2 est terminé, et rien n'est poussé à part `bd0b035`. Commits :
+- `c7cb4f8` (2.1) ;
+- `0296869` (2.2) ;
+- `297e8ce` (2.3) ;
+- le commit de 2.4.
+
+`cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings` et `cargo test --workspace` passent. `generator_version` n'est pas touché, et le gameplay non plus.
+
+Points à valider :
+1. **La borne stricte du redémarrage.** Les jetons d'un site synchronisé sont refusés pendant 30 s après chaque démarrage. L'alternative est d'écrire les nonces sur disque, ce qui supprime l'attente mais coûte une écriture durable par connexion.
+2. **Le jeton consommé par une connexion qui échoue ensuite** (déjà connecté, banni) : c'est accepté tel quel.
+3. **Le format du jeton** est propre à Nascio (postcard), pas un JWT. Le site devra produire du postcard : c'est simple, et la structure est fixe (voir `Claims`), mais si le site est écrit en JavaScript ou en PHP, un encodage plus standard serait peut-être préférable. Il est facile de changer avant la mise en service, puisque `version` le prévoit.
+4. **`server_id` vaut `"dev"` par défaut.** Un serveur public devra en avoir un propre, sinon un jeton émis pour un autre serveur de même nom y serait accepté.

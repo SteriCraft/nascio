@@ -17,7 +17,19 @@ Ce fichier ne modifie pas `docs/world-spec.md` : il propose un texte, à valider
 - Transport QUIC (TLS 1.3) : un flux bidirectionnel de contrôle, des flux unidirectionnels pour les chunks, des datagrammes non fiables pour les états des entités.
 
 ### 7.2 Poignée de main
-Le client envoie la version du protocole, son nom de compte et son secret (dans le canal chiffré, certificat du serveur épinglé) ; le serveur vérifie le secret (Argon2id, sel par compte), refuse une deuxième session et bloque une adresse après trop d'échecs, puis répond avec `generator_version`, l'empreinte de génération, la table des blocs (nom → identifiant de la session) et son heure UTC. Le client mesure le décalage de son horloge (aller-retour, à la manière de NTP) et dérive le temps du jeu de l'UTC corrigée : aucune horloge interne.
+Le client envoie la version du protocole, son nom de compte et une preuve d'identité, dans le canal chiffré (certificat du serveur épinglé) :
+- **un jeton du site**, cas normal des joueurs. Le site, qui gère l'inscription et l'invitation, signe en Ed25519 `base64url(postcard(Claims) ‖ signature)`, où `Claims` = {version, nom, serveur visé (`server_id`), émission et expiration en ms UTC, nonce de 16 octets}. Le serveur ne connaît que la clé publique (`site_public_key`). Il vérifie, dans l'ordre :
+  1. la signature ;
+  2. la version, l'audience et le nom (celui du message) ;
+  3. une validité d'au plus 5 min ;
+  4. l'expiration et l'émission dans le futur, avec ±30 s de tolérance d'horloge ;
+  5. une émission postérieure au démarrage du serveur + 30 s, car les nonces sont gardés en mémoire et un redémarrage ne doit pas ouvrir de fenêtre de rejeu ;
+  6. un nonce jamais vu (usage unique).
+
+  Un jeton valide crée le compte s'il n'existe pas ;
+- **un secret**, réservé par défaut aux comptes administrateurs (`secret_login` = `admin`, `all` ou `none`). Le serveur le vérifie avec Argon2id et un sel par compte.
+
+Ensuite, le serveur refuse un compte banni (bannissement par compte, temporaire ou permanent, avec sa raison, signalé seulement après une preuve valide) et une deuxième session. Il bloque une adresse après trop d'échecs. Enfin, il répond avec `generator_version`, l'empreinte de génération, la table des blocs (leurs définitions) et son heure UTC. Le client mesure le décalage de son horloge (aller-retour, à la manière de NTP) et dérive le temps du jeu de l'UTC corrigée : aucune horloge interne.
 
 ### 7.3 Chunks
 - Codec v2 : un octet de version, la palette (nombre puis identifiants, varints), puis des plages (indice de palette, longueur − 1), varints, dans l'ordre des indices des blocs (`x`, puis `z`, puis `y`) ; pas de plages quand la palette n'a qu'une entrée : un chunk uniforme tient en 3 à 5 octets.
