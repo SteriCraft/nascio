@@ -20,7 +20,7 @@ use tokio::task::JoinSet;
 use crate::accounts::{Accounts, Login};
 use crate::columns::{ColumnCache, wrap_column};
 use crate::config::{SecretLogin, ServerConfig};
-use crate::security::{AbuseLog, Bucket, LoginGuard};
+use crate::security::{AbuseLog, Bucket, LoginGuard, Overrun};
 use crate::sim::{Input, PlayerLink, View};
 
 /// What every connection needs.
@@ -278,6 +278,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     let mut control = Bucket::new(cfg.control_msgs_per_s, cfg.control_burst, now);
     let mut edits = Bucket::new(cfg.edits_per_s, cfg.edits_burst, now);
     let mut violations = 0u32;
+    let mut overrun = Overrun::default();
     // Last accepted position, and when.
     let mut last_move = (sh.spawn, now);
     // Events by kind: the first of each kind is logged, then every hundredth.
@@ -299,8 +300,17 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
                 let msg = from_bytes::<ClientMsg>(&f)?;
                 // A backlog sent at once after a stall of the link: positions (the next
                 // one supersedes them) and acks (advisory) are dropped without counting
-                // toward a kick.
+                // toward a kick; but a flood that goes on is kicked.
                 if matches!(msg, ClientMsg::Move { .. } | ClientMsg::Ack { .. }) {
+                    let lasted = overrun.over(now).as_secs_f64();
+                    if cfg.overrun_kick_after_s > 0.0 && lasted > cfg.overrun_kick_after_s {
+                        abuse("kick", "positions or acks over the limit for too long");
+                        let _ = link.out.send(ServerMsg::Kick {
+                            reason: "too many messages".into(),
+                        });
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        break;
+                    }
                     abuse("burst", "position or ack over the limit, dropped");
                     continue;
                 }

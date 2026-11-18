@@ -70,6 +70,10 @@ pub struct ServerConfig {
     pub edits_burst: f64,
     /// Refused messages (over a limit) after which a client is kicked.
     pub kick_after_violations: u32,
+    /// Positions and acks over the limit are dropped without counting as violations (a
+    /// backlog after a stall of the link), but a client still over the limit after this
+    /// many seconds, with no pause of `Overrun::GAP`, is kicked (0: never).
+    pub overrun_kick_after_s: f64,
     /// Fastest move accepted, m/s (0: not checked). A gameplay value, to be set by the
     /// author; the default lets the viewer fly.
     pub max_speed_m_s: f64,
@@ -114,6 +118,7 @@ impl Default for ServerConfig {
             edits_per_s: 20.0,
             edits_burst: 40.0,
             kick_after_violations: 500,
+            overrun_kick_after_s: 10.0,
             max_speed_m_s: 120.0,
             edit_reach_m: 160.0,
         }
