@@ -26,6 +26,7 @@ mod remote;
 mod settings;
 mod sky;
 mod stars;
+mod textures;
 mod tiles;
 
 use std::path::PathBuf;

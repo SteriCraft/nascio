@@ -4504,6 +4504,7 @@ dependencies = [
  "bevy",
  "bevy_egui",
  "clap",
+ "image",
  "nascio-chunk",
  "nascio-client",
  "nascio-core",
