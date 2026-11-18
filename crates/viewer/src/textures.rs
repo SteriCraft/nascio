@@ -1,12 +1,12 @@
 //! Block texture loader: reads `<name>.png` images of a folder into the layers of one GPU
 //! texture array (with linear-light mips) and builds the per-face table of `Blocks`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
-use bevy::log::{info, warn};
-use bevy::prelude::Image;
+use bevy::prelude::*;
 use bevy::render::render_resource::{
     Extent3d, TextureDataOrder, TextureDimension, TextureFormat, TextureViewDescriptor,
     TextureViewDimension,
@@ -18,7 +18,6 @@ pub const TEXTURE_SIZE: u32 = 32;
 /// Mip levels of the array: 32, 16, 8, 4, 2, 1.
 pub const MIP_LEVELS: u32 = 6;
 /// Default folder of the block textures (local test images, never committed).
-#[allow(dead_code)]
 pub const DEFAULT_DIR: &str = "textures_temp/blocks";
 /// Colour of the spruce leaves (sRGB), applied as a fixed tint.
 pub const SPRUCE_GREEN: [u8; 3] = [56, 92, 50];
@@ -31,7 +30,6 @@ const BOTTOM: [(&str, &str); 2] = [("grass", "dirt"), ("podzol", "dirt")];
 /// Block textures loaded from a folder: the layers of the texture array (with their mips) and the
 /// per-block face table for `Blocks::set_textures`.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct BlockTextureSet {
     /// Per layer, every mip level from 32×32 down to 1×1, sRGB RGBA8, concatenated.
     pub layers: Vec<Vec<u8>>,
@@ -139,7 +137,6 @@ fn srgb_triplet_to_linear(c: [u8; 3]) -> [f32; 3] {
 }
 
 /// Loads the textures of `dir` for `blocks`; `None` if the folder is missing or nothing matched.
-#[allow(dead_code)]
 pub fn load(dir: &Path, blocks: &Blocks) -> Option<BlockTextureSet> {
     if !dir.is_dir() {
         info!(
@@ -221,20 +218,21 @@ pub fn load(dir: &Path, blocks: &Blocks) -> Option<BlockTextureSet> {
         );
         return None;
     }
-    info!(
-        "block textures: {} layers, {textured} textured blocks ({})",
-        layers.len(),
-        dir.display()
-    );
-    Some(BlockTextureSet {
+    let set = BlockTextureSet {
         layers,
         names,
         table,
-    })
+    };
+    info!(
+        "block textures: {} layers, {textured} textured blocks ({}): {}",
+        set.layers.len(),
+        dir.display(),
+        set.names.join(", ")
+    );
+    Some(set)
 }
 
 /// The texture array as a Bevy image (layer-major data, mips, `D2Array` view).
-#[allow(dead_code)]
 pub fn to_image(set: &BlockTextureSet) -> Image {
     let mut image = Image::new_uninit(
         Extent3d {
@@ -263,6 +261,61 @@ pub fn to_image(set: &BlockTextureSet) -> Image {
         ..Default::default()
     });
     image
+}
+
+/// Folder of the block textures (`--textures`).
+#[derive(Resource)]
+pub struct TextureDir(pub PathBuf);
+
+/// The block texture array bound by the curved materials (one white layer when no texture is
+/// loaded: the faces then keep their block colours, layer −1).
+#[derive(Resource)]
+pub struct BlockArray(pub Handle<Image>);
+
+/// Local flight: the world's block table with its textures, for meshing.
+#[derive(Resource)]
+pub struct RenderBlocks(pub Arc<Blocks>);
+
+/// One white layer: the array bound when no texture is loaded.
+pub fn placeholder() -> Image {
+    let size = TEXTURE_SIZE as usize;
+    let bytes: usize = (0..MIP_LEVELS).map(|k| (size >> k) * (size >> k) * 4).sum();
+    to_image(&BlockTextureSet {
+        layers: vec![vec![255; bytes]],
+        names: vec!["placeholder".into()],
+        table: Vec::new(),
+    })
+}
+
+/// `blocks` with the textures of `dir`, and their array (`None`: nothing loaded, the block
+/// colours stay).
+pub fn textured(dir: &Path, blocks: &Blocks) -> (Blocks, Option<Image>) {
+    let mut out = blocks.clone();
+    let Some(set) = load(dir, blocks) else {
+        return (out, None);
+    };
+    out.set_textures(set.table.clone())
+        .expect("one texture entry per block");
+    (out, Some(to_image(&set)))
+}
+
+/// Connected: the server's block table gets the textures (by block name) and the array is
+/// rebuilt for it. The server and the protocol know nothing of textures.
+pub fn adopt_remote_textures(
+    mut remote: ResMut<crate::remote::Remote>,
+    dir: Res<TextureDir>,
+    array: Res<BlockArray>,
+    terrain: Res<crate::fly::TerrainMaterials>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<crate::curvature::CurvedMaterial>>,
+) {
+    let (blocks, image) = textured(&dir.0, &remote.blocks);
+    remote.blocks = Arc::new(blocks);
+    let _ = images.insert(array.0.id(), image.unwrap_or_else(placeholder));
+    // Re-prepare the chunk materials so they bind the new array.
+    for h in [&terrain.opaque, &terrain.water] {
+        let _ = materials.get_mut(h);
+    }
 }
 
 #[cfg(test)]
