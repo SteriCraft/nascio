@@ -150,6 +150,13 @@ impl SiteKey {
             .map_err(|_| anyhow::anyhow!("not an Ed25519 PKCS#8 key"))
     }
 
+    /// From the 32-byte Ed25519 seed (RFC 8032 private key); the test vectors use it.
+    pub fn from_seed(seed: &[u8; 32]) -> anyhow::Result<Self> {
+        Ed25519KeyPair::from_seed_unchecked(seed)
+            .map(Self)
+            .map_err(|_| anyhow::anyhow!("bad Ed25519 seed"))
+    }
+
     /// Reads a key written by `site keygen` (base64url text).
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         let text =
@@ -397,6 +404,72 @@ mod tests {
         // From then on: accepted (here, at once, from a site SKEW_MS ahead).
         let t = site.issue("alice", "eu-1", T0 + SKEW_MS, 60_000).unwrap();
         assert!(v.verify(&t, T0).is_ok());
+    }
+
+    /// The vectors of `spec-proposee.md` §7.2: a site written in another language checks its
+    /// implementation against them.
+    #[test]
+    fn fixed_vectors() {
+        const SEED: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        const PUBLIC: &str = "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8";
+        const PUBLIC_B64: &str = "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg";
+        const PAYLOAD: &str = concat!(
+            "0105616c6963650465752d3180c0e285e368c08f8786e368",
+            "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"
+        );
+        const SIGNATURE: &str = concat!(
+            "dcc27d3b4a7db6312a01d13fef72eb799d6d31bd823e03e11cdbdaa09de5ed04",
+            "7dd3a820d744721b2871441d61af9c7f0919e3f26684d7fc9ba5f53eab981808"
+        );
+        const TOKEN: &str = concat!(
+            "AQVhbGljZQRldS0xgMDiheNowI-HhuNooKGio6SlpqeoqaqrrK2ur9zCfTtKfbYxKgHR",
+            "P-9y63mdbTG9gj4D4Rzb2qCd5e0EfdOoINdEchsocUQdYa-cfwkZ4_JmhNf8m6X1PquYGAg"
+        );
+        let unhex = |h: &str| -> Vec<u8> {
+            (0..h.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        let site = SiteKey::from_seed(&unhex(SEED).try_into().unwrap()).unwrap();
+        assert_eq!(site.public_key(), unhex(PUBLIC));
+        assert_eq!(b64_encode(&site.public_key()), PUBLIC_B64);
+        let claims = Claims {
+            version: TOKEN_VERSION,
+            name: "alice".into(),
+            server: "eu-1".into(),
+            issued_unix_ms: 1_800_000_000_000,
+            expires_unix_ms: 1_800_000_300_000,
+            nonce: std::array::from_fn(|k| (0xa0 + k) as u8),
+        };
+        // The payload byte by byte, as the spec describes it (independent of postcard).
+        fn varint(mut v: u64, out: &mut Vec<u8>) {
+            while v >= 0x80 {
+                out.push((v as u8 & 0x7f) | 0x80);
+                v >>= 7;
+            }
+            out.push(v as u8);
+        }
+        let zigzag = |v: i64| ((v << 1) ^ (v >> 63)) as u64;
+        let mut by_hand = vec![claims.version];
+        for text in [&claims.name, &claims.server] {
+            varint(text.len() as u64, &mut by_hand);
+            by_hand.extend_from_slice(text.as_bytes());
+        }
+        varint(zigzag(claims.issued_unix_ms), &mut by_hand);
+        varint(zigzag(claims.expires_unix_ms), &mut by_hand);
+        by_hand.extend_from_slice(&claims.nonce);
+        assert_eq!(by_hand, unhex(PAYLOAD));
+        assert_eq!(postcard::to_stdvec(&claims).unwrap(), by_hand);
+        // Ed25519 is deterministic: the token is fixed.
+        let token = site.sign(&claims).unwrap();
+        assert_eq!(token, TOKEN);
+        let raw = b64_decode(TOKEN).unwrap();
+        assert_eq!(raw[..by_hand.len()], by_hand[..]);
+        assert_eq!(raw[by_hand.len()..], unhex(SIGNATURE)[..]);
+        // And the server accepts it (for "eu-1", started long before).
+        let v = Verifier::new(&unhex(PUBLIC), "eu-1", 1_700_000_000_000).unwrap();
+        assert_eq!(v.verify(TOKEN, 1_800_000_001_000).unwrap(), claims);
     }
 
     #[test]

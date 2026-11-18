@@ -88,6 +88,7 @@ impl RunningServer {
     /// Starts a server for `world`; deltas and the certificate live in `data_dir`
     /// (`deltas/`, `server/`). Call from inside a tokio runtime.
     pub fn start(world: &World, cfg: ServerConfig, data_dir: &Path) -> anyhow::Result<Self> {
+        cfg.validate()?;
         let gen_cfg = GenConfig::standard();
         let fingerprint = gen_cfg.fingerprint(world);
         let terrain = Arc::new(Terrain::from_world(world, gen_cfg.voxel.clone())?);

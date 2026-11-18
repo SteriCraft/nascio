@@ -23,9 +23,13 @@ struct Cli {
     /// Folder of the deltas and the certificate (default: the world folder).
     #[arg(long)]
     data: Option<PathBuf>,
-    /// Overrides `bind`.
+    /// Overrides `bind` (default 127.0.0.1:7777; 0.0.0.0:7777 to accept other machines,
+    /// which needs a `server_id` of its own).
     #[arg(long)]
     bind: Option<std::net::SocketAddr>,
+    /// Overrides `server_id` (the audience of the site's tokens).
+    #[arg(long)]
+    server_id: Option<String>,
     /// Development: every account may log in with a secret, and an unknown name creates its
     /// account (`swarm`, the viewer without a token).
     #[arg(long)]
@@ -41,6 +45,9 @@ async fn main() -> anyhow::Result<()> {
     };
     if let Some(b) = cli.bind {
         cfg.bind = b;
+    }
+    if let Some(id) = cli.server_id.clone() {
+        cfg.server_id = id;
     }
     if cli.open_registration {
         cfg.open_registration = true;
@@ -80,7 +87,9 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         })?;
-    println!("console: {HELP}");
+    let term = Term::detect();
+    println!("console: type a command, or help (help <command> for its details)");
+    term.start();
     let mut every = tokio::time::interval(Duration::from_secs(10));
     loop {
         tokio::select! {
@@ -89,12 +98,80 @@ async fn main() -> anyhow::Result<()> {
                 if !command(&server, line.trim()) {
                     break;
                 }
+                term.prompt();
             }
-            _ = every.tick() => print_stats(&server),
+            _ = every.tick() => {
+                term.interrupt();
+                print_stats(&server);
+                term.prompt();
+            }
         }
     }
+    term.end();
     println!("stopping");
     server.shutdown()
+}
+
+/// The console's look on a terminal: a `>` prompt and a blinking underline cursor, which
+/// read together as `>_`. Off when the output is not a terminal (a log file, a pipe).
+struct Term {
+    /// The output is a terminal.
+    tty: bool,
+    /// It understands ANSI sequences (cursor shape, clearing the line).
+    ansi: bool,
+}
+
+impl Term {
+    fn detect() -> Self {
+        use std::io::IsTerminal;
+        let tty = std::io::stdout().is_terminal() && std::io::stdin().is_terminal();
+        // Windows: Windows Terminal and VS Code process ANSI sequences; the old console
+        // window would print them.
+        let ansi = tty
+            && (!cfg!(windows)
+                || std::env::var_os("WT_SESSION").is_some()
+                || std::env::var_os("TERM_PROGRAM").is_some());
+        Self { tty, ansi }
+    }
+
+    fn write(&self, s: &str) {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(s.as_bytes());
+        let _ = out.flush();
+    }
+
+    /// Shows the prompt (and the blinking underline cursor).
+    fn start(&self) {
+        if self.ansi {
+            self.write("\x1b[3 q");
+        }
+        self.prompt();
+    }
+
+    fn prompt(&self) {
+        if self.tty {
+            self.write("> ");
+        }
+    }
+
+    /// Before a line printed while the prompt waits: clear the prompt's line.
+    fn interrupt(&self) {
+        if self.ansi {
+            self.write("\r\x1b[K");
+        } else if self.tty {
+            self.write("\n");
+        }
+    }
+
+    /// Gives the terminal its own cursor back.
+    fn end(&self) {
+        if self.ansi {
+            self.write("\r\x1b[K\x1b[0 q");
+        } else if self.tty {
+            self.write("\n");
+        }
+    }
 }
 
 fn print_stats(server: &RunningServer) {
@@ -123,7 +200,88 @@ fn print_stats(server: &RunningServer) {
     );
 }
 
-const HELP: &str = "help · list · kick <name> [reason] · ban <name> [30m|12h|7d|2w] [reason] · unban <name> · bans · admin <name> on|off · stats · adduser <name> <secret> [admin] · stop";
+/// The console commands: name, arguments, summary, details.
+const COMMANDS: &[(&str, &str, &str, &str)] = &[
+    (
+        "help",
+        "[command]",
+        "lists the commands, or details one",
+        "Without an argument, lists every command with its arguments. With a command's name, tells what it does.",
+    ),
+    (
+        "list",
+        "",
+        "players online",
+        "Prints each player online: account name, entity number and position (x, y, z in metres).",
+    ),
+    (
+        "stats",
+        "",
+        "server measurements",
+        "Prints players, tick times (median and 99th percentile), edits, columns built and sent, entity datagrams and abuse events. Printed every 10 s anyway.",
+    ),
+    (
+        "kick",
+        "<name> [reason]",
+        "disconnects a player",
+        "Tells the player the reason (default: kicked by the administrator), then closes the connection. The player may log in again: see ban.",
+    ),
+    (
+        "ban",
+        "<name> [duration] [reason]",
+        "bans an account",
+        "Duration: 30s, 30m, 12h, 7d or 2w; without one, the ban is permanent (a first word that is not a duration starts the reason). Kicks the player if online; a login is refused with the reason and the time left. Kept in accounts.toml; a new ban replaces the former one.",
+    ),
+    (
+        "unban",
+        "<name>",
+        "lifts a ban",
+        "The account may log in again at once.",
+    ),
+    (
+        "bans",
+        "",
+        "bans in force",
+        "Lists the banned accounts with the time left and the reason; expired bans are not listed.",
+    ),
+    (
+        "adduser",
+        "<name> <secret> [admin]",
+        "creates an account",
+        "Name: 3 to 16 letters, digits or _; secret: 8 characters at least (avoid spaces). With admin, the account may log in with its secret (secret_login = \"admin\"); players get their accounts from the site's tokens.",
+    ),
+    (
+        "admin",
+        "<name> on|off",
+        "makes an account an administrator, or not",
+        "Administrators may log in with their secret when secret_login = \"admin\" (the default), for instance while the site is down.",
+    ),
+    (
+        "stop",
+        "",
+        "stops the server",
+        "Closes the connections and writes every edit to the disk (Ctrl+C does the same).",
+    ),
+];
+
+fn help(topic: Option<&str>) {
+    match topic {
+        None => {
+            for (name, args, summary, _) in COMMANDS {
+                let call = format!("{name} {args}");
+                println!("  {call:<34} {summary}");
+            }
+        }
+        Some(t) => match COMMANDS.iter().find(|c| c.0 == t) {
+            Some((name, args, summary, details)) => {
+                println!("{name} {args}");
+                println!("  {summary}.");
+                println!("  {details}");
+            }
+            None => println!("no command {t} (help lists them)"),
+        },
+    }
+}
 
 /// Runs a console command; false to stop the server.
 fn command(server: &RunningServer, line: &str) -> bool {
@@ -131,7 +289,7 @@ fn command(server: &RunningServer, line: &str) -> bool {
     let sh = &server.shared;
     match words.next() {
         None => {}
-        Some("help") => println!("{HELP}"),
+        Some("help") => help(words.next()),
         Some("list") => {
             let players = sh.list();
             println!("{} players online", players.len());

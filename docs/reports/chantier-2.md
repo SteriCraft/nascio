@@ -154,3 +154,34 @@ Points à valider :
 2. **Le jeton consommé par une connexion qui échoue ensuite** (déjà connecté, banni) : c'est accepté tel quel.
 3. **Le format du jeton** est propre à Nascio (postcard), pas un JWT. Le site devra produire du postcard : c'est simple, et la structure est fixe (voir `Claims`), mais si le site est écrit en JavaScript ou en PHP, un encodage plus standard serait peut-être préférable. Il est facile de changer avant la mise en service, puisque `version` le prévoit.
 4. **`server_id` vaut `"dev"` par défaut.** Un serveur public devra en avoir un propre, sinon un jeton émis pour un autre serveur de même nom y serait accepté.
+
+## Après la revue (2026-11-18)
+L'auteur a validé le chantier 2, y compris les quatre décisions de la fin du rapport. Il a demandé deux ajouts, plus une console plus lisible.
+
+**1. Format du jeton dans la spec.** `spec-proposee.md` §7.2 décrit maintenant le jeton octet par octet :
+- la charge champ par champ (varint LEB128, zigzag pour les dates, nonce brut) ;
+- la signature Ed25519 de la charge telle quelle ;
+- le base64url canonique sans remplissage.
+
+La spec donne aussi des **vecteurs fixes** : la graine `00…1f`, des claims pour alice sur eu-1, puis la clé publique, la charge (40 octets), la signature et le jeton (139 caractères) attendus. Le test `token::tests::fixed_vectors` les vérifie. Il construit la charge à la main, en suivant la description de la spec et sans postcard, la compare à postcard, puis vérifie la signature, le jeton et l'acceptation par le serveur. La clé publique attendue est la valeur connue d'Ed25519 pour cette graine, ce qui contrôle `ring` de façon indépendante. `SiteKey::from_seed` sert à ces vecteurs.
+
+**2. `server_id = "dev"` réservé aux serveurs locaux.** `ServerConfig::validate`, appelée par `RunningServer::start`, refuse de démarrer avec `"dev"` sur une adresse non locale. Le message est : « server_id "dev" is for local servers: give this server its own server_id (or --server-id) to listen on 0.0.0.0:7777 ». Elle refuse aussi un `server_id` vide.
+
+Pour que le serveur démarre encore sans aucune option, **`bind` vaut désormais `127.0.0.1:7777` par défaut** (avant : `0.0.0.0:7777`). L'option `--server-id` s'ajoute à `--bind`, et la procédure S6 passe `--bind 0.0.0.0:7777 --server-id lab`.
+
+⚠ **Pour le serveur Linux** : jusqu'ici, on le lançait sans `--bind`, donc il écoutait sur `0.0.0.0`. Désormais, il faut écrire `--bind 0.0.0.0:7777 --server-id <nom>` ; sans cela, il n'écoute que localement.
+
+Test unitaire `a_public_server_needs_its_own_id` : le défaut est valide ; `0.0.0.0`, une adresse du réseau local et `[::]` sont refusés avec `"dev"` ; `"eu-1"` passe ; un `server_id` fait seulement d'espaces est refusé ; `[::1]` est accepté. Essai réel : `--bind 0.0.0.0:7777` sans `--server-id` est refusé avec le message ci-dessus.
+
+**3. Console.**
+- Sur un terminal, le serveur affiche l'invite `> ` et passe le curseur en soulignement clignotant (séquence `ESC [3 q`). Les deux se lisent ensemble comme `>_`.
+- L'invite revient après chaque commande. Avant la ligne de statistiques des 10 s, la ligne de l'invite est effacée, puis l'invite est réaffichée. Au départ, le terminal retrouve son propre curseur (`ESC [0 q`).
+- Sous Windows, les séquences ANSI ne sont envoyées que dans Windows Terminal ou VS Code (variables `WT_SESSION` ou `TERM_PROGRAM`). L'ancienne fenêtre de console les afficherait telles quelles, elle n'a donc que l'invite `> `.
+- Quand la sortie n'est pas un terminal (fichier, tube, `tee`), il n'y a ni invite ni séquence.
+- `help` liste les commandes avec leurs arguments et une ligne d'explication. `help <commande>` détaille une commande ; `help` suivi d'un nom inconnu le signale.
+
+Limites :
+- les messages venus des fils du serveur (`abuse:`, « account … created ») s'écrivent à la suite de l'invite, sans la redessiner ;
+- une ligne de statistiques efface à l'écran le texte en cours de frappe, mais pas du tampon : la commande part quand même.
+
+Le rendu `>_` n'a pas pu être vérifié depuis mon environnement, qui n'a pas de terminal interactif : à regarder lors du prochain lancement. Le contenu de `help` a été vérifié en passant les commandes par un tube.

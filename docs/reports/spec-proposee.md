@@ -31,6 +31,58 @@ Le client envoie la version du protocole, son nom de compte et une preuve d'iden
 
 Ensuite, le serveur refuse un compte banni (bannissement par compte, temporaire ou permanent, avec sa raison, signalé seulement après une preuve valide) et une deuxième session. Il bloque une adresse après trop d'échecs. Enfin, il répond avec `generator_version`, l'empreinte de génération, la table des blocs (leurs définitions) et son heure UTC. Le client mesure le décalage de son horloge (aller-retour, à la manière de NTP) et dérive le temps du jeu de l'UTC corrigée : aucune horloge interne.
 
+#### Format du jeton, octet par octet
+Un jeton est la chaîne `base64url(charge ‖ signature)` : alphabet URL de la RFC 4648 §5 (`A–Z a–z 0–9 - _`), **sans** remplissage `=`, au plus 512 caractères. Le serveur refuse une forme non canonique, c'est-à-dire des bits de fin non nuls.
+
+La **charge** enchaîne les champs suivants, dans cet ordre et sans séparateur (c'est l'encodage postcard de `Claims`) :
+
+| Champ | Encodage |
+|---|---|
+| `version` | 1 octet, vaut `0x01` |
+| `name` | longueur en varint, puis les octets UTF-8 (3 à 16 caractères parmi `A–Z a–z 0–9 _`) |
+| `server` | longueur en varint, puis les octets UTF-8 (le `server_id` visé) |
+| `issued_unix_ms` | entier signé de 64 bits en zigzag, puis en varint |
+| `expires_unix_ms` | même encodage ; au plus `issued_unix_ms` + 300 000 |
+| `nonce` | 16 octets bruts, aléatoires (pas de longueur) |
+
+Définitions des encodages :
+- **varint** (LEB128 non signé) : 7 bits par octet, poids faible d'abord ; le bit `0x80` signale qu'un octet suit.
+- **zigzag** : `(v << 1) ^ (v >> 63)`, avec un décalage arithmétique, interprété comme un entier non signé de 64 bits.
+
+La **signature** fait 64 octets. C'est une signature Ed25519 (RFC 8032, sans pré-hachage ni contexte) de la charge, telle quelle. Le serveur la reconnaît comme les 64 derniers octets ; tout le reste est la charge, qui doit se lire exactement, sans octet de trop.
+
+**Vecteurs de test** (vérifiés par `crates/server/src/token.rs::fixed_vectors`). Ed25519 est déterministe : une implémentation correcte doit retrouver exactement ces valeurs.
+
+Entrées :
+- graine de la clé privée (32 octets) : `000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f` ;
+- `name = "alice"`, `server = "eu-1"`, `issued_unix_ms = 1 800 000 000 000`, `expires_unix_ms = 1 800 000 300 000` ;
+- `nonce = a0 a1 a2 … af`.
+
+Clé publique attendue :
+- en hexadécimal : `03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8` ;
+- en base64url, la forme de `site_public_key` : `A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg`.
+
+Charge attendue (40 octets) :
+```
+01                                  version
+05 616c696365                       "alice"
+04 65752d31                         "eu-1"
+80c0e285e368                        issued  (zigzag 3 600 000 000 000)
+c08f8786e368                        expires (zigzag 3 600 000 600 000)
+a0a1a2a3a4a5a6a7a8a9aaabacadaeaf    nonce
+```
+
+Signature attendue :
+```
+dcc27d3b4a7db6312a01d13fef72eb799d6d31bd823e03e11cdbdaa09de5ed04
+7dd3a820d744721b2871441d61af9c7f0919e3f26684d7fc9ba5f53eab981808
+```
+
+Jeton attendu (139 caractères) :
+```
+AQVhbGljZQRldS0xgMDiheNowI-HhuNooKGio6SlpqeoqaqrrK2ur9zCfTtKfbYxKgHRP-9y63mdbTG9gj4D4Rzb2qCd5e0EfdOoINdEchsocUQdYa-cfwkZ4_JmhNf8m6X1PquYGAg
+```
+
 ### 7.3 Chunks
 - Codec v2 : un octet de version, la palette (nombre puis identifiants, varints), puis des plages (indice de palette, longueur − 1), varints, dans l'ordre des indices des blocs (`x`, puis `z`, puis `y`) ; pas de plages quand la palette n'a qu'une entrée : un chunk uniforme tient en 3 à 5 octets.
 - Une colonne transporte aussi ses données de rendu, calculées par le serveur à partir du climat : bloc teinté, couleurs des quatre coins (`f32`), profondeur de l'eau de chaque colonne locale.

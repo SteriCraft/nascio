@@ -47,7 +47,9 @@ pub struct ServerConfig {
     pub secret_login: SecretLogin,
     /// The site's Ed25519 public key (base64url, from `site keygen`); empty: no tokens.
     pub site_public_key: String,
-    /// This server's name in the tokens (their audience).
+    /// This server's name in the tokens (their audience). `dev` is refused unless the server
+    /// listens on a local address only: a public server needs its own name, or a token made
+    /// for another `dev` server would open it.
     pub server_id: String,
     /// Argon2id cost of new accounts: memory (KiB) and passes.
     pub account_hash_kib: u32,
@@ -81,7 +83,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            bind: "0.0.0.0:7777".parse().expect("address"),
+            bind: "127.0.0.1:7777".parse().expect("address"),
             tick_hz: 20,
             fsync_interval_ms: 50,
             chunk_radius_m: 512,
@@ -101,7 +103,7 @@ impl Default for ServerConfig {
             open_registration: false,
             secret_login: SecretLogin::Admin,
             site_public_key: String::new(),
-            server_id: "dev".to_owned(),
+            server_id: DEV_SERVER_ID.to_owned(),
             account_hash_kib: 19 * 1024,
             account_hash_passes: 2,
             account_hash_concurrency: 0,
@@ -130,9 +132,23 @@ pub enum SecretLogin {
     None,
 }
 
+/// The default `server_id`, for servers on this machine only.
+pub const DEV_SERVER_ID: &str = "dev";
+
 impl ServerConfig {
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         Ok(toml::from_str(&std::fs::read_to_string(path)?)?)
+    }
+
+    /// Settings the server refuses to start with.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.server_id.trim().is_empty(), "server_id is empty");
+        anyhow::ensure!(
+            self.server_id != DEV_SERVER_ID || self.bind.ip().is_loopback(),
+            "server_id \"{DEV_SERVER_ID}\" is for local servers: give this server its own server_id (or --server-id) to listen on {}",
+            self.bind
+        );
+        Ok(())
     }
 }
 
@@ -160,5 +176,22 @@ mod tests {
                 .secret_login,
             SecretLogin::None
         );
+    }
+
+    #[test]
+    fn a_public_server_needs_its_own_id() {
+        let mut c = ServerConfig::default();
+        assert!(c.validate().is_ok(), "local by default");
+        for bind in ["0.0.0.0:7777", "192.168.1.128:7777", "[::]:7777"] {
+            c.bind = bind.parse().unwrap();
+            assert!(c.validate().is_err(), "{bind}");
+        }
+        c.server_id = "eu-1".into();
+        assert!(c.validate().is_ok());
+        c.server_id = " ".into();
+        assert!(c.validate().is_err());
+        c.server_id = DEV_SERVER_ID.into();
+        c.bind = "[::1]:7777".parse().unwrap();
+        assert!(c.validate().is_ok());
     }
 }
