@@ -58,7 +58,7 @@ async fn an_edit_is_seen_by_every_client_and_survives_a_restart() {
         .unwrap();
     assert_ne!(a.hello.player, b.hello.player);
     let spawn = a.hello.spawn;
-    let granite = a.hello.blocks.iter().position(|n| n == "granite").unwrap() as u16;
+    let granite = a.blocks.id("granite").unwrap();
     // Above the surface: air, in the spawn column.
     let p = BlockPos::new(spawn[0] as i32, spawn[1] as i32 + 5, spawn[2] as i32);
     let (mut ma, mut mb) = (Mirror::default(), Mirror::default());

@@ -4403,9 +4403,9 @@ name = "nascio-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "nascio-chunk",
  "nascio-core",
  "nascio-protocol",
- "nascio-voxel",
  "quinn",
  "tokio",
 ]
@@ -4426,8 +4426,8 @@ name = "nascio-protocol"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "nascio-chunk",
  "nascio-core",
- "nascio-voxel",
  "postcard",
  "proptest",
  "serde",
@@ -4484,6 +4484,7 @@ dependencies = [
  "bevy",
  "bevy_egui",
  "clap",
+ "nascio-chunk",
  "nascio-client",
  "nascio-core",
  "nascio-protocol",

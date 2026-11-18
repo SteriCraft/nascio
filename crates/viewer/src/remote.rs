@@ -1,5 +1,7 @@
 //! Network mode (`--connect`): the chunk columns come from a server (`nascio-client`) and are
-//! meshed from what it sent, without generating them here (S4b). Sky, climate and horizon
+//! meshed from what it sent, with the block table of its hello, without generating them here
+//! (S4b, chantier 1). This module uses only `nascio-chunk`, `nascio-client` and
+//! `nascio-protocol`, like the future client. Sky, climate and horizon
 //! still come from the local world: the viewer is a development tool; the standalone client
 //! will get them from the server (`docs/reports/serveur-S4a.md`).
 //!
@@ -19,12 +21,11 @@ use bevy::prelude::{
     Assets, Color, Commands, Component, Cuboid, Entity, Handle, LinearRgba, Local, Mesh, Mesh3d,
     MeshMaterial3d, Quat, Query, Res, ResMut, Resource, StandardMaterial, Time, Transform, Vec3,
 };
+use nascio_chunk::{Blocks, ChunkMesh, mesh_chunk};
 use nascio_client::{Entities, Event, Mirror, connect};
 use nascio_core::consts::CHUNKS_PER_AXIS;
 use nascio_core::coords::{ChunkPos, WorldPos};
 use nascio_protocol::messages::{ClientMsg, ServerMsg};
-use nascio_voxel::block::Blocks;
-use nascio_voxel::{ChunkMesh, mesh_chunk};
 
 use crate::fly::{FlyCam, RenderOrigin, Streamer};
 
@@ -43,6 +44,8 @@ pub struct Remote {
     epoch: Instant,
     /// Radius of the columns the server sends, metres.
     pub radius_m: u32,
+    /// The server's block table (meshing).
+    pub blocks: Arc<Blocks>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -50,20 +53,19 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Remote {
-    /// Connects (waits for the handshake) and starts the connection thread. `blocks`: the
-    /// local block table, which must be the server's (same world).
+    /// Connects (waits for the handshake) and starts the connection thread. `local`: the
+    /// block table of the local world, which must be the server's: the viewer still draws
+    /// the horizon and picks the blocks of its edits from the local world.
     pub fn start(
         addr: SocketAddr,
         cert: &Path,
         name: &str,
         secret: &str,
-        blocks: &Blocks,
+        local: &Blocks,
         spawn_pos: [f64; 3],
     ) -> anyhow::Result<Self> {
         let cert = std::fs::read(cert).with_context(|| format!("reading {}", cert.display()))?;
-        let names: Vec<String> = (0..blocks.len())
-            .map(|i| blocks.def(i as u16).name.clone())
-            .collect();
+        let local = local.registry().clone();
         let mirror = Arc::new(Mutex::new(Mirror::default()));
         let dirty = Arc::new(Mutex::new(BTreeSet::new()));
         let status = Arc::new(Mutex::new(String::new()));
@@ -72,7 +74,7 @@ impl Remote {
         let (name, secret) = (name.to_owned(), secret.to_owned());
         let epoch = Instant::now();
         let (out, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<ClientMsg>();
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<anyhow::Result<u32>>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<anyhow::Result<(u32, Blocks)>>();
         let (m, d, st, en) = (
             mirror.clone(),
             dirty.clone(),
@@ -96,13 +98,13 @@ impl Remote {
                         Ok(c) => c,
                         Err(e) => return drop(ready_tx.send(Err(e))),
                     };
-                    if c.hello.blocks != names {
+                    if c.blocks.registry() != &local {
                         let _ = ready_tx.send(Err(anyhow::anyhow!(
                             "the server's block table differs from this world's"
                         )));
                         return;
                     }
-                    let _ = ready_tx.send(Ok(c.hello.chunk_radius_m));
+                    let _ = ready_tx.send(Ok((c.hello.chunk_radius_m, c.blocks.clone())));
                     c.send(ClientMsg::Move {
                         pos: spawn_pos,
                         yaw: 0.0,
@@ -160,7 +162,7 @@ impl Remote {
                     }
                 });
             })?;
-        let radius_m = ready_rx
+        let (radius_m, blocks) = ready_rx
             .recv_timeout(Duration::from_secs(20))
             .context("no answer from the server")??;
         ensure!(radius_m >= 64, "server radius {radius_m} m too small");
@@ -173,6 +175,7 @@ impl Remote {
             correction,
             epoch,
             radius_m,
+            blocks: Arc::new(blocks),
         })
     }
 
@@ -185,8 +188,9 @@ impl Remote {
         lock(&self.mirror).can_mesh(key.0, key.1)
     }
 
-    /// Meshes a column from the mirror: `None` while a neighbour is missing.
-    pub fn mesh_column(&self, key: (i32, i32), blocks: &Blocks) -> Option<Vec<(i32, ChunkMesh)>> {
+    /// Meshes a column from the mirror with the server's block table: `None` while a
+    /// neighbour is missing.
+    pub fn mesh_column(&self, key: (i32, i32)) -> Option<Vec<(i32, ChunkMesh)>> {
         let (padded, tint) = {
             let m = lock(&self.mirror);
             if !m.can_mesh(key.0, key.1) {
@@ -202,7 +206,7 @@ impl Remote {
         Some(
             padded
                 .into_iter()
-                .map(|(cy, p)| (cy, mesh_chunk(&p, blocks, &tint)))
+                .map(|(cy, p)| (cy, mesh_chunk(&p, &self.blocks, &tint)))
                 .filter(|(_, m)| !m.is_empty())
                 .collect(),
         )

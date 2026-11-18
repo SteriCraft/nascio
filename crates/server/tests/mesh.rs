@@ -49,12 +49,10 @@ async fn site(world: &World, terrain: &Terrain, k: usize, scx: i32, scz: i32) {
         .await
         .unwrap();
     let blocks = terrain.blocks();
-    let names: Vec<String> = (0..blocks.len())
-        .map(|i| blocks.def(i as u16).name.clone())
-        .collect();
     assert_eq!(
-        c.hello.blocks, names,
-        "same block table: ids are the session's"
+        c.blocks.registry(),
+        blocks.registry(),
+        "the client received the world's block table"
     );
     // Columns whose eight neighbours are all within the radius (5 columns) of the spawn
     // column (0, 3124).
@@ -92,7 +90,8 @@ async fn site(world: &World, terrain: &Terrain, k: usize, scx: i32, scz: i32) {
             }
             let local = mesh_chunk(&col.padded_chunk(terrain, cy), blocks, &tint);
             let p = m.padded_chunk(ChunkPos::new(cx, cy, cz)).unwrap();
-            let remote = mesh_chunk(&p, blocks, &got.tint);
+            // The client meshes with the table it received, not the generator's.
+            let remote = mesh_chunk(&p, &c.blocks, &got.tint);
             assert!(local == remote, "mesh of chunk ({cx}, {cy}, {cz})");
             compared += 1;
             quads += local.opaque.quad_count() + local.water.quad_count();

@@ -323,7 +323,7 @@ fn spawn_column(
     let terrain = terrain.clone();
     workers.pool.spawn(move || {
         if let Some(remote) = remote {
-            let meshes = remote.mesh_column(key, terrain.blocks());
+            let meshes = remote.mesh_column(key);
             let _ = tx.send(ColumnResult {
                 key,
                 request,

@@ -130,9 +130,7 @@ impl RunningServer {
             protocol: nascio_protocol::PROTOCOL_VERSION,
             generator_version: GENERATOR_VERSION,
             fingerprint,
-            blocks: (0..blocks.len())
-                .map(|i| blocks.def(i as u16).name.clone())
-                .collect(),
+            blocks: blocks.registry().blocks.clone(),
             server_unix_ms: 0,
             player: 0,
             spawn: [sx, sy, sz],

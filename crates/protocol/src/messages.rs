@@ -4,6 +4,7 @@
 //! Positions of blocks are world block coordinates; the server wraps them on the torus
 //! (`BlockPos::new`), so a client may send unwrapped ones.
 
+use nascio_chunk::BlockDef;
 use serde::{Deserialize, Serialize};
 
 /// First message of the client.
@@ -23,8 +24,9 @@ pub struct ServerHello {
     pub generator_version: u32,
     /// Generation fingerprint (world hash and `[voxel]` config): client cache key.
     pub fingerprint: String,
-    /// Block names; the index is the block id of the session.
-    pub blocks: Vec<String>,
+    /// The block table of the world (names, colours, matter); the index is the block id of
+    /// the session. The client meshes with it and reads no block file of its own.
+    pub blocks: Vec<BlockDef>,
     /// Server UTC time, milliseconds since the Unix epoch, when the message was built.
     pub server_unix_ms: i64,
     /// Entity id of the player.
@@ -129,7 +131,7 @@ mod tests {
             protocol: crate::PROTOCOL_VERSION,
             generator_version: 19,
             fingerprint: "abc".into(),
-            blocks: vec!["air".into(), "granite".into()],
+            blocks: nascio_chunk::BlockRegistry::builtin().blocks,
             server_unix_ms: 1_795_000_000_000,
             player: 7,
             spawn: [99_999.5, 64.0, 0.25],

@@ -9,9 +9,9 @@
 //! every client.
 
 use anyhow::{Context, bail, ensure};
-use nascio_voxel::block::BlockId;
-use nascio_voxel::chunk::VOLUME;
-use nascio_voxel::{Chunk, ChunkTint};
+use nascio_chunk::block::BlockId;
+use nascio_chunk::chunk::VOLUME;
+use nascio_chunk::{Chunk, ChunkTint};
 
 use crate::varint::{Reader, put, put_i};
 
@@ -206,7 +206,7 @@ impl Column {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nascio_voxel::block::AIR;
+    use nascio_chunk::block::AIR;
     use proptest::prelude::*;
 
     fn round(c: &Chunk) -> (Chunk, usize) {

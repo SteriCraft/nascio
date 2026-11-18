@@ -13,6 +13,7 @@ dev = ["bevy/dynamic_linking"]
 
 [dependencies]
 nascio-core.workspace = true
+nascio-chunk.workspace = true
 nascio-worldgen.workspace = true
 nascio-voxel.workspace = true
 nascio-tools.workspace = true

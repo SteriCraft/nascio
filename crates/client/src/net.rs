@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use nascio_chunk::{BlockRegistry, Blocks};
 use nascio_protocol::chunk::{Column, MAX_COLUMN_BYTES};
 use nascio_protocol::frame::{Deframer, MAX_CONTROL_FRAME, frame};
 use nascio_protocol::messages::{
@@ -30,6 +31,8 @@ pub enum Event {
 /// An open connection.
 pub struct Connection {
     pub hello: ServerHello,
+    /// The server's block table (from `hello.blocks`, validated), for meshing.
+    pub blocks: Blocks,
     conn: quinn::Connection,
     out: mpsc::UnboundedSender<ClientMsg>,
     pub events: mpsc::UnboundedReceiver<Event>,
@@ -114,7 +117,11 @@ pub async fn connect(
         ServerMsg::Refused { reason } => bail!("refused by the server: {reason}"),
         m => bail!("unexpected first message {m:?}"),
     };
-    let max_id = u16::try_from(hello.blocks.len().saturating_sub(1)).unwrap_or(u16::MAX);
+    let blocks = Blocks::new(BlockRegistry {
+        blocks: hello.blocks.clone(),
+    })
+    .context("the server's block table")?;
+    let max_id = u16::try_from(blocks.len().saturating_sub(1)).unwrap_or(u16::MAX);
     let (out, mut out_rx) = mpsc::unbounded_channel::<ClientMsg>();
     let (ev, events) = mpsc::unbounded_channel();
     // Writer of the control stream.
@@ -186,6 +193,7 @@ pub async fn connect(
     });
     Ok(Connection {
         hello,
+        blocks,
         conn,
         out,
         events,

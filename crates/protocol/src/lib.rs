@@ -13,5 +13,5 @@ pub mod messages;
 pub mod varint;
 
 /// Version of the protocol, checked at the handshake. Any change of a message or a codec
-/// increments it.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// increments it. v5: the block table (definitions, not only names) in `ServerHello`.
+pub const PROTOCOL_VERSION: u32 = 5;

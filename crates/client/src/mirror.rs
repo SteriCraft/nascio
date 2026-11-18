@@ -8,11 +8,11 @@
 
 use std::collections::BTreeMap;
 
+use nascio_chunk::block::AIR;
+use nascio_chunk::{Chunk, PaddedChunk};
 use nascio_core::consts::{CHUNK_SIZE, CHUNKS_PER_AXIS};
 use nascio_core::coords::{BlockPos, ChunkPos, LocalPos};
 use nascio_protocol::chunk::Column;
-use nascio_voxel::block::AIR;
-use nascio_voxel::{Chunk, PaddedChunk};
 
 /// Blocks of one chunk changed in a tick.
 #[derive(Clone, Debug)]
@@ -207,7 +207,7 @@ mod tests {
             cy_min: 0,
             version,
             chunks: vec![Chunk::filled(1)],
-            tint: nascio_voxel::ChunkTint::NONE,
+            tint: nascio_chunk::ChunkTint::NONE,
         }
     }
 

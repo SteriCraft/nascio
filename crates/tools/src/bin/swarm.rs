@@ -219,12 +219,7 @@ async fn bot(k: usize, cli: &Cli, cert: &[u8], c: &Counters, until: Instant) -> 
         Some(v) => [v[0], v[1], v[2]],
         None => conn.hello.spawn,
     };
-    let granite = conn
-        .hello
-        .blocks
-        .iter()
-        .position(|n| n == "granite")
-        .unwrap_or(1) as u16;
+    let granite = conn.blocks.id("granite").unwrap_or(1);
     let mut rng = Lcg(cli.seed ^ (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     // A random start within the radius, a random heading.
     let r = cli.radius * rng.next().sqrt();
