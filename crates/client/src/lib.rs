@@ -11,4 +11,5 @@ pub mod net;
 
 pub use entities::{Entities, Pose};
 pub use mirror::Mirror;
-pub use net::{Connection, Event, connect};
+pub use nascio_protocol::messages::Auth;
+pub use net::{Connection, Event, connect, connect_with};

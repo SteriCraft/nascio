@@ -13,13 +13,13 @@ use anyhow::{Context, bail};
 use nascio_core::consts::{CHUNK_SIZE, WORLD_SIZE_F64};
 use nascio_core::torus;
 use nascio_protocol::frame::{Deframer, MAX_CONTROL_FRAME, frame};
-use nascio_protocol::messages::{ClientMsg, ServerHello, ServerMsg, from_bytes, to_bytes};
+use nascio_protocol::messages::{Auth, ClientMsg, ServerHello, ServerMsg, from_bytes, to_bytes};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::accounts::{Accounts, Login};
 use crate::columns::{ColumnCache, wrap_column};
-use crate::config::ServerConfig;
+use crate::config::{SecretLogin, ServerConfig};
 use crate::security::{AbuseLog, Bucket, LoginGuard};
 use crate::sim::{Input, PlayerLink, View};
 
@@ -39,6 +39,8 @@ pub struct Shared {
     pub hashing: tokio::sync::Semaphore,
     pub abuse: AbuseLog,
     pub logins: LoginGuard,
+    /// Checks the site's tokens (`None`: no `site_public_key`, tokens refused).
+    pub tokens: Option<crate::token::Verifier>,
     /// Players online, by account name.
     pub sessions: Mutex<BTreeMap<String, Session>>,
 }
@@ -180,7 +182,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     let ip = conn.remote_address().ip();
     let refuse = match refuse {
         Some(r) => Some(r),
-        None => login(&shared, ip, &hello.name, &hello.secret).await.err(),
+        None => login(&shared, ip, &hello.name, &hello.auth).await.err(),
     };
     if let Some(reason) = refuse {
         send.write_all(&frame(&to_bytes(&ServerMsg::Refused {
@@ -400,8 +402,9 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     (dx * dx + (b[1] - a[1]).powi(2) + dz * dz).sqrt()
 }
 
-/// Checks a login (hashing on a blocking thread); `Err` holds the reason given to the client.
-async fn login(shared: &Arc<Shared>, ip: IpAddr, name: &str, secret: &str) -> Result<(), String> {
+/// Checks a login — a token from the site, or a secret (hashed on a blocking thread) when
+/// `secret_login` allows it; `Err` holds the reason given to the client.
+async fn login(shared: &Arc<Shared>, ip: IpAddr, name: &str, auth: &Auth) -> Result<(), String> {
     let cfg = &shared.cfg;
     let now = Instant::now();
     if !shared.logins.allowed(ip, cfg.login_failures_per_min, now) {
@@ -410,21 +413,49 @@ async fn login(shared: &Arc<Shared>, ip: IpAddr, name: &str, secret: &str) -> Re
             .log(unix_ms(), ip, name, "login", "blocked: too many failures");
         return Err("too many failed logins: wait a minute".into());
     }
-    let (sh, n, s, open) = (
-        shared.clone(),
-        name.to_owned(),
-        secret.to_owned(),
-        cfg.open_registration,
-    );
-    // A rush of logins waits here rather than taking every core.
-    let _permit = shared.hashing.acquire().await.map_err(|e| format!("{e}"))?;
-    let r = tokio::task::spawn_blocking(move || sh.accounts.login(&n, &s, open, unix_ms()))
-        .await
-        .map_err(|e| format!("{e}"))?;
+    let r = match auth {
+        Auth::Token(token) => match &shared.tokens {
+            None => Err(anyhow::anyhow!("this server takes no tokens")),
+            Some(v) => match v.verify(token, unix_ms()) {
+                Err(e) => Err(anyhow::anyhow!("{e}")),
+                Ok(c) if c.name != name => Err(anyhow::anyhow!("token for another name")),
+                Ok(_) => shared.accounts.token_login(name, unix_ms()),
+            },
+        },
+        Auth::Secret(_) if cfg.secret_login == SecretLogin::None => Err(anyhow::anyhow!(
+            "log in through the site (no secret logins)"
+        )),
+        Auth::Secret(secret) => {
+            let all = cfg.secret_login == SecretLogin::All;
+            let (sh, n, s, open) = (
+                shared.clone(),
+                name.to_owned(),
+                secret.to_owned(),
+                cfg.open_registration && all,
+            );
+            // A rush of logins waits here rather than taking every core.
+            let _permit = shared.hashing.acquire().await.map_err(|e| format!("{e}"))?;
+            let r = tokio::task::spawn_blocking(move || sh.accounts.login(&n, &s, open, unix_ms()))
+                .await
+                .map_err(|e| format!("{e}"))?;
+            // Told only with the right secret, like a ban.
+            match r {
+                Ok(_) if !all && !shared.accounts.is_admin(name) => Err(anyhow::anyhow!(
+                    "secret logins are for administrators: log in through the site"
+                )),
+                r => r,
+            }
+        }
+    };
     match r {
         Ok(login) => {
             if login == Login::Created {
-                println!("account {name} created ({ip})");
+                let how = if matches!(auth, Auth::Token(_)) {
+                    " from a token"
+                } else {
+                    ""
+                };
+                println!("account {name} created{how} ({ip})");
             }
             // Only once the secret is right, like the session check below.
             if let Some(ban) = shared.accounts.banned(name, unix_ms()) {

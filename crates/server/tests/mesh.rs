@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use nascio_client::{Event, Mirror, connect};
 use nascio_core::consts::CHUNKS_PER_AXIS;
 use nascio_core::coords::ChunkPos;
+use nascio_server::config::SecretLogin;
 use nascio_server::{RunningServer, ServerConfig};
 use nascio_voxel::{ColumnSet, GenConfig, Terrain, mesh_chunk};
 use nascio_worldgen::config::{Scale, WorldConfig};
@@ -43,6 +44,7 @@ async fn site(world: &World, terrain: &Terrain, k: usize, scx: i32, scz: i32) {
         generation_threads: 4,
         spawn_xz: [f64::from(scx) * 32.0 + 10.0, f64::from(scz) * 32.0 + 22.0],
         open_registration: true,
+        secret_login: SecretLogin::All,
         ..ServerConfig::default()
     };
     let server = RunningServer::start(world, cfg, &dir).unwrap();

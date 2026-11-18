@@ -214,7 +214,18 @@ impl RunningServer {
             0 => (std::thread::available_parallelism().map_or(2, |n| n.get()) / 2).max(1),
             n => n,
         };
+        let tokens = if cfg.site_public_key.is_empty() {
+            None
+        } else {
+            let key = token::b64_decode(cfg.site_public_key.trim())
+                .context("site_public_key is not base64url")?;
+            Some(
+                token::Verifier::new(&key, &cfg.server_id, net::unix_ms())
+                    .context("site_public_key")?,
+            )
+        };
         let shared = Arc::new(net::Shared {
+            tokens,
             hashing: tokio::sync::Semaphore::new(hash_permits),
             accounts,
             abuse,

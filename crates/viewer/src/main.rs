@@ -110,6 +110,10 @@ struct Args {
     /// Account secret for `--connect` (at least 8 characters).
     #[arg(long, default_value = "viewer-dev-secret")]
     secret: String,
+    /// Log in with this token from the site (`site token … --name <name>`) instead of the
+    /// secret, which servers keep for administrators.
+    #[arg(long)]
+    token: Option<String>,
     /// Run a scripted benchmark path (TOML, see `bench/default.toml`), then quit.
     /// Implies the 3D mode, 1920x1080, no vsync and the file's settings.
     #[arg(long)]
@@ -307,7 +311,10 @@ fn run(mut args: Args) -> anyhow::Result<()> {
                 addr,
                 &cert,
                 &args.name,
-                &args.secret,
+                match &args.token {
+                    Some(t) => nascio_client::Auth::Token(t.trim().to_owned()),
+                    None => nascio_client::Auth::Secret(args.secret.clone()),
+                },
                 terrain.blocks(),
                 [cam.pos.x, cam.pos.y, cam.pos.z],
             )?;

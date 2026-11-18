@@ -26,7 +26,8 @@ struct Cli {
     /// Overrides `bind`.
     #[arg(long)]
     bind: Option<std::net::SocketAddr>,
-    /// An unknown name creates its account at login (development: `swarm`, the viewer).
+    /// Development: every account may log in with a secret, and an unknown name creates its
+    /// account (`swarm`, the viewer without a token).
     #[arg(long)]
     open_registration: bool,
 }
@@ -41,7 +42,10 @@ async fn main() -> anyhow::Result<()> {
     if let Some(b) = cli.bind {
         cfg.bind = b;
     }
-    cfg.open_registration |= cli.open_registration;
+    if cli.open_registration {
+        cfg.open_registration = true;
+        cfg.secret_login = nascio_server::config::SecretLogin::All;
+    }
     let world = World::load(&cli.world)?;
     let data = cli.data.clone().unwrap_or_else(|| cli.world.clone());
     let server = RunningServer::start(&world, cfg, &data)?;
@@ -49,6 +53,20 @@ async fn main() -> anyhow::Result<()> {
         "listening on {} — certificate {}",
         server.addr,
         data.join("server").join("cert.der").display()
+    );
+    let c = &server.shared.cfg;
+    match &server.shared.tokens {
+        Some(_) => println!("site tokens accepted for server_id \"{}\"", c.server_id),
+        None => println!("no site_public_key: site tokens refused"),
+    }
+    println!(
+        "secret logins: {:?}{}",
+        c.secret_login,
+        if c.open_registration {
+            ", open registration"
+        } else {
+            ""
+        }
     );
     // Administration console: one command per line on the standard input.
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -105,7 +123,7 @@ fn print_stats(server: &RunningServer) {
     );
 }
 
-const HELP: &str = "help · list · kick <name> [reason] · ban <name> [30m|12h|7d|2w] [reason] · unban <name> · bans · admin <name> on|off · stats · adduser <name> <secret> · stop";
+const HELP: &str = "help · list · kick <name> [reason] · ban <name> [30m|12h|7d|2w] [reason] · unban <name> · bans · admin <name> on|off · stats · adduser <name> <secret> [admin] · stop";
 
 /// Runs a console command; false to stop the server.
 fn command(server: &RunningServer, line: &str) -> bool {
@@ -187,17 +205,20 @@ fn command(server: &RunningServer, line: &str) -> bool {
             _ => println!("admin <name> on|off"),
         },
         Some("stats") => print_stats(server),
-        Some("adduser") => match (words.next(), words.next()) {
-            (Some(name), Some(secret)) => {
+        Some("adduser") => match (words.next(), words.next(), words.next()) {
+            (Some(name), Some(secret), flag @ (None | Some("admin"))) => {
+                let admin = flag.is_some();
                 match sh
                     .accounts
                     .create(name, secret, nascio_server::net::unix_ms())
+                    .and_then(|()| sh.accounts.set_admin(name, admin))
                 {
+                    Ok(()) if admin => println!("administrator {name} created"),
                     Ok(()) => println!("account {name} created"),
                     Err(e) => println!("refused: {e:#}"),
                 }
             }
-            _ => println!("adduser <name> <secret>"),
+            _ => println!("adduser <name> <secret> [admin]"),
         },
         Some("stop") => return false,
         Some(c) => println!("unknown command {c} (help)"),

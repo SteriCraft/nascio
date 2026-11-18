@@ -75,3 +75,40 @@ Ajout de l'auteur : comme les nonces sont gardés en mémoire, tout jeton émis 
 - les clés de mauvaise taille et le `server_id` vide sont refusés.
 
 Essai manuel : `site keygen`, puis `public` (même clé), puis `token` (141 caractères). `--ttl 10m` est refusé.
+
+## 2.3 — Connexion par jeton (protocole v6)
+**Fait :**
+- **Protocole v6** : `ClientHello { protocol, name, auth }`, où `auth` vaut `Auth::Secret(String)` ou `Auth::Token(String)`. `nascio-client` ajoute `connect_with(addr, cert, name, auth)` ; `connect(…, secret)` reste un raccourci pour le secret. Un client v5 est refusé à la poignée de main avec la différence de version.
+- **Configuration du serveur** :
+  - `site_public_key` : clé publique en base64url, donnée par `site keygen`. Vide par défaut, et dans ce cas les jetons sont refusés (« this server takes no tokens ») ;
+  - `server_id` : l'audience des jetons, `"dev"` par défaut ;
+  - `secret_login = "admin" | "all" | "none"`, `"admin"` par défaut (décision de l'auteur).
+
+  Au démarrage, le serveur affiche s'il accepte les jetons et qui peut se connecter par secret.
+- **Connexion par jeton** :
+  - vérification par `token::Verifier` (2.2) ;
+  - le nom du jeton doit être celui du `ClientHello` (« token for another name ») ;
+  - un compte inconnu est créé sans secret (`Accounts::token_login`). Aucun secret ne peut l'ouvrir, puisque son hachage est vide ;
+  - puis viennent, comme pour un secret, le bannissement et la règle « déjà connecté ».
+
+  Un refus est compté par `LoginGuard` (5 par minute et par adresse) et inscrit dans `abuse.log` avec son motif. La vérification ne demande pas de hachage, elle ne passe donc pas par le sémaphore Argon2.
+- **Connexion par secret** :
+  - avec `"none"`, elle est refusée tout de suite, avant tout hachage ;
+  - avec `"admin"`, le secret est d'abord vérifié, puis le compte doit être admin. Sinon, le message est « secret logins are for administrators: log in through the site ». Ce message n'est donné qu'à qui connaît le bon secret, comme pour un bannissement ;
+  - `open_registration` ne crée un compte que si `secret_login = "all"`.
+- **Console** : `adduser <nom> <secret> admin` crée un administrateur, et `admin <nom> on|off` (2.1) change ce statut.
+- **Développement** : `nascio-server --open-registration` règle à la fois `open_registration = true` et `secret_login = "all"`. Ainsi, `swarm`, `netbot` et le visualiseur sans jeton marchent comme avant. Les tests d'intégration existants (`edit`, `entities`, `mesh`, `security`) prennent ces deux réglages.
+- **Visualiseur** : `--token <jeton>` remplace le secret. Le jeton s'obtient avec `site token <clé> --name <nom> --server <server_id>`.
+- **`swarm`** : avec `--site-key <clé> [--server-id dev]`, chaque bot se connecte avec son propre jeton de 5 min, comme le feront les joueurs. Sans cette option, les bots utilisent leur secret, comme avant.
+
+**Test d'intégration** `crates/server/tests/accounts.rs::site_tokens`, sur un vrai serveur QUIC :
+- un jeton frais, émis juste après le démarrage, est refusé (« before the server started ») ;
+- un jeton émis à `maintenant + 30 s` est accepté : c'est le cas d'un site dont l'horloge avance de 30 s. Il crée le compte ; rejoué, il est refusé (« already used ») ; un second jeton reconnecte le joueur ;
+- sont refusés avec le bon motif : un jeton pour un autre serveur, pour un autre nom, expiré, signé par une autre clé, ou illisible. Aucun compte n'est créé ;
+- un compte créé par jeton ne s'ouvre pas avec un secret ;
+- un compte ordinaire est refusé par secret (« for administrators ») ; une fois admin, il est accepté ;
+- un compte banni est refusé avec la raison du bannissement ;
+- les motifs figurent dans `abuse.log` ;
+- **redémarrage** : un jeton dépensé avant l'arrêt est refusé après le redémarrage, alors que le nouveau serveur a 0 nonce en mémoire (« before the server started »). Avec `secret_login = "none"`, même un admin est refusé par secret ; un nouveau jeton passe.
+
+`closed_registration_and_bans` (2.1) tourne désormais avec `secret_login = "all"` et vérifie que `"admin"` est la valeur par défaut.

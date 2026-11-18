@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use nascio_client::{Entities, Event, connect};
 use nascio_core::torus;
 use nascio_protocol::messages::ClientMsg;
+use nascio_server::config::SecretLogin;
 use nascio_server::{RunningServer, ServerConfig};
 use nascio_worldgen::config::{Scale, WorldConfig};
 use nascio_worldgen::generate::generate_full;
@@ -60,6 +61,7 @@ async fn motion_is_smooth_through_150_ms_of_latency() {
         // The mover jumps from the spawn onto its circle.
         max_speed_m_s: 0.0,
         open_registration: true,
+        secret_login: SecretLogin::All,
         ..ServerConfig::default()
     };
     let server = RunningServer::start(&world, cfg, &dir).unwrap();

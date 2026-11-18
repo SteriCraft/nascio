@@ -99,7 +99,7 @@ struct File {
 /// What a login attempt gave.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Login {
-    /// Known name, right secret.
+    /// Known name, right secret (or a valid token).
     Ok,
     /// Unknown name: the account was created (open registration).
     Created,
@@ -247,11 +247,38 @@ impl Accounts {
             self.create(name, secret, now_unix_ms)?;
             return Ok(Login::Created);
         };
+        // An account made from a token has no secret.
+        ensure!(!a.hash.is_empty(), "wrong secret");
         let params = Params::new(a.m_kib, a.t, a.p, Some(32))
             .map_err(|e| anyhow::anyhow!("argon2 parameters: {e}"))?;
         let h = hash(&params, secret, &unhex(&a.salt)?)?;
         ensure!(same(&h, &unhex(&a.hash)?), "wrong secret");
         Ok(Login::Ok)
+    }
+
+    /// After a valid token: creates the account (without a secret) if it does not exist.
+    pub fn token_login(&self, name: &str, now_unix_ms: i64) -> anyhow::Result<Login> {
+        check_name(name)?;
+        let mut accounts = self.lock();
+        if accounts.contains_key(name) {
+            return Ok(Login::Ok);
+        }
+        accounts.insert(
+            name.to_owned(),
+            Account {
+                name: name.to_owned(),
+                salt: String::new(),
+                hash: String::new(),
+                m_kib: 0,
+                t: 0,
+                p: 0,
+                created_unix_ms: now_unix_ms,
+                admin: false,
+                ban: None,
+            },
+        );
+        self.save(&accounts)?;
+        Ok(Login::Created)
     }
 
     /// The ban in force on `name` at `now`, if any.
@@ -387,6 +414,13 @@ mod tests {
         assert!(b.unban("bob", 2_000).unwrap());
         assert!(!b.unban("alice", 2_000).unwrap(), "already expired");
         assert!(b.bans(0).is_empty());
+        // An account made from a token has no secret: no secret opens it.
+        assert_eq!(b.token_login("dave", 3).unwrap(), Login::Created);
+        assert_eq!(b.token_login("dave", 4).unwrap(), Login::Ok);
+        assert_eq!(b.token_login("alice", 4).unwrap(), Login::Ok);
+        assert!(b.login("dave", "", false, 5).is_err());
+        assert!(b.login("dave", "anything at all", false, 5).is_err());
+        assert!(Accounts::open_with(&dir, cheap()).unwrap().exists("dave"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

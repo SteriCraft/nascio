@@ -22,7 +22,7 @@ use bevy::prelude::{
     MeshMaterial3d, Quat, Query, Res, ResMut, Resource, StandardMaterial, Time, Transform, Vec3,
 };
 use nascio_chunk::{Blocks, ChunkMesh, mesh_chunk};
-use nascio_client::{Entities, Event, Mirror, connect};
+use nascio_client::{Auth, Entities, Event, Mirror, connect_with};
 use nascio_core::consts::CHUNKS_PER_AXIS;
 use nascio_core::coords::{ChunkPos, WorldPos};
 use nascio_protocol::messages::{ClientMsg, ServerMsg};
@@ -60,7 +60,7 @@ impl Remote {
         addr: SocketAddr,
         cert: &Path,
         name: &str,
-        secret: &str,
+        auth: Auth,
         local: &Blocks,
         spawn_pos: [f64; 3],
     ) -> anyhow::Result<Self> {
@@ -71,7 +71,7 @@ impl Remote {
         let status = Arc::new(Mutex::new(String::new()));
         let entities = Arc::new(Mutex::new(Entities::new(0.05)));
         let correction = Arc::new(Mutex::new(None));
-        let (name, secret) = (name.to_owned(), secret.to_owned());
+        let name = name.to_owned();
         let epoch = Instant::now();
         let (out, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<ClientMsg>();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<anyhow::Result<(u32, Blocks)>>();
@@ -94,7 +94,7 @@ impl Remote {
                     Err(e) => return drop(ready_tx.send(Err(e.into()))),
                 };
                 rt.block_on(async move {
-                    let mut c = match connect(addr, &cert, &name, &secret).await {
+                    let mut c = match connect_with(addr, &cert, &name, auth).await {
                         Ok(c) => c,
                         Err(e) => return drop(ready_tx.send(Err(e))),
                     };

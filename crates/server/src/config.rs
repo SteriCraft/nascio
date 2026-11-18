@@ -42,6 +42,13 @@ pub struct ServerConfig {
     /// An unknown name creates its account at login (otherwise accounts are made with the
     /// console's `adduser`). For development and tests; off by default.
     pub open_registration: bool,
+    /// Who may log in with a secret: `admin` (administrators only), `all` or `none`. Players
+    /// log in with a token from the site.
+    pub secret_login: SecretLogin,
+    /// The site's Ed25519 public key (base64url, from `site keygen`); empty: no tokens.
+    pub site_public_key: String,
+    /// This server's name in the tokens (their audience).
+    pub server_id: String,
     /// Argon2id cost of new accounts: memory (KiB) and passes.
     pub account_hash_kib: u32,
     pub account_hash_passes: u32,
@@ -92,6 +99,9 @@ impl Default for ServerConfig {
             spawn_xz: [50_000.0, 50_000.0],
             checkpoint_bytes: 16 << 20,
             open_registration: false,
+            secret_login: SecretLogin::Admin,
+            site_public_key: String::new(),
+            server_id: "dev".to_owned(),
             account_hash_kib: 19 * 1024,
             account_hash_passes: 2,
             account_hash_concurrency: 0,
@@ -106,6 +116,18 @@ impl Default for ServerConfig {
             edit_reach_m: 160.0,
         }
     }
+}
+
+/// Who may log in with a secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SecretLogin {
+    /// Administrators only (`admin <name> on`, or `adduser … admin`).
+    Admin,
+    /// Every account (development; `open_registration` then creates accounts).
+    All,
+    /// Nobody: tokens only.
+    None,
 }
 
 impl ServerConfig {
@@ -132,5 +154,11 @@ mod tests {
             10
         );
         assert!(toml::from_str::<ServerConfig>("tick = 10").is_err());
+        assert_eq!(
+            toml::from_str::<ServerConfig>("secret_login = \"none\"")
+                .unwrap()
+                .secret_login,
+            SecretLogin::None
+        );
     }
 }

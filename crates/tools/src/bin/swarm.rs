@@ -4,8 +4,15 @@
 //! entities it sees; the server prints its tick times.
 //!
 //! ```text
-//! cargo run -p nascio-server --release -- out/m7/world-42 --data out/s3-data --bind 127.0.0.1:7777
+//! cargo run -p nascio-server --release -- out/m7/world-42 --data out/s3-data --bind 127.0.0.1:7777 --open-registration
 //! cargo run -p nascio-tools --release --bin swarm -- 127.0.0.1:7777 out/s3-data/server/cert.der --bots 500
+//! ```
+//!
+//! With `--site-key` (the key of `site keygen`, whose public key the server holds), each bot
+//! logs in with its own token, as players will:
+//!
+//! ```text
+//! cargo run -p nascio-tools --release --bin swarm -- 127.0.0.1:7777 out/s3-data/server/cert.der --site-key out/site.key
 //! ```
 
 use std::path::PathBuf;
@@ -14,9 +21,11 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use nascio_client::{Entities, Event, connect};
+use nascio_client::{Auth, Entities, Event, connect_with};
 use nascio_core::torus;
 use nascio_protocol::messages::{ClientMsg, ServerMsg};
+use nascio_server::net::unix_ms;
+use nascio_server::token::{MAX_TTL_MS, SiteKey};
 
 #[derive(Parser)]
 #[command(name = "swarm", about = "Nascio load test: many bots in a small area")]
@@ -50,6 +59,12 @@ struct Cli {
     /// Seed of the bots' random walks.
     #[arg(long, default_value_t = 1)]
     seed: u64,
+    /// The site's private key: the bots log in with tokens instead of secrets.
+    #[arg(long)]
+    site_key: Option<PathBuf>,
+    /// The server's `server_id`, for the tokens.
+    #[arg(long, default_value = "dev")]
+    server_id: String,
 }
 
 /// Deterministic pseudo-random numbers in [0, 1).
@@ -89,6 +104,7 @@ async fn main() -> anyhow::Result<()> {
         "--centre takes x,y,z"
     );
     let cert = Arc::new(read_cert(&cli.cert)?);
+    let site = Arc::new(cli.site_key.as_deref().map(SiteKey::load).transpose()?);
     let counters: Arc<Vec<Counters>> =
         Arc::new((0..cli.bots).map(|_| Counters::default()).collect());
     let start = Instant::now();
@@ -96,10 +112,20 @@ async fn main() -> anyhow::Result<()> {
     let end = Duration::from_secs_f64(ramp_s + cli.settle + cli.duration);
     let mut tasks = Vec::new();
     for k in 0..cli.bots {
-        let (cli, cert, counters) = (cli.clone(), cert.clone(), counters.clone());
+        let (cli, cert, counters, site) =
+            (cli.clone(), cert.clone(), counters.clone(), site.clone());
         tasks.push(tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs_f64(k as f64 / cli.ramp)).await;
-            if let Err(e) = bot(k, &cli, &cert, &counters[k], start + end).await {
+            if let Err(e) = bot(
+                k,
+                &cli,
+                &cert,
+                site.as_ref().as_ref(),
+                &counters[k],
+                start + end,
+            )
+            .await
+            {
                 eprintln!("bot{k}: {e:#}");
                 counters[k].errors.fetch_add(1, Ordering::Relaxed);
             }
@@ -213,8 +239,20 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn bot(k: usize, cli: &Cli, cert: &[u8], c: &Counters, until: Instant) -> anyhow::Result<()> {
-    let mut conn = connect(cli.addr, cert, &format!("swarm{k}"), "swarm-dev-secret").await?;
+async fn bot(
+    k: usize,
+    cli: &Cli,
+    cert: &[u8],
+    site: Option<&SiteKey>,
+    c: &Counters,
+    until: Instant,
+) -> anyhow::Result<()> {
+    let name = format!("swarm{k}");
+    let auth = match site {
+        Some(key) => Auth::Token(key.issue(&name, &cli.server_id, unix_ms(), MAX_TTL_MS)?),
+        None => Auth::Secret("swarm-dev-secret".into()),
+    };
+    let mut conn = connect_with(cli.addr, cert, &name, auth).await?;
     let centre = match &cli.centre {
         Some(v) => [v[0], v[1], v[2]],
         None => conn.hello.spawn,

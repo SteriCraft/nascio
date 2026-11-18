@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use nascio_client::{Connection, Event, connect};
 use nascio_protocol::messages::{ClientMsg, ServerMsg};
+use nascio_server::config::SecretLogin;
 use nascio_server::{RunningServer, ServerConfig};
 use nascio_worldgen::config::{Scale, WorldConfig};
 use nascio_worldgen::generate::generate_full;
@@ -30,6 +31,7 @@ fn cfg() -> ServerConfig {
         max_speed_m_s: 20.0,
         edit_reach_m: 16.0,
         open_registration: true,
+        secret_login: SecretLogin::All,
         ..ServerConfig::default()
     }
 }

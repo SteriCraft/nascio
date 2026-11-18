@@ -13,8 +13,18 @@ pub struct ClientHello {
     pub protocol: u32,
     /// Account name.
     pub name: String,
-    /// Account secret (the connection is encrypted; the server keeps only a hash).
-    pub secret: String,
+    pub auth: Auth,
+}
+
+/// How a client proves who it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Auth {
+    /// The account's secret (the connection is encrypted; the server keeps only a hash).
+    /// Servers accept it from administrators only, unless configured otherwise.
+    Secret(String),
+    /// A token from the site: base64url, valid a few minutes, used once; it names the
+    /// account (which must be `name`) and the server.
+    Token(String),
 }
 
 /// Answer of the server to [`ClientHello`].
@@ -137,6 +147,15 @@ mod tests {
             spawn: [99_999.5, 64.0, 0.25],
             chunk_radius_m: 512,
         });
+        let client = ClientMsg::Hello(ClientHello {
+            protocol: crate::PROTOCOL_VERSION,
+            name: "alice".into(),
+            auth: Auth::Token("AQVhbGljZQ".into()),
+        });
+        assert_eq!(
+            from_bytes::<ClientMsg>(&to_bytes(&client).unwrap()).unwrap(),
+            client
+        );
         let msgs = [
             hello,
             ServerMsg::Blocks {

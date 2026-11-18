@@ -11,7 +11,7 @@ use nascio_chunk::{BlockRegistry, Blocks};
 use nascio_protocol::chunk::{Column, MAX_COLUMN_BYTES};
 use nascio_protocol::frame::{Deframer, MAX_CONTROL_FRAME, frame};
 use nascio_protocol::messages::{
-    ClientHello, ClientMsg, ServerHello, ServerMsg, from_bytes, to_bytes,
+    Auth, ClientHello, ClientMsg, ServerHello, ServerMsg, from_bytes, to_bytes,
 };
 use quinn::rustls::RootCertStore;
 use quinn::rustls::pki_types::CertificateDer;
@@ -74,6 +74,16 @@ pub async fn connect(
     name: &str,
     secret: &str,
 ) -> anyhow::Result<Connection> {
+    connect_with(addr, cert_der, name, Auth::Secret(secret.to_owned())).await
+}
+
+/// Connects with a secret or a token from the site.
+pub async fn connect_with(
+    addr: SocketAddr,
+    cert_der: &[u8],
+    name: &str,
+    auth: Auth,
+) -> anyhow::Result<Connection> {
     let mut roots = RootCertStore::empty();
     roots.add(CertificateDer::from(cert_der.to_vec()))?;
     let mut cfg = quinn::ClientConfig::with_root_certificates(Arc::new(roots))?;
@@ -97,7 +107,7 @@ pub async fn connect(
     let hello = ClientMsg::Hello(ClientHello {
         protocol: nascio_protocol::PROTOCOL_VERSION,
         name: name.to_owned(),
-        secret: secret.to_owned(),
+        auth,
     });
     send.write_all(&frame(&to_bytes(&hello)?)).await?;
     let mut de = Deframer::new(MAX_CONTROL_FRAME);
