@@ -3,7 +3,7 @@
 //! of the tick, one message per modified chunk, to the players holding its column.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,6 +16,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::columns::{ColumnCache, wrap_column};
 use crate::replicate::{Entity, Grid, ReplConfig, Replicator};
 use nascio_protocol::entity::QState;
+use rayon::prelude::*;
 
 /// Block changes of one chunk in a tick: number of the last edit, `(index, block)` in order.
 type Changes = (u64, Vec<(u16, u16)>);
@@ -38,8 +39,16 @@ pub struct PlayerLink {
     /// Columns sent to the player or on their way (it gets their block changes).
     pub subs: Mutex<BTreeSet<(i32, i32)>>,
     pub view: Mutex<View>,
-    /// Entity datagrams go out on it (`None`: tests without a connection).
-    pub conn: Option<quinn::Connection>,
+    /// Entity datagrams, handed to the connection by a network task: the simulation never
+    /// waits on a connection's lock (`None`: tests without a connection).
+    pub datagrams: Option<UnboundedSender<Vec<u8>>>,
+    /// Bytes of entity datagrams queued and not yet handed to the connection.
+    pub queued: AtomicUsize,
+    /// Largest datagram the path allows, bytes (0: unknown), kept by the network task.
+    pub max_datagram: AtomicUsize,
+    /// Free space of the connection's datagram buffer, bytes, refreshed by the network task
+    /// after each send and every 25 ms (`usize::MAX`: no connection).
+    pub send_space: AtomicUsize,
     /// Entity bytes sent since the column streamer last looked (shared budget).
     pub entity_bytes: AtomicU64,
 }
@@ -60,20 +69,34 @@ pub struct SimStats {
     /// Entity datagrams and bytes sent.
     pub entity_datagrams: u64,
     pub entity_bytes: u64,
+    /// Client ticks skipped because the client's link was full.
+    pub entity_skipped: u64,
     /// Durations of the last ticks, µs (at most 1 200: one minute at 20 Hz).
     pub recent_us: Vec<u32>,
+    /// The entity replication part of them, µs.
+    pub recent_repl_us: Vec<u32>,
 }
 
 impl SimStats {
     /// Percentile `q` (0 to 1) of the recent tick durations, ms.
     pub fn tick_ms(&self, q: f64) -> f64 {
-        let mut v = self.recent_us.clone();
-        if v.is_empty() {
-            return 0.0;
-        }
-        v.sort_unstable();
-        f64::from(v[((v.len() - 1) as f64 * q) as usize]) / 1e3
+        percentile(&self.recent_us, q)
     }
+
+    /// Percentile `q` of the recent replication durations, ms.
+    pub fn repl_ms(&self, q: f64) -> f64 {
+        percentile(&self.recent_repl_us, q)
+    }
+}
+
+/// Percentile `q` of durations in µs, ms.
+fn percentile(v: &[u32], q: f64) -> f64 {
+    let mut v = v.to_vec();
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_unstable();
+    f64::from(v[((v.len() - 1) as f64 * q) as usize]) / 1e3
 }
 
 pub struct Sim {
@@ -83,6 +106,8 @@ pub struct Sim {
     pub tick: Duration,
     pub stats: Arc<Mutex<SimStats>>,
     pub repl: ReplConfig,
+    /// Pool of the replication (small: the network threads need the cores too).
+    pub pool: rayon::ThreadPool,
 }
 
 impl Sim {
@@ -173,7 +198,9 @@ impl Sim {
                     }
                 }
             }
-            let (datagrams, bytes) = self.replicate(tick, &players, &mut repl);
+            let r0 = Instant::now();
+            let (datagrams, bytes, skipped) = self.replicate(tick, &players, &mut repl);
+            let repl_us = r0.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
             {
                 let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
                 s.ticks += 1;
@@ -181,10 +208,13 @@ impl Sim {
                 s.refused += refused;
                 s.entity_datagrams += datagrams;
                 s.entity_bytes += bytes;
+                s.entity_skipped += skipped;
                 s.players = players.len();
                 if s.recent_us.len() >= 1_200 {
                     s.recent_us.remove(0);
+                    s.recent_repl_us.remove(0);
                 }
+                s.recent_repl_us.push(repl_us);
                 s.recent_us
                     .push(start.elapsed().as_micros().min(u128::from(u32::MAX)) as u32);
             }
@@ -196,13 +226,14 @@ impl Sim {
         }
     }
 
-    /// Sends every player the entities around them; returns datagrams and bytes sent.
+    /// Sends every player the entities around them; returns datagrams and bytes sent, and
+    /// the players skipped.
     fn replicate(
         &self,
         tick: u32,
         players: &BTreeMap<u32, Arc<PlayerLink>>,
         repl: &mut BTreeMap<u32, Replicator>,
-    ) -> (u64, u64) {
+    ) -> (u64, u64, u64) {
         // The entities are the players (by id: `players` is ordered).
         let entities: Vec<Entity> = players
             .values()
@@ -216,28 +247,45 @@ impl Sim {
             })
             .collect();
         let grid = Grid::new(&entities);
-        let (mut n, mut bytes) = (0, 0);
-        for (e, p) in entities.iter().zip(players.values()) {
-            let Some(r) = repl.get_mut(&p.id) else {
-                continue;
-            };
-            let mut cfg = self.repl;
-            if let Some(m) = p.conn.as_ref().and_then(|c| c.max_datagram_size()) {
-                cfg.max_datagram = cfg.max_datagram.min(m);
-            }
-            let near = grid.near(e.pos, cfg.radius_m, p.id);
-            let mut sent = 0;
-            for d in r.tick(tick, &near, &cfg) {
-                sent += d.len() as u64;
-                n += 1;
-                if let Some(c) = &p.conn {
-                    // Lost when the path is full: the next tick sends newer states.
-                    let _ = c.send_datagram(d.into());
-                }
-            }
-            p.entity_bytes.fetch_add(sent, Ordering::Relaxed);
-            bytes += sent;
-        }
-        (n, bytes)
+        // One client per task: each one's datagrams depend on its own state only, so the
+        // result does not depend on the order (determinism).
+        let mut work: Vec<(&Entity, &Arc<PlayerLink>, &mut Replicator)> = entities
+            .iter()
+            .zip(players.values())
+            .zip(repl.values_mut())
+            .map(|((e, p), r)| (e, p, r))
+            .collect();
+        debug_assert!(work.iter().all(|(e, p, _)| e.id == p.id));
+        self.pool.install(|| {
+            work.par_iter_mut()
+                .map(|(e, p, r)| {
+                    let mut cfg = self.repl;
+                    let m = p.max_datagram.load(Ordering::Relaxed);
+                    if m > 0 {
+                        cfg.max_datagram = cfg.max_datagram.min(m);
+                    }
+                    // The link is not keeping up (datagrams still queued from earlier ticks):
+                    // skip this client for a tick rather than queue stale states.
+                    let per_tick = cfg.bytes_per_tick.max(cfg.max_datagram);
+                    if p.queued.load(Ordering::Relaxed) > 2 * per_tick
+                        || p.send_space.load(Ordering::Relaxed) < 2 * per_tick
+                    {
+                        return (0, 0, 1);
+                    }
+                    let near = grid.near(e.pos, cfg.radius_m, p.id);
+                    let (mut n, mut sent) = (0u64, 0u64);
+                    for d in r.tick(tick, &near, &cfg) {
+                        sent += d.len() as u64;
+                        n += 1;
+                        if let Some(tx) = &p.datagrams {
+                            p.queued.fetch_add(d.len(), Ordering::Relaxed);
+                            let _ = tx.send(d);
+                        }
+                    }
+                    p.entity_bytes.fetch_add(sent, Ordering::Relaxed);
+                    (n, sent, 0)
+                })
+                .reduce(|| (0, 0, 0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2))
+        })
     }
 }

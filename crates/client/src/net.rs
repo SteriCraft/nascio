@@ -3,6 +3,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
@@ -32,6 +33,8 @@ pub struct Connection {
     conn: quinn::Connection,
     out: mpsc::UnboundedSender<ClientMsg>,
     pub events: mpsc::UnboundedReceiver<Event>,
+    /// Compressed column bytes received (statistics).
+    pub column_bytes: Arc<AtomicU64>,
     _endpoint: quinn::Endpoint,
 }
 
@@ -154,13 +157,16 @@ pub async fn connect(addr: SocketAddr, cert_der: &[u8], name: &str) -> anyhow::R
     });
     // Columns, one unidirectional stream each.
     let c2 = conn.clone();
+    let column_bytes = Arc::new(AtomicU64::new(0));
+    let cb = column_bytes.clone();
     tokio::spawn(async move {
         while let Ok(mut s) = c2.accept_uni().await {
-            let ev = ev.clone();
+            let (ev, cb) = (ev.clone(), cb.clone());
             tokio::spawn(async move {
                 let Ok(bytes) = s.read_to_end(MAX_COLUMN_BYTES).await else {
                     return;
                 };
+                cb.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 match Column::decompress(&bytes, max_id) {
                     Ok(c) => {
                         let _ = ev.send(Event::Column(Box::new(c)));
@@ -177,6 +183,7 @@ pub async fn connect(addr: SocketAddr, cert_der: &[u8], name: &str) -> anyhow::R
         conn,
         out,
         events,
+        column_bytes,
         _endpoint: endpoint,
     })
 }

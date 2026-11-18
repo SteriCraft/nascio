@@ -113,18 +113,27 @@ struct Sent {
     removed: Vec<u32>,
 }
 
+/// What a client's replication knows of one entity in range.
+#[derive(Clone, Copy, Debug)]
+struct Slot {
+    id: u32,
+    /// Priority accumulator.
+    acc: f32,
+    /// Tick the entity was last sent (0: never).
+    last_tick: u32,
+    /// Seq of the last datagram carrying its state (0: none; the client does not hold it).
+    seq: u32,
+    /// Last acknowledged state, with its datagram.
+    acked: Option<(u32, QState)>,
+}
+
 /// Replication state of one client.
 #[derive(Default)]
 pub struct Replicator {
     next_seq: u32,
-    acc: BTreeMap<u32, f32>,
-    /// Tick an entity was last sent.
-    last_tick: BTreeMap<u32, u32>,
+    /// The entities in range, by id (merged with each tick's neighbours in one pass).
+    slots: Vec<Slot>,
     sent: VecDeque<Sent>,
-    /// Last acknowledged state of an entity, with its datagram.
-    acked: BTreeMap<u32, (u32, QState)>,
-    /// Entities the client may hold: seq of the last datagram carrying their state.
-    known: BTreeMap<u32, u32>,
     /// Entities being removed: seq of the first datagram carrying the removal (0: not yet).
     removing: BTreeMap<u32, u32>,
 }
@@ -138,46 +147,66 @@ fn weight(d: f64) -> f32 {
 /// Worst size of one entry (full state or difference), bytes.
 const MAX_ENTRY: usize = 24;
 
+/// Higher priority first, then lower id.
+fn by_priority(a: &(f32, usize, u32), b: &(f32, usize, u32)) -> std::cmp::Ordering {
+    b.0.total_cmp(&a.0).then(a.2.cmp(&b.2))
+}
+
 impl Replicator {
-    /// The datagrams of `tick` for a client seeing `near` (from [`Grid::near`]).
+    /// The datagrams of `tick` for a client seeing `near` (from [`Grid::near`], by id).
     pub fn tick(&mut self, tick: u32, near: &[(f64, &Entity)], cfg: &ReplConfig) -> Vec<Vec<u8>> {
         if self.next_seq == 0 {
             self.next_seq = 1;
         }
-        // Entities that left the range.
-        let mut left: Vec<u32> = Vec::new();
-        {
-            let mut it = near.iter().map(|(_, e)| e.id).peekable();
-            for &id in self.known.keys() {
-                while it.next_if(|&n| n < id).is_some() {}
-                if it.peek() != Some(&id) {
-                    left.push(id);
+        // Merge the slots with the neighbours (both by id): entities that left go to
+        // `removing` if the client may hold them; new ones get a slot.
+        let old = std::mem::take(&mut self.slots);
+        let mut slots = Vec::with_capacity(near.len());
+        let mut it = old.into_iter().peekable();
+        for &(d, e) in near {
+            while let Some(s) = it.next_if(|s| s.id < e.id) {
+                if s.seq != 0 {
+                    self.removing.insert(s.id, 0);
                 }
             }
+            let mut slot = it.next_if(|s| s.id == e.id).unwrap_or(Slot {
+                id: e.id,
+                acc: 0.0,
+                last_tick: 0,
+                seq: 0,
+                acked: None,
+            });
+            slot.acc += weight(d);
+            slots.push(slot);
         }
-        for id in left {
-            self.known.remove(&id);
-            self.acc.remove(&id);
-            self.last_tick.remove(&id);
-            self.acked.remove(&id);
-            self.removing.insert(id, 0);
-        }
-        // Priorities.
-        let mut forced: Vec<&Entity> = Vec::new();
-        let mut rest: Vec<(f32, &Entity)> = Vec::new();
-        for &(d, e) in near {
-            self.removing.remove(&e.id);
-            let a = self.acc.entry(e.id).or_insert(0.0);
-            *a += weight(d);
-            match self.last_tick.get(&e.id) {
-                Some(&t) if tick.wrapping_sub(t) < cfg.max_gap => rest.push((*a, e)),
-                _ => forced.push(e),
+        for s in it {
+            if s.seq != 0 {
+                self.removing.insert(s.id, 0);
             }
         }
-        rest.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
-        let chosen = forced
-            .into_iter()
-            .chain(rest.into_iter().take(cfg.fast).map(|(_, e)| e));
+        if !self.removing.is_empty() {
+            for &(_, e) in near {
+                self.removing.remove(&e.id);
+            }
+        }
+        // Priorities: every entity not sent for `max_gap` ticks, then the `fast` highest.
+        let mut forced: Vec<usize> = Vec::new();
+        let mut rest: Vec<(f32, usize, u32)> = Vec::new();
+        for (i, s) in slots.iter().enumerate() {
+            if s.last_tick == 0 || tick.wrapping_sub(s.last_tick) >= cfg.max_gap {
+                forced.push(i);
+            } else {
+                rest.push((s.acc, i, s.id));
+            }
+        }
+        if rest.len() > cfg.fast {
+            if cfg.fast > 0 {
+                rest.select_nth_unstable_by(cfg.fast - 1, by_priority);
+            }
+            rest.truncate(cfg.fast);
+        }
+        rest.sort_unstable_by(by_priority);
+        let chosen = forced.into_iter().chain(rest.into_iter().map(|r| r.1));
 
         // Datagrams.
         let mut out = Vec::new();
@@ -188,16 +217,14 @@ impl Replicator {
             states: Vec::new(),
             removed: Vec::new(),
         };
-        let removing: Vec<u32> = self.removing.keys().copied().collect();
-        for id in removing {
+        for (&id, first) in self.removing.iter_mut() {
             w.removed(id);
             cur.removed.push(id);
-            let first = self.removing.get_mut(&id).expect("removing");
             if *first == 0 {
                 *first = cur.seq;
             }
         }
-        for e in chosen {
+        for i in chosen {
             if total + w.len() + MAX_ENTRY > cfg.bytes_per_tick {
                 break;
             }
@@ -214,17 +241,20 @@ impl Replicator {
                     },
                 ));
             }
-            let base = self
+            let s = &mut slots[i];
+            let q = near[i].1.q;
+            let base = s
                 .acked
-                .get(&e.id)
-                .filter(|(s, _)| cur.seq - s < BASELINE_WINDOW)
-                .map(|(s, q)| (*s, q));
-            w.state(e.id, &e.q, base);
-            cur.states.push((e.id, e.q));
-            self.acc.insert(e.id, 0.0);
-            self.last_tick.insert(e.id, tick);
-            self.known.insert(e.id, cur.seq);
+                .as_ref()
+                .filter(|(b, _)| cur.seq - b < BASELINE_WINDOW)
+                .map(|(b, bq)| (*b, bq));
+            w.state(s.id, &q, base);
+            cur.states.push((s.id, q));
+            s.acc = 0.0;
+            s.last_tick = tick;
+            s.seq = cur.seq;
         }
+        self.slots = slots;
         if !w.is_empty() {
             out.push(w.finish());
             self.next_seq = cur.seq + 1;
@@ -254,9 +284,12 @@ impl Replicator {
         };
         let s = &self.sent[i];
         for &(id, q) in &s.states {
-            // Only for an entity still known: a removed one starts again in full.
-            if self.known.contains_key(&id) && self.acked.get(&id).is_none_or(|a| a.0 < seq) {
-                self.acked.insert(id, (seq, q));
+            // Only for an entity still in range: a removed one starts again in full.
+            if let Ok(k) = self.slots.binary_search_by_key(&id, |s| s.id) {
+                let slot = &mut self.slots[k];
+                if slot.seq != 0 && slot.acked.is_none_or(|a| a.0 < seq) {
+                    slot.acked = Some((seq, q));
+                }
             }
         }
         for id in &s.removed {
@@ -272,7 +305,7 @@ impl Replicator {
 
     /// Entities the client is believed to hold.
     pub fn known(&self) -> usize {
-        self.known.len()
+        self.slots.iter().filter(|s| s.seq != 0).count()
     }
 }
 
@@ -426,5 +459,72 @@ mod tests {
         let s = decode(&d[0], |q, id| client.history.get(&q)?.get(&id).copied()).unwrap();
         assert!(s.removed.is_empty());
         assert_eq!(rep.known(), 1);
+    }
+
+    /// Cost of a battle tick, one thread: `cargo test -p nascio-server --release --lib
+    /// replication_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn replication_cost_of_500_players_within_200_m() {
+        let mut rng = 7u64;
+        let mut next = || {
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (rng >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut es: Vec<Entity> = (1..=500u32)
+            .map(|i| {
+                let (r, a) = (200.0 * next().sqrt(), next() * std::f64::consts::TAU);
+                entity(i, [50_000.0 + r * a.cos(), 60.0, 50_000.0 + r * a.sin()])
+            })
+            .collect();
+        let mut reps: Vec<Replicator> = (0..500).map(|_| Replicator::default()).collect();
+        let mut heading: Vec<f64> = (0..500).map(|_| next() * std::f64::consts::TAU).collect();
+        let (mut bytes, mut best) = (0usize, f64::MAX);
+        let mut window = 0.0;
+        let ticks = 2_000u32;
+        for tick in 1..=ticks {
+            // Random walks at 4 m/s within 200 m of the centre, as the swarm does.
+            for (e, h) in es.iter_mut().zip(&mut heading) {
+                *h += (next() - 0.5) * 0.4;
+                let (dx, dz) = (e.pos[0] - 50_000.0, e.pos[2] - 50_000.0);
+                if dx.hypot(dz) > 200.0 {
+                    *h = (-dz).atan2(-dx);
+                }
+                e.pos[0] += h.cos() * 0.2;
+                e.pos[2] += h.sin() * 0.2;
+                e.q = QState::quantize(e.pos, *h as f32, 0.0);
+            }
+            let t = std::time::Instant::now();
+            let g = Grid::new(&es);
+            for (e, r) in es.iter().zip(&mut reps) {
+                let near = g.near(e.pos, 256.0, e.id);
+                for d in r.tick(tick, &near, &cfg()) {
+                    bytes += d.len();
+                    // Acknowledged at once.
+                    let seq = nascio_protocol::varint::Reader::new(&d).var().unwrap();
+                    r.ack(seq as u32);
+                }
+            }
+            let dt = t.elapsed().as_secs_f64();
+            window += dt;
+            if tick % 200 == 0 {
+                eprintln!(
+                    "ticks {}..{}: mean {:.1} ms",
+                    tick - 199,
+                    tick,
+                    window / 200.0 * 1e3
+                );
+                window = 0.0;
+            }
+            if tick > 10 {
+                best = best.min(dt);
+            }
+        }
+        let n = f64::from(ticks);
+        eprintln!(
+            "500 players: best tick {:.1} ms on one thread; {:.0} B per client per tick",
+            best * 1e3,
+            bytes as f64 / n / 500.0
+        );
     }
 }

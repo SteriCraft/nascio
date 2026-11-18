@@ -4356,6 +4356,7 @@ dependencies = [
  "nascio-world",
  "nascio-worldgen",
  "quinn",
+ "rayon",
  "rcgen",
  "serde",
  "tokio",

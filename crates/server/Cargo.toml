@@ -19,6 +19,7 @@ clap.workspace = true
 tokio.workspace = true
 quinn.workspace = true
 rcgen.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 nascio-worldgen.workspace = true

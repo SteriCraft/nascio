@@ -131,6 +131,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     send.write_all(&frame(&to_bytes(&ServerMsg::Hello(sh.clone()))?))
         .await?;
     let (out, mut out_rx) = mpsc::unbounded_channel::<ServerMsg>();
+    let (dg_tx, mut dg_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let link = Arc::new(PlayerLink {
         id,
         name: hello.name,
@@ -140,7 +141,10 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
             pos: sh.spawn,
             ..View::default()
         }),
-        conn: Some(conn.clone()),
+        datagrams: Some(dg_tx),
+        queued: Default::default(),
+        max_datagram: conn.max_datagram_size().unwrap_or(0).into(),
+        send_space: usize::MAX.into(),
         entity_bytes: Default::default(),
     });
     shared.online.fetch_add(1, Ordering::Relaxed);
@@ -156,6 +160,34 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         }
     });
     let streamer = tokio::spawn(stream_columns(conn.clone(), link.clone(), shared.clone()));
+    // Entity datagrams from the simulation to the connection. When the connection's own
+    // buffer is full, quinn drops the oldest: the next tick carries newer states.
+    let (c2, l2) = (conn.clone(), link.clone());
+    // It also keeps the free space of that buffer fresh for the simulation, which skips a
+    // client whose link is full.
+    let datagrams = tokio::spawn(async move {
+        let mut every = tokio::time::interval(Duration::from_millis(25));
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                d = dg_rx.recv() => {
+                    let Some(d) = d else { break };
+                    l2.queued.fetch_sub(d.len(), Ordering::Relaxed);
+                    l2.max_datagram
+                        .store(c2.max_datagram_size().unwrap_or(0), Ordering::Relaxed);
+                    match c2.send_datagram(d.into()) {
+                        // Larger than the path allows (it shrank): dropped, like a lost one;
+                        // the next ones are cut to the new size.
+                        Ok(()) | Err(quinn::SendDatagramError::TooLarge) => {}
+                        Err(_) => break,
+                    }
+                }
+                _ = every.tick() => {}
+            }
+            l2.send_space
+                .store(c2.datagram_send_buffer_space(), Ordering::Relaxed);
+        }
+    });
 
     // Reader of the control stream.
     let result: anyhow::Result<()> = async {
@@ -188,6 +220,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     shared.online.fetch_sub(1, Ordering::Relaxed);
     streamer.abort();
     writer.abort();
+    datagrams.abort();
     conn.close(0u32.into(), b"bye");
     result
 }
@@ -214,6 +247,9 @@ async fn stream_columns(conn: quinn::Connection, link: Arc<PlayerLink>, shared: 
     let mut tokens = budget;
     let mut last = Instant::now();
     let mut flight: JoinSet<anyhow::Result<usize>> = JoinSet::new();
+    // Column of the player when its ring was last found complete: nothing to scan until it
+    // moves to another column.
+    let mut complete: Option<(i32, i32)> = None;
     loop {
         tokio::select! {
             _ = conn.closed() => return,
@@ -237,6 +273,9 @@ async fn stream_columns(conn: quinn::Connection, link: Arc<PlayerLink>, shared: 
             (pos[0].rem_euclid(WORLD_SIZE_F64) / cs).floor() as i32,
             (pos[2].rem_euclid(WORLD_SIZE_F64) / cs).floor() as i32,
         );
+        if complete == Some((pcx, pcz)) {
+            continue;
+        }
         // Forget what went out of range.
         let gone: Vec<[i32; 2]> = {
             let mut subs = link.subs.lock().unwrap_or_else(|e| e.into_inner());
@@ -270,7 +309,10 @@ async fn stream_columns(conn: quinn::Connection, link: Arc<PlayerLink>, shared: 
                 }
                 k
             };
-            let Some((cx, cz)) = next else { break };
+            let Some((cx, cz)) = next else {
+                complete = Some((pcx, pcz));
+                break;
+            };
             // Reserve an average column; corrected when the column is sent.
             tokens -= 1_024.0;
             let conn = conn.clone();

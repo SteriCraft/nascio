@@ -121,6 +121,10 @@ impl RunningServer {
         )?;
         let mut transport = quinn::TransportConfig::default();
         transport.max_idle_timeout(Some(Duration::from_secs(30).try_into()?));
+        // Entity datagrams: at most four ticks queued per client (quinn's default, 1 MB,
+        // would hold seconds of stale states when a client falls behind).
+        let per_tick = (cfg.client_budget_bytes_per_s / cfg.tick_hz.max(1)) as usize;
+        transport.datagram_send_buffer_size(4 * per_tick.max(cfg.max_datagram_bytes));
         server_cfg.transport_config(Arc::new(transport));
         let endpoint = quinn::Endpoint::server(server_cfg, cfg.bind)
             .with_context(|| format!("listening on {}", cfg.bind))?;
@@ -142,6 +146,10 @@ impl RunningServer {
                 bytes_per_tick: (cfg.client_budget_bytes_per_s / cfg.tick_hz.max(1)) as usize,
                 max_datagram: cfg.max_datagram_bytes,
             },
+            pool: rayon::ThreadPoolBuilder::new()
+                .num_threads(cfg.replication_threads.max(1))
+                .thread_name(|i| format!("replication-{i}"))
+                .build()?,
         };
         let mut threads = Vec::new();
         let s = stop.clone();

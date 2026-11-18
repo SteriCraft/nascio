@@ -27,6 +27,8 @@ pub struct ServerConfig {
     pub entity_min_hz: u32,
     /// Size of an entity datagram at most, bytes (lowered to what the path allows).
     pub max_datagram_bytes: usize,
+    /// Threads replicating the entities at the end of a tick (one client per task).
+    pub replication_threads: usize,
     /// Columns being prepared or sent at once for one client.
     pub columns_in_flight: usize,
     /// Compressed columns kept in memory.
@@ -54,6 +56,7 @@ impl Default for ServerConfig {
             entity_fast: 64,
             entity_min_hz: 5,
             max_datagram_bytes: 1_200,
+            replication_threads: 4,
             columns_in_flight: 16,
             cache_columns: 32_768,
             generation_threads: 0,

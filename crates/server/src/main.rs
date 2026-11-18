@@ -54,10 +54,11 @@ async fn main() -> anyhow::Result<()> {
                 let s = server.stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let sh = &server.shared;
                 println!(
-                    "players {} · tick p50 {:.2} ms p99 {:.2} ms · edits {} (refused {}) · columns built {} sent {} ({:.1} MB) · entities {} datagrams ({:.1} MB)",
+                    "players {} · tick p50 {:.2} ms p99 {:.2} ms (replication p99 {:.2} ms) · edits {} (refused {}) · columns built {} sent {} ({:.1} MB) · entities {} datagrams ({:.1} MB, {} skipped)",
                     s.players,
                     s.tick_ms(0.5),
                     s.tick_ms(0.99),
+                    s.repl_ms(0.99),
                     s.edits,
                     s.refused,
                     sh.cache.built.load(std::sync::atomic::Ordering::Relaxed),
@@ -65,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
                     sh.sent_bytes.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
                     s.entity_datagrams,
                     s.entity_bytes as f64 / 1e6,
+                    s.entity_skipped,
                 );
             }
         }
