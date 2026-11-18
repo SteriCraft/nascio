@@ -123,7 +123,7 @@ impl Gui {
 pub fn run(launch: Launch) {
     let window = Window {
         title: "Nascio — serveur".into(),
-        resolution: bevy::window::WindowResolution::new(1600, 960),
+        resolution: bevy::window::WindowResolution::new(1100, 800),
         ..default()
     };
     App::new()
