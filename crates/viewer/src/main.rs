@@ -26,6 +26,7 @@ mod remote;
 mod settings;
 mod sky;
 mod stars;
+mod tiles;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -400,12 +401,18 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     .insert_resource(cam)
     .insert_resource(settings)
     .insert_resource(info)
-    .insert_resource(fly::SharedTerrain(terrain))
+    .insert_resource(fly::SharedTerrain(terrain.clone()))
     .insert_resource(fly::Workers::new())
     .insert_resource(fly::Streamer::new())
     .insert_resource(fly::SharedDeltas(Arc::new(deltas)))
     .insert_resource(god)
-    .insert_resource(horizon::Horizon::new(horizon_cfg))
+    .insert_resource(horizon::Horizon::new(
+        horizon_cfg,
+        horizon::WaterColors::new(terrain.blocks().table()),
+    ))
+    .insert_resource(tiles::TileStore::new(tiles::TileSource::Local(
+        terrain.clone(),
+    )))
     .insert_resource(RenderOrigin(BlockPos::new(0, 0, 0)))
     .insert_resource(ClearColor(Color::srgb(0.45, 0.64, 0.9)))
     .init_resource::<fly::UiCapture>()

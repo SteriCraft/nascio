@@ -9,6 +9,7 @@ pub mod delta;
 pub mod fingerprint;
 pub mod generate;
 pub mod geology;
+pub mod horizon;
 pub mod mesh;
 pub mod rivers;
 pub mod terrain;

@@ -461,7 +461,12 @@ impl GroundAlbedo {
     /// Builds the texture from the terrain (sRGB, repeat sampler).
     pub fn new(terrain: &nascio_voxel::Terrain, images: &mut Assets<Image>) -> Self {
         let res = GROUND_RES;
-        let bytes = crate::horizon::ground_colors(terrain, res);
+        let bytes: Vec<u8> = nascio_voxel::horizon::ground_colors(terrain, res)
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|c| [c[0], c[1], c[2], 255])
+            .collect();
         let mut image = Image::new(
             Extent3d {
                 width: res as u32,

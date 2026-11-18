@@ -6,6 +6,7 @@
 
 pub mod block;
 pub mod chunk;
+pub mod horizon;
 pub mod mesh;
 pub mod tint;
 

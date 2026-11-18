@@ -7,9 +7,10 @@
 //! shows a column only once the displayed level 0 has a hole for it, and keeps it until the
 //! horizon covers it again. Skirts hide the cracks between levels and along the chunk boundary.
 //!
-//! Heights come from the same [`Terrain`] as the chunks, keeping only the noise octaves that the
-//! level's spacing can represent. Under water (sea or lake) the mesh is flattened to the water
-//! surface and coloured by depth (opaque distant water).
+//! The vertices come from horizon tiles ([`crate::tiles`]): level `L` lies on the fixed lattice
+//! of spacing `16 · 2^L` m (the shared centre is a multiple of every spacing, never wrapped), so
+//! a tile serves every centre that covers it. Under water (sea or lake) the mesh is flattened to
+//! the water surface and coloured by depth (opaque distant water).
 
 use std::collections::BTreeSet;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -17,14 +18,14 @@ use std::sync::{Arc, Mutex};
 
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::prelude::*;
+use nascio_chunk::horizon::{BASE_SPACING_M, HorizonVertex, Surface, TileKey, water_shade};
 use nascio_core::consts::{CHUNK_SIZE, CHUNKS_PER_AXIS, WORLD_SIZE_F64};
-use nascio_core::math::smoothstep;
 use nascio_core::torus::wrap_f64;
-use nascio_voxel::Terrain;
 use nascio_voxel::mesh::{MATERIAL_GROUND, MATERIAL_WATER, MeshData};
 
 use crate::curvature::{CurvedMaterial, visible_range};
-use crate::fly::{Anchor, FlyCam, FlySettings, SharedTerrain, Streamer, Workers, to_bevy_mesh};
+use crate::fly::{Anchor, FlyCam, FlySettings, Streamer, Workers, to_bevy_mesh};
+use crate::tiles::TileStore;
 
 /// Horizon layout.
 #[derive(Clone, Debug)]
@@ -88,31 +89,43 @@ pub struct HorizonStats {
     pub pending: usize,
 }
 
-/// Heights of a level's vertices, with a one-vertex margin for normals.
+/// A level's vertices, with a one-vertex margin for normals.
 struct Heights {
     side: usize,
-    data: Vec<f32>,
-    /// Water surface per vertex (sea level or a lake's surface).
-    water: Vec<f32>,
+    v: Vec<HorizonVertex>,
     /// Highest vertex, m.
     max: f32,
 }
 
 impl Heights {
     #[inline]
-    fn at(&self, i: i64, j: i64) -> f32 {
-        self.data[(i + 1) as usize + self.side * (j + 1) as usize]
-    }
-
-    #[inline]
-    fn water(&self, i: i64, j: i64) -> f32 {
-        self.water[(i + 1) as usize + self.side * (j + 1) as usize]
+    fn vertex(&self, i: i64, j: i64) -> &HorizonVertex {
+        &self.v[(i + 1) as usize + self.side * (j + 1) as usize]
     }
 
     /// Drawn surface: the ground, or the water above it.
     #[inline]
     fn surf(&self, i: i64, j: i64) -> f32 {
-        self.at(i, j).max(self.water(i, j))
+        self.vertex(i, j).top()
+    }
+}
+
+/// Linear colours of distant water and ice (block table).
+#[derive(Clone, Copy, Debug)]
+pub struct WaterColors {
+    pub water: [f32; 3],
+    pub ice: [f32; 3],
+}
+
+impl WaterColors {
+    pub fn new(blocks: &nascio_chunk::Blocks) -> Self {
+        let water = blocks
+            .id("water")
+            .map_or([0.1, 0.2, 0.4], |id| blocks.linear(id));
+        Self {
+            water,
+            ice: blocks.id("ice").map_or(water, |id| blocks.linear(id)),
+        }
     }
 }
 
@@ -133,6 +146,7 @@ struct LevelResult {
 #[derive(Resource)]
 pub struct Horizon {
     cfg: HorizonConfig,
+    colors: WaterColors,
     tx: Sender<LevelResult>,
     rx: Mutex<Receiver<LevelResult>>,
     entities: Vec<Option<Entity>>,
@@ -144,6 +158,9 @@ pub struct Horizon {
     hole: Arc<BTreeSet<(i32, i32)>>,
     /// Centre being built, its generation and finished levels.
     target: Option<(i32, i32)>,
+    /// Tiles of the target, and whether its level jobs are started.
+    target_tiles: BTreeSet<TileKey>,
+    started: bool,
     generation: u64,
     pending: Vec<Option<LevelResult>>,
     l0_heights: Option<((i32, i32), Arc<Heights>)>,
@@ -153,11 +170,12 @@ pub struct Horizon {
 }
 
 impl Horizon {
-    pub fn new(cfg: HorizonConfig) -> Self {
+    pub fn new(cfg: HorizonConfig, colors: WaterColors) -> Self {
         let (tx, rx) = channel();
         let levels = cfg.levels;
         Self {
             cfg,
+            colors,
             tx,
             rx: Mutex::new(rx),
             entities: vec![None; levels],
@@ -166,6 +184,8 @@ impl Horizon {
             center: None,
             hole: Arc::default(),
             target: None,
+            target_tiles: BTreeSet::new(),
+            started: false,
             generation: 0,
             pending: Vec::new(),
             l0_heights: None,
@@ -208,24 +228,20 @@ impl Horizon {
         set
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn spawn_job(
         &self,
         workers: &Workers,
-        terrain: &Arc<Terrain>,
         kind: Kind,
         level: usize,
         center: (i32, i32),
         hole: Arc<BTreeSet<(i32, i32)>>,
-        heights: Option<Arc<Heights>>,
+        heights: Arc<Heights>,
     ) {
-        let terrain = terrain.clone();
         let cfg = self.cfg.clone();
+        let colors = self.colors;
         let tx = self.tx.clone();
         workers.pool.spawn(move || {
-            let heights =
-                heights.unwrap_or_else(|| Arc::new(level_heights(&terrain, &cfg, level, center)));
-            let mesh = build_level(&terrain, &cfg, level, center, &heights, &hole);
+            let mesh = build_level(&cfg, colors, level, center, &heights, &hole);
             let _ = tx.send(LevelResult {
                 kind,
                 level,
@@ -238,52 +254,71 @@ impl Horizon {
     }
 }
 
-/// Snapped centre for a camera position, wrapped into `[0, WORLD_SIZE)`.
+/// Snapped centre for a camera position (`x`, `z` in `[0, WORLD_SIZE)`), a multiple of every
+/// level's spacing. Not wrapped: the vertices must stay on the tiles' lattice.
 fn snapped_center(cfg: &HorizonConfig, x: f64, z: f64) -> (i32, i32) {
     let snap = cfg.snap();
-    let f = |v: f64| wrap_f64((v / snap).round() * snap) as i32;
+    let f = |v: f64| ((v / snap).round() * snap) as i32;
     (f(x), f(z))
 }
 
+/// Lattice index of a level's vertex `(0, 0)`, along x and z.
+fn level_origin(cfg: &HorizonConfig, level: usize, center: (i32, i32)) -> (i64, i64) {
+    let s = cfg.spacing(level);
+    let half = cfg.half_extent(level);
+    let o = |c: i32| ((f64::from(c) - half) / s).round() as i64;
+    (o(center.0), o(center.1))
+}
+
+/// The tiles holding every level's vertices (margin included) for `center`.
+fn tiles_for(cfg: &HorizonConfig, center: (i32, i32)) -> BTreeSet<TileKey> {
+    let n = cfg.cells as i64;
+    let mut set = BTreeSet::new();
+    for level in 0..cfg.levels {
+        let (oi, oj) = level_origin(cfg, level, center);
+        let (a, _) = TileKey::containing(level as u8, oi - 1, oj - 1);
+        let (b, _) = TileKey::containing(level as u8, oi + n + 1, oj + n + 1);
+        for j in a.j..=b.j {
+            for i in a.i..=b.i {
+                set.insert(TileKey {
+                    level: level as u8,
+                    i,
+                    j,
+                });
+            }
+        }
+    }
+    set
+}
+
+/// A level's vertices taken from the tiles (`None` if one is missing).
 fn level_heights(
-    terrain: &Terrain,
+    tiles: &TileStore,
     cfg: &HorizonConfig,
     level: usize,
     center: (i32, i32),
-) -> Heights {
+) -> Option<Heights> {
     let n = cfg.cells as i64;
-    let s = cfg.spacing(level);
-    let half = cfg.half_extent(level);
     let side = cfg.cells + 3;
-    let mut data = Vec::with_capacity(side * side);
-    let mut water = Vec::with_capacity(side * side);
+    let (oi, oj) = level_origin(cfg, level, center);
+    let mut v = Vec::with_capacity(side * side);
     for j in -1..=n + 1 {
         for i in -1..=n + 1 {
-            let x = f64::from(center.0) - half + i as f64 * s;
-            let z = f64::from(center.1) - half + j as f64 * s;
-            // Block tops sit on average half a metre above the continuous surface.
-            data.push((terrain.height_lod(x, z, 0.5 * s) + 0.5) as f32);
-            // Sea and lakes only: the coarse surface has no river channels.
-            water.push(terrain.water_level(x, z).round() as f32);
+            let (key, k) = TileKey::containing(level as u8, oi + i, oj + j);
+            v.push(*tiles.get(&key)?.vertices.get(k)?);
         }
     }
-    let max = data
+    let max = v
         .iter()
-        .zip(&water)
-        .map(|(d, w)| d.max(*w))
+        .map(HorizonVertex::top)
         .fold(f32::NEG_INFINITY, f32::max);
-    Heights {
-        side,
-        data,
-        water,
-        max,
-    }
+    Some(Heights { side, v, max })
 }
 
 /// Mesh of one level, vertices relative to the shared centre.
 fn build_level(
-    terrain: &Terrain,
     cfg: &HorizonConfig,
+    colors: WaterColors,
     level: usize,
     center: (i32, i32),
     h: &Heights,
@@ -313,46 +348,32 @@ fn build_level(
         true
     };
 
-    let blocks = terrain.blocks();
-    let water = blocks.linear(blocks.ids.water);
+    let water = colors.water;
     let mut m = MeshData::default();
     let side = (n + 1) as usize;
     let mut normals = Vec::with_capacity(side * side);
     for j in 0..=n {
         for i in 0..=n {
-            let raw = h.at(i, j);
+            let vx = h.vertex(i, j);
             let dx = f64::from(h.surf(i + 1, j) - h.surf(i - 1, j)) / (2.0 * s);
             let dz = f64::from(h.surf(i, j + 1) - h.surf(i, j - 1)) / (2.0 * s);
             let len = (dx * dx + 1.0 + dz * dz).sqrt();
             let normal = [(-dx / len) as f32, (1.0 / len) as f32, (-dz / len) as f32];
-            let wl = h.water(i, j);
-            let px = f64::from(center.0) - half + i as f64 * s;
-            let pz = f64::from(center.1) - half + j as f64 * s;
-            let frozen = raw < wl && terrain.water_frozen(&terrain.climate(px, pz));
             let mut material = [MATERIAL_GROUND, 1.0];
-            let color = if frozen {
-                let c = blocks.linear(blocks.ids.ice.unwrap_or(blocks.ids.water));
-                [c[0], c[1], c[2], 1.0]
-            } else if raw < wl {
-                let k = 1.15 - 0.75 * smoothstep(0.0, 400.0, f64::from(wl - raw)) as f32;
-                // Opaque water: the colour above already darkens it with the depth.
-                material = [MATERIAL_WATER, 1.0];
-                [water[0] * k, water[1] * k, water[2] * k, 1.0]
-            } else {
-                let rdx = f64::from(h.at(i + 1, j) - h.at(i - 1, j)) / (2.0 * s);
-                let rdz = f64::from(h.at(i, j + 1) - h.at(i, j - 1)) / (2.0 * s);
-                // Beaches are too thin to show at horizon scale.
-                let top = (raw.floor() as i32).max(terrain.config().beach_high_m + 1);
-                let wx = (f64::from(center.0) - half + i as f64 * s).floor() as i32;
-                let wz = (f64::from(center.1) - half + j as f64 * s).floor() as i32;
-                let block = terrain.top_block(
-                    nascio_core::torus::wrap(wx),
-                    nascio_core::torus::wrap(wz),
-                    top,
-                    rdx.hypot(rdz),
-                );
-                let c = terrain.surface_color(block, px, pz, f64::from(raw));
-                [c[0], c[1], c[2], 1.0]
+            let color = match vx.surface {
+                Surface::Ice => [colors.ice[0], colors.ice[1], colors.ice[2], 1.0],
+                Surface::Water => {
+                    let k = water_shade(f64::from(vx.water - vx.height));
+                    // Opaque water: the colour above already darkens it with the depth.
+                    material = [MATERIAL_WATER, 1.0];
+                    [water[0] * k, water[1] * k, water[2] * k, 1.0]
+                }
+                Surface::Ground => {
+                    let c = vx
+                        .color
+                        .map(|c| nascio_chunk::block::srgb_to_linear(f32::from(c) / 255.0));
+                    [c[0], c[1], c[2], 1.0]
+                }
             };
             m.positions.push([
                 (-half + i as f64 * s) as f32,
@@ -418,7 +439,7 @@ pub fn update_horizon(
     mut stats: ResMut<HorizonStats>,
     streamer: Res<Streamer>,
     workers: Res<Workers>,
-    terrain: Res<SharedTerrain>,
+    mut tiles: ResMut<TileStore>,
     settings: Res<FlySettings>,
     cam: Res<FlyCam>,
     origin: Res<crate::fly::RenderOrigin>,
@@ -524,27 +545,41 @@ pub fn update_horizon(
         }
     }
 
-    // 3. Requests.
+    // 3. Requests: the tiles of the target centre, then its levels once they are all here.
+    tiles.poll();
     if settings.horizon {
         let desired = snapped_center(&h.cfg, cam.pos.x, cam.pos.z);
         let building = h.target.or(h.center);
         if building != Some(desired) {
             h.generation += 1;
             h.target = Some(desired);
+            h.target_tiles = tiles_for(&h.cfg, desired);
+            h.started = false;
             h.pending = (0..h.cfg.levels).map(|_| None).collect();
-            let hole = Arc::new(h.compute_hole(desired, &streamer));
-            h.mask_version = streamer.version;
-            h.last_mask = now;
-            for level in 0..h.cfg.levels {
-                h.spawn_job(
-                    &workers,
-                    &terrain.0,
-                    Kind::Full(h.generation),
-                    level,
-                    desired,
-                    hole.clone(),
-                    None,
-                );
+        }
+        if let Some(target) = h.target
+            && !h.started
+        {
+            if tiles.ensure(&h.target_tiles, &workers)
+                && let Some(levels) = (0..h.cfg.levels)
+                    .map(|level| level_heights(&tiles, &h.cfg, level, target))
+                    .collect::<Option<Vec<Heights>>>()
+            {
+                h.started = true;
+                tiles.trim(&h.target_tiles);
+                let hole = Arc::new(h.compute_hole(target, &streamer));
+                h.mask_version = streamer.version;
+                h.last_mask = now;
+                for (level, heights) in levels.into_iter().enumerate() {
+                    h.spawn_job(
+                        &workers,
+                        Kind::Full(h.generation),
+                        level,
+                        target,
+                        hole.clone(),
+                        Arc::new(heights),
+                    );
+                }
             }
         } else if h.target.is_none()
             && !h.mask_in_flight
@@ -558,15 +593,7 @@ pub fn update_horizon(
             h.last_mask = now;
             if *h.hole != hole {
                 h.mask_in_flight = true;
-                h.spawn_job(
-                    &workers,
-                    &terrain.0,
-                    Kind::Mask,
-                    0,
-                    center,
-                    Arc::new(hole),
-                    Some(heights),
-                );
+                h.spawn_job(&workers, Kind::Mask, 0, center, Arc::new(hole), heights);
             }
         }
     }
@@ -585,59 +612,8 @@ pub fn update_horizon(
         + usize::from(settings.horizon && streamer.version != h.mask_version);
 }
 
-/// The level-0 hole must contain every chunk the view distance can show.
-/// Colours of the world's surface on a `res × res` periodic grid, as seen from far: the
-/// horizon's colours (top block, water darkened with depth), RGBA8 sRGB, row-major in `z`.
-pub fn ground_colors(terrain: &Terrain, res: usize) -> Vec<u8> {
-    use rayon::prelude::*;
-    let cell = WORLD_SIZE_F64 / res as f64;
-    let blocks = terrain.blocks();
-    let water = blocks.linear(blocks.ids.water);
-    let srgb = |c: f32| -> u8 {
-        let c = c.clamp(0.0, 1.0);
-        let v = if c <= 0.003_130_8 {
-            12.92 * c
-        } else {
-            1.055 * c.powf(1.0 / 2.4) - 0.055
-        };
-        (v * 255.0).round() as u8
-    };
-    (0..res)
-        .into_par_iter()
-        .flat_map_iter(|j| {
-            let mut row = Vec::with_capacity(res * 4);
-            for i in 0..res {
-                let x = (i as f64 + 0.5) * cell;
-                let z = (j as f64 + 0.5) * cell;
-                let h = terrain.height_lod(x, z, cell);
-                let wl = terrain.water_level(x, z);
-                let frozen = h < wl && terrain.water_frozen(&terrain.climate(x, z));
-                let c = if frozen {
-                    blocks.linear(blocks.ids.ice.unwrap_or(blocks.ids.water))
-                } else if h < wl {
-                    let k = 1.15 - 0.75 * smoothstep(0.0, 400.0, wl - h) as f32;
-                    [water[0] * k, water[1] * k, water[2] * k]
-                } else {
-                    let dx = terrain.height_lod(x + cell, z, cell)
-                        - terrain.height_lod(x - cell, z, cell);
-                    let dz = terrain.height_lod(x, z + cell, cell)
-                        - terrain.height_lod(x, z - cell, cell);
-                    let top = (h.floor() as i32).max(terrain.config().beach_high_m + 1);
-                    let block = terrain.top_block(
-                        nascio_core::torus::wrap(x.floor() as i32),
-                        nascio_core::torus::wrap(z.floor() as i32),
-                        top,
-                        dx.hypot(dz) / (2.0 * cell),
-                    );
-                    terrain.surface_color(block, x, z, h)
-                };
-                row.extend_from_slice(&[srgb(c[0]), srgb(c[1]), srgb(c[2]), 255]);
-            }
-            row
-        })
-        .collect()
-}
-
+/// The level-0 hole must contain every chunk the view distance can show; the levels must lie
+/// on the tiles' lattice.
 pub fn check_layout(cfg: &HorizonConfig) {
     let reach = cfg.half_extent(0) - cfg.snap() / 2.0 - f64::from(CHUNK_SIZE);
     assert!(
@@ -648,4 +624,15 @@ pub fn check_layout(cfg: &HorizonConfig) {
         2.0 * cfg.extent() < WORLD_SIZE_F64,
         "horizon wraps around the torus"
     );
+    assert_eq!(
+        cfg.base_spacing_m, BASE_SPACING_M,
+        "horizon tiles start at 16 m"
+    );
+    for level in 0..cfg.levels {
+        let s = cfg.spacing(level);
+        assert!(
+            cfg.snap() % s == 0.0 && cfg.half_extent(level) % s == 0.0,
+            "level {level} is off the tiles' lattice"
+        );
+    }
 }
