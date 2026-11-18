@@ -3,7 +3,7 @@
 //! of the tick, one message per modified chunk, to the players holding its column.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,6 +14,8 @@ use nascio_voxel::DeltaStore;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::columns::{ColumnCache, wrap_column};
+use crate::replicate::{Entity, Grid, ReplConfig, Replicator};
+use nascio_protocol::entity::QState;
 
 /// Block changes of one chunk in a tick: number of the last edit, `(index, block)` in order.
 type Changes = (u64, Vec<(u16, u16)>);
@@ -36,6 +38,10 @@ pub struct PlayerLink {
     /// Columns sent to the player or on their way (it gets their block changes).
     pub subs: Mutex<BTreeSet<(i32, i32)>>,
     pub view: Mutex<View>,
+    /// Entity datagrams go out on it (`None`: tests without a connection).
+    pub conn: Option<quinn::Connection>,
+    /// Entity bytes sent since the column streamer last looked (shared budget).
+    pub entity_bytes: AtomicU64,
 }
 
 pub enum Input {
@@ -51,6 +57,9 @@ pub struct SimStats {
     pub edits: u64,
     pub refused: u64,
     pub players: usize,
+    /// Entity datagrams and bytes sent.
+    pub entity_datagrams: u64,
+    pub entity_bytes: u64,
     /// Durations of the last ticks, µs (at most 1 200: one minute at 20 Hz).
     pub recent_us: Vec<u32>,
 }
@@ -73,14 +82,18 @@ pub struct Sim {
     pub blocks: usize,
     pub tick: Duration,
     pub stats: Arc<Mutex<SimStats>>,
+    pub repl: ReplConfig,
 }
 
 impl Sim {
     pub fn run(self, rx: Receiver<Input>, stop: Arc<AtomicBool>) {
         let mut players: BTreeMap<u32, Arc<PlayerLink>> = BTreeMap::new();
+        let mut repl: BTreeMap<u32, Replicator> = BTreeMap::new();
         let mut next = Instant::now();
+        let mut tick: u32 = 0;
         while !stop.load(Ordering::Relaxed) {
             next += self.tick;
+            tick = tick.wrapping_add(1).max(1);
             let start = Instant::now();
             // Inputs of the tick, by player id (stable: arrival order within a player).
             let mut inputs: Vec<Input> = rx.try_iter().collect();
@@ -93,10 +106,19 @@ impl Sim {
             for input in inputs {
                 match input {
                     Input::Join(p) => {
+                        repl.insert(p.id, Replicator::default());
                         players.insert(p.id, p);
                     }
                     Input::Leave(id) => {
                         players.remove(&id);
+                        repl.remove(&id);
+                    }
+                    Input::Msg(id, ClientMsg::Ack { seqs }) => {
+                        if let Some(r) = repl.get_mut(&id) {
+                            for s in seqs {
+                                r.ack(s);
+                            }
+                        }
                     }
                     Input::Msg(id, ClientMsg::SetBlock { pos, block }) => {
                         let Some(p) = players.get(&id) else { continue };
@@ -151,11 +173,14 @@ impl Sim {
                     }
                 }
             }
+            let (datagrams, bytes) = self.replicate(tick, &players, &mut repl);
             {
                 let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
                 s.ticks += 1;
                 s.edits += edits;
                 s.refused += refused;
+                s.entity_datagrams += datagrams;
+                s.entity_bytes += bytes;
                 s.players = players.len();
                 if s.recent_us.len() >= 1_200 {
                     s.recent_us.remove(0);
@@ -169,5 +194,50 @@ impl Sim {
                 None => next = Instant::now(),
             }
         }
+    }
+
+    /// Sends every player the entities around them; returns datagrams and bytes sent.
+    fn replicate(
+        &self,
+        tick: u32,
+        players: &BTreeMap<u32, Arc<PlayerLink>>,
+        repl: &mut BTreeMap<u32, Replicator>,
+    ) -> (u64, u64) {
+        // The entities are the players (by id: `players` is ordered).
+        let entities: Vec<Entity> = players
+            .values()
+            .map(|p| {
+                let v = *p.view.lock().unwrap_or_else(|e| e.into_inner());
+                Entity {
+                    id: p.id,
+                    pos: v.pos,
+                    q: QState::quantize(v.pos, v.yaw, v.pitch),
+                }
+            })
+            .collect();
+        let grid = Grid::new(&entities);
+        let (mut n, mut bytes) = (0, 0);
+        for (e, p) in entities.iter().zip(players.values()) {
+            let Some(r) = repl.get_mut(&p.id) else {
+                continue;
+            };
+            let mut cfg = self.repl;
+            if let Some(m) = p.conn.as_ref().and_then(|c| c.max_datagram_size()) {
+                cfg.max_datagram = cfg.max_datagram.min(m);
+            }
+            let near = grid.near(e.pos, cfg.radius_m, p.id);
+            let mut sent = 0;
+            for d in r.tick(tick, &near, &cfg) {
+                sent += d.len() as u64;
+                n += 1;
+                if let Some(c) = &p.conn {
+                    // Lost when the path is full: the next tick sends newer states.
+                    let _ = c.send_datagram(d.into());
+                }
+            }
+            p.entity_bytes.fetch_add(sent, Ordering::Relaxed);
+            bytes += sent;
+        }
+        (n, bytes)
     }
 }

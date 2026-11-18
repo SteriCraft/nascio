@@ -1,10 +1,13 @@
-//! Nascio client. For now the headless part: the connection to the server ([`net`]) and the
-//! mirror of the columns received ([`mirror`]), shared by the future 3D client (S4) and the
+//! Nascio client. For now the headless part: the connection to the server ([`net`]), the
+//! mirror of the columns received ([`mirror`]) and the entities around the player
+//! ([`entities`]), shared by the future 3D client (S4) and the
 //! load-test bots (S6). The client never generates terrain (invariant 5): it only holds what
 //! the server sent.
 
+pub mod entities;
 pub mod mirror;
 pub mod net;
 
+pub use entities::{Entities, Pose};
 pub use mirror::Mirror;
 pub use net::{Connection, Event, connect};

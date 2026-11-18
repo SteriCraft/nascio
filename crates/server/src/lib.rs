@@ -8,6 +8,7 @@
 pub mod columns;
 pub mod config;
 pub mod net;
+pub mod replicate;
 pub mod sim;
 
 use std::net::SocketAddr;
@@ -134,6 +135,13 @@ impl RunningServer {
             blocks: blocks.len(),
             tick: Duration::from_secs_f64(1.0 / f64::from(cfg.tick_hz.max(1))),
             stats: stats.clone(),
+            repl: replicate::ReplConfig {
+                radius_m: cfg.entity_radius_m,
+                fast: cfg.entity_fast,
+                max_gap: (cfg.tick_hz / cfg.entity_min_hz.max(1)).max(1),
+                bytes_per_tick: (cfg.client_budget_bytes_per_s / cfg.tick_hz.max(1)) as usize,
+                max_datagram: cfg.max_datagram_bytes,
+            },
         };
         let mut threads = Vec::new();
         let s = stop.clone();

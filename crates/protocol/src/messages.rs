@@ -46,11 +46,16 @@ pub enum ClientMsg {
         pos: [i32; 3],
         block: u16,
     },
-    /// Position and view of the player (until entity input comes in S5).
+    /// Position and view of the player. The client moves its own player (the server will
+    /// check speed and reach in S7); the server replicates it to the others.
     Move {
         pos: [f64; 3],
         yaw: f32,
         pitch: f32,
+    },
+    /// Entity datagrams received (their `seq`): their states can serve as baselines.
+    Ack {
+        seqs: Vec<u32>,
     },
     /// The client already holds these columns at these versions (from its disk cache).
     Have {

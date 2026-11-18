@@ -17,8 +17,16 @@ pub struct ServerConfig {
     pub chunk_radius_m: u32,
     /// Columns are dropped by a client beyond the radius plus this margin, metres.
     pub forget_margin_m: u32,
-    /// Bytes per second a client may receive (columns for now; entities come in S5).
+    /// Bytes per second a client may receive: entities first, then edits, then columns.
     pub client_budget_bytes_per_s: u32,
+    /// Entities within this distance of a player are replicated to them, metres.
+    pub entity_radius_m: f64,
+    /// Entities sent each tick by priority (the closest, the longest unsent).
+    pub entity_fast: usize,
+    /// Every entity in range is sent at least this often, Hz.
+    pub entity_min_hz: u32,
+    /// Size of an entity datagram at most, bytes (lowered to what the path allows).
+    pub max_datagram_bytes: usize,
     /// Columns being prepared or sent at once for one client.
     pub columns_in_flight: usize,
     /// Compressed columns kept in memory.
@@ -42,6 +50,10 @@ impl Default for ServerConfig {
             chunk_radius_m: 512,
             forget_margin_m: 64,
             client_budget_bytes_per_s: 128 << 10,
+            entity_radius_m: 256.0,
+            entity_fast: 64,
+            entity_min_hz: 5,
+            max_datagram_bytes: 1_200,
             columns_in_flight: 16,
             cache_columns: 32_768,
             generation_threads: 0,

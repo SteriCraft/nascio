@@ -5,24 +5,28 @@
 //!
 //! A thread runs the connection on its own tokio runtime and fills a [`Mirror`]; the columns
 //! that arrive or change (and their neighbours, whose borders they are) are queued for
-//! meshing again.
+//! meshing again. The other players come as entity datagrams ([`Entities`], acknowledged at
+//! once) and are drawn as boxes at their interpolated positions (S5).
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, ensure};
-use bevy::prelude::{Local, Res, ResMut, Resource, Time};
-use nascio_client::{Event, Mirror, connect};
+use bevy::prelude::{
+    Assets, Color, Commands, Component, Cuboid, Entity, Handle, LinearRgba, Local, Mesh, Mesh3d,
+    MeshMaterial3d, Quat, Query, Res, ResMut, Resource, StandardMaterial, Time, Transform, Vec3,
+};
+use nascio_client::{Entities, Event, Mirror, connect};
 use nascio_core::consts::CHUNKS_PER_AXIS;
-use nascio_core::coords::ChunkPos;
+use nascio_core::coords::{ChunkPos, WorldPos};
 use nascio_protocol::messages::{ClientMsg, ServerMsg};
 use nascio_voxel::block::Blocks;
 use nascio_voxel::{ChunkMesh, mesh_chunk};
 
-use crate::fly::{FlyCam, Streamer};
+use crate::fly::{FlyCam, RenderOrigin, Streamer};
 
 /// The connection, shared with the workers.
 #[derive(Resource, Clone)]
@@ -32,6 +36,9 @@ pub struct Remote {
     dirty: Arc<Mutex<BTreeSet<(i32, i32)>>>,
     /// Last event worth showing (refused edit, closed connection).
     pub status: Arc<Mutex<String>>,
+    /// The other players, and the local time base of their samples.
+    pub entities: Arc<Mutex<Entities>>,
+    epoch: Instant,
     /// Radius of the columns the server sends, metres.
     pub radius_m: u32,
 }
@@ -56,9 +63,16 @@ impl Remote {
         let mirror = Arc::new(Mutex::new(Mirror::default()));
         let dirty = Arc::new(Mutex::new(BTreeSet::new()));
         let status = Arc::new(Mutex::new(String::new()));
+        let entities = Arc::new(Mutex::new(Entities::new(0.05)));
+        let epoch = Instant::now();
         let (out, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<ClientMsg>();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<anyhow::Result<u32>>();
-        let (m, d, st) = (mirror.clone(), dirty.clone(), status.clone());
+        let (m, d, st, en) = (
+            mirror.clone(),
+            dirty.clone(),
+            status.clone(),
+            entities.clone(),
+        );
         std::thread::Builder::new()
             .name("network".into())
             .spawn(move || {
@@ -111,6 +125,13 @@ impl Remote {
                                     lock(&m).blocks(chunk, lsn, changes);
                                     mark(chunk[0], chunk[2]);
                                 }
+                                Some(Event::Entities(bytes)) => {
+                                    let now = epoch.elapsed().as_secs_f64();
+                                    match lock(&en).receive(&bytes, now) {
+                                        Ok(seq) => c.send(ClientMsg::Ack { seqs: vec![seq] }),
+                                        Err(e) => *lock(&st) = format!("entities: {e:#}"),
+                                    }
+                                }
                                 Some(Event::Msg(ServerMsg::Forget { columns })) => {
                                     lock(&m).forget(&columns);
                                 }
@@ -137,6 +158,8 @@ impl Remote {
             out,
             dirty,
             status,
+            entities,
+            epoch,
             radius_m,
         })
     }
@@ -175,7 +198,7 @@ impl Remote {
 }
 
 /// Columns that arrived or changed are meshed again; the camera position goes to the server
-/// four times a second (it centres the columns sent).
+/// 20 times a second (it centres the columns sent and is what the others see).
 pub fn remote_sync(
     remote: Option<Res<Remote>>,
     mut streamer: ResMut<Streamer>,
@@ -191,12 +214,77 @@ pub fn remote_sync(
         streamer.request_remesh(dirty);
     }
     *since += time.delta_secs();
-    if *since >= 0.25 {
+    if *since >= 0.05 {
         *since = 0.0;
         remote.send(ClientMsg::Move {
             pos: [cam.pos.x, cam.pos.y, cam.pos.z],
             yaw: cam.yaw as f32,
             pitch: cam.pitch as f32,
         });
+    }
+}
+
+/// A box standing for another player.
+#[derive(Component)]
+pub struct RemotePlayer(u32);
+
+/// Mesh and material of the boxes.
+#[derive(Default)]
+pub struct PlayerLook(Option<(Handle<Mesh>, Handle<StandardMaterial>)>);
+
+/// Places the other players at their interpolated positions (spawns and removes boxes).
+pub fn draw_players(
+    mut commands: Commands,
+    remote: Option<Res<Remote>>,
+    origin: Res<RenderOrigin>,
+    mut boxes: Query<(Entity, &RemotePlayer, &mut Transform)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut look: Local<PlayerLook>,
+) {
+    let Some(remote) = remote else { return };
+    let now = remote.epoch.elapsed().as_secs_f64();
+    let poses = lock(&remote.entities).poses(now);
+    let (mesh, material) = look
+        .0
+        .get_or_insert_with(|| {
+            (
+                meshes.add(Cuboid::new(0.6, 1.8, 0.6)),
+                materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.9, 0.2, 0.1),
+                    emissive: LinearRgba::rgb(0.6, 0.1, 0.05),
+                    ..Default::default()
+                }),
+            )
+        })
+        .clone();
+    let o = WorldPos::new(
+        f64::from(origin.0.x),
+        f64::from(origin.0.y),
+        f64::from(origin.0.z),
+    );
+    let place = |p: &nascio_client::Pose| {
+        // The position is the eye; the box stands below it.
+        let rel = WorldPos::new(p.pos[0], p.pos[1] - 0.7, p.pos[2]).relative_to(o);
+        Transform::from_translation(Vec3::from_array(rel))
+            .with_rotation(Quat::from_rotation_y(-p.yaw))
+    };
+    let mut seen = BTreeSet::new();
+    for (e, rp, mut t) in &mut boxes {
+        match poses.iter().find(|p| p.id == rp.0) {
+            Some(p) => {
+                *t = place(p);
+                seen.insert(rp.0);
+            }
+            None => commands.entity(e).despawn(),
+        }
+    }
+    for p in poses.iter().filter(|p| !seen.contains(&p.id)) {
+        commands.spawn((
+            RemotePlayer(p.id),
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            place(p),
+        ));
     }
 }

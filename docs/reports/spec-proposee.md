@@ -30,5 +30,6 @@ Le client envoie la version du protocole ; le serveur répond avec `generator_ve
 
 ### 7.4 Entités et débit
 - Grille spatiale de 32 m ; pour chaque client, un accumulateur de priorité (distance, ancienneté du dernier envoi) ; les 64 entités les plus prioritaires à 20 Hz, les autres à 5 Hz au moins.
-- Positions quantifiées, envoyées en différence par rapport au dernier état confirmé par le client.
+- Positions quantifiées (1/64 m ; lacet sur 16 bits, tangage sur 8 bits), envoyées en différence par rapport au dernier état confirmé par le client. Chaque datagramme porte un numéro (`seq`) et le tick du serveur ; le client acquitte les numéros reçus (`Ack`, flux de contrôle). Une entité en différence désigne le datagramme qui lui sert de base (au plus 64 datagrammes plus tôt) ; sinon elle est envoyée en entier. Une entité sortie du rayon (`entity_radius_m`, 256 m) est envoyée comme retirée jusqu'à l'acquittement du retrait.
+- Le client affiche les entités 100 ms derrière le serveur, par interpolation sur le tore, avec une extrapolation de 250 ms au plus.
 - Budget par client `client_budget_bytes_per_s` (128 Ko/s) : entités, puis éditions, puis chunks.

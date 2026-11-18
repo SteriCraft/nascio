@@ -400,6 +400,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
                 horizon::update_horizon,
                 fly::column_visibility,
                 fly::place_camera,
+                remote::draw_players,
                 sky::update_sky_state,
                 sky::update_light_and_clear,
                 sky::update_sky,

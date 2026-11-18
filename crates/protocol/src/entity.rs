@@ -16,6 +16,9 @@ use crate::varint::{Reader, put, put_i};
 
 /// Quantization steps per metre.
 pub const STEPS_PER_M: i64 = 64;
+/// A difference refers to a datagram at most this many datagrams older; a client keeps
+/// at least this many datagrams.
+pub const BASELINE_WINDOW: u32 = 64;
 /// Period of x and z in steps.
 pub const PERIOD: i64 = WORLD_SIZE as i64 * STEPS_PER_M;
 
@@ -75,12 +78,17 @@ pub fn offset_q(a: i64, d: i64) -> i64 {
     (a + d).rem_euclid(PERIOD)
 }
 
-/// A snapshot as decoded: every entity's state after the tick, and the removed entities.
+/// One datagram of entity states, as decoded.
+///
+/// A server tick may need several datagrams (each fits the path MTU); every datagram has its
+/// own sequence number `seq` and is acknowledged by it. An entity sent as a difference names
+/// the earlier datagram whose state of it is the baseline (`back` datagrams before): one the
+/// client acknowledged, so the client still has it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
+    pub seq: u32,
+    /// Server tick of the states.
     pub tick: u32,
-    /// Tick of the baseline the differences refer to (0: none).
-    pub baseline: u32,
     pub states: BTreeMap<u32, QState>,
     pub removed: Vec<u32>,
 }
@@ -89,64 +97,92 @@ const FULL: u64 = 0;
 const DELTA: u64 = 1;
 const REMOVED: u64 = 2;
 
-/// Encodes the states of `tick`; entities found in `baseline` are sent as differences.
-pub fn encode(
-    tick: u32,
-    baseline: Option<(u32, &BTreeMap<u32, QState>)>,
-    states: &BTreeMap<u32, QState>,
-    removed: &[u32],
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 + 8 * states.len());
-    put(&mut out, u64::from(tick));
-    put(&mut out, u64::from(baseline.map_or(0, |b| b.0)));
-    put(&mut out, (states.len() + removed.len()) as u64);
-    for (&id, s) in states {
-        match baseline.and_then(|b| b.1.get(&id)) {
-            Some(b) => {
-                put(&mut out, u64::from(id) << 2 | DELTA);
-                put_i(&mut out, delta_q(b.pos[0], s.pos[0]));
-                put_i(&mut out, s.pos[1] - b.pos[1]);
-                put_i(&mut out, delta_q(b.pos[2], s.pos[2]));
-                put_i(&mut out, i64::from(s.yaw.wrapping_sub(b.yaw) as i16));
-                put_i(&mut out, i64::from(s.pitch) - i64::from(b.pitch));
+/// Builds a datagram: a header, then entries until the end of the datagram.
+#[derive(Clone, Debug)]
+pub struct Writer {
+    seq: u32,
+    out: Vec<u8>,
+    entries: usize,
+}
+
+impl Writer {
+    pub fn new(seq: u32, tick: u32) -> Self {
+        let mut out = Vec::with_capacity(256);
+        put(&mut out, u64::from(seq));
+        put(&mut out, u64::from(tick));
+        Self {
+            seq,
+            out,
+            entries: 0,
+        }
+    }
+
+    /// Bytes written so far.
+    pub fn len(&self) -> usize {
+        self.out.len()
+    }
+
+    /// Entries written so far.
+    pub fn entries(&self) -> usize {
+        self.entries
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries == 0
+    }
+
+    /// An entity state; `base`: `(seq, state)` of a baseline the client acknowledged. A
+    /// baseline that is not earlier than this datagram is ignored (full state).
+    pub fn state(&mut self, id: u32, s: &QState, base: Option<(u32, &QState)>) {
+        self.entries += 1;
+        let out = &mut self.out;
+        match base {
+            Some((bseq, b)) if bseq < self.seq => {
+                put(out, u64::from(id) << 2 | DELTA);
+                put(out, u64::from(self.seq - bseq));
+                put_i(out, delta_q(b.pos[0], s.pos[0]));
+                put_i(out, s.pos[1] - b.pos[1]);
+                put_i(out, delta_q(b.pos[2], s.pos[2]));
+                put_i(out, i64::from(s.yaw.wrapping_sub(b.yaw) as i16));
+                put_i(out, i64::from(s.pitch) - i64::from(b.pitch));
             }
-            None => {
-                put(&mut out, u64::from(id) << 2 | FULL);
-                put(&mut out, s.pos[0] as u64);
-                put_i(&mut out, s.pos[1]);
-                put(&mut out, s.pos[2] as u64);
+            _ => {
+                put(out, u64::from(id) << 2 | FULL);
+                put(out, s.pos[0] as u64);
+                put_i(out, s.pos[1]);
+                put(out, s.pos[2] as u64);
                 out.extend_from_slice(&s.yaw.to_le_bytes());
                 out.push(s.pitch);
             }
         }
     }
-    for &id in removed {
-        put(&mut out, u64::from(id) << 2 | REMOVED);
+
+    /// An entity the client should drop.
+    pub fn removed(&mut self, id: u32) {
+        self.entries += 1;
+        put(&mut self.out, u64::from(id) << 2 | REMOVED);
     }
-    out
+
+    pub fn finish(self) -> Vec<u8> {
+        self.out
+    }
 }
 
-/// Decodes a snapshot; `baseline` finds the states of a past tick (the client keeps the
-/// snapshots it acknowledged).
-pub fn decode<'a>(
+/// Decodes a datagram; `baseline(seq, id)` gives the state of entity `id` in an earlier
+/// datagram `seq` (the client keeps the datagrams it acknowledged for a while).
+pub fn decode(
     bytes: &[u8],
-    baseline: impl Fn(u32) -> Option<&'a BTreeMap<u32, QState>>,
+    baseline: impl Fn(u32, u32) -> Option<QState>,
 ) -> anyhow::Result<Snapshot> {
     let mut r = Reader::new(bytes);
+    let seq = r.var_max(u64::from(u32::MAX))? as u32;
     let tick = r.var_max(u64::from(u32::MAX))? as u32;
-    let base_tick = r.var_max(u64::from(u32::MAX))? as u32;
-    let base = if base_tick == 0 {
-        None
-    } else {
-        Some(baseline(base_tick).with_context(|| format!("baseline {base_tick} unknown"))?)
-    };
-    let n = r.var_max(1 << 20)?;
     let mut snap = Snapshot {
+        seq,
         tick,
-        baseline: base_tick,
         ..Snapshot::default()
     };
-    for _ in 0..n {
+    while !r.is_empty() {
         let tag = r.var_max(u64::from(u32::MAX) << 2 | 3)?;
         let id = (tag >> 2) as u32;
         let s = match tag & 3 {
@@ -162,9 +198,10 @@ pub fn decode<'a>(
                 }
             }
             DELTA => {
-                let b = base
-                    .and_then(|b| b.get(&id))
-                    .with_context(|| format!("entity {id} not in the baseline"))?;
+                let back = r.var_max(u64::from(seq))? as u32;
+                ensure!(back > 0, "baseline is not earlier");
+                let b = baseline(seq - back, id)
+                    .with_context(|| format!("entity {id}: baseline {} unknown", seq - back))?;
                 let dx = r.var_i()?;
                 let dy = r.var_i()?;
                 let dz = r.var_i()?;
@@ -190,8 +227,26 @@ pub fn decode<'a>(
         };
         snap.states.insert(id, s);
     }
-    ensure!(r.is_empty(), "trailing bytes in a snapshot");
     Ok(snap)
+}
+
+/// Encodes a whole datagram (tests and tools); `base(id)` gives the baseline of an entity.
+pub fn encode(
+    seq: u32,
+    tick: u32,
+    states: &BTreeMap<u32, QState>,
+    base: impl Fn(u32) -> Option<(u32, QState)>,
+    removed: &[u32],
+) -> Vec<u8> {
+    let mut w = Writer::new(seq, tick);
+    for (&id, s) in states {
+        let b = base(id);
+        w.state(id, s, b.as_ref().map(|(q, b)| (*q, b)));
+    }
+    for &id in removed {
+        w.removed(id);
+    }
+    w.finish()
 }
 
 #[cfg(test)]
@@ -213,19 +268,22 @@ mod tests {
     fn small_moves_across_the_seam_are_small() {
         let a = QState::quantize([99_999.9, 64.0, 0.05], 0.1, 0.0);
         let b = QState::quantize([0.2, 64.1, 99_999.95], 0.12, 0.01);
-        let base: BTreeMap<u32, QState> = [(7, a)].into();
         let now: BTreeMap<u32, QState> = [(7, b)].into();
-        let bytes = encode(12, Some((11, &base)), &now, &[]);
-        assert!(bytes.len() <= 3 + 7, "{} bytes", bytes.len());
-        let back = decode(&bytes, |t| (t == 11).then_some(&base)).unwrap();
+        let bytes = encode(12, 30, &now, |_| Some((11, a)), &[]);
+        assert!(bytes.len() <= 2 + 8, "{} bytes", bytes.len());
+        let back = decode(&bytes, |q, id| (q == 11 && id == 7).then_some(a)).unwrap();
+        assert_eq!((back.seq, back.tick), (12, 30));
         assert_eq!(back.states, now);
         // Without a baseline: full states.
-        let full = encode(12, None, &now, &[3]);
-        let back = decode(&full, |_| None).unwrap();
+        let full = encode(12, 30, &now, |_| None, &[3]);
+        let back = decode(&full, |_, _| None).unwrap();
         assert_eq!(back.states, now);
         assert_eq!(back.removed, vec![3]);
         // A delta whose baseline is unknown is refused.
-        assert!(decode(&bytes, |_| None).is_err());
+        assert!(decode(&bytes, |_, _| None).is_err());
+        // A baseline that is not earlier gives a full state.
+        let same = encode(12, 30, &now, |_| Some((12, a)), &[]);
+        assert_eq!(same, encode(12, 30, &now, |_| None, &[]));
     }
 
     fn qstate() -> impl Strategy<Value = QState> {
@@ -250,8 +308,10 @@ mod tests {
             now in prop::collection::btree_map(0u32..50, qstate(), 0..20),
             removed in prop::collection::vec(0u32..50, 0..5),
         ) {
-            let bytes = encode(5, Some((4, &base)), &now, &removed);
-            let back = decode(&bytes, |t| (t == 4).then_some(&base)).unwrap();
+            let bytes = encode(5, 9, &now, |id| base.get(&id).map(|s| (4, *s)), &removed);
+            let back =
+                decode(&bytes, |q, id| if q == 4 { base.get(&id).copied() } else { None })
+                    .unwrap();
             prop_assert_eq!(back.states, now);
             prop_assert_eq!(back.removed, removed);
         }

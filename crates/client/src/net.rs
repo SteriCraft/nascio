@@ -20,6 +20,8 @@ use tokio::sync::mpsc;
 pub enum Event {
     Msg(ServerMsg),
     Column(Box<Column>),
+    /// An entity datagram (decode with [`crate::Entities`], then acknowledge its seq).
+    Entities(Vec<u8>),
     /// The connection ended (reason).
     Closed(String),
 }
@@ -140,6 +142,15 @@ pub async fn connect(addr: SocketAddr, cert_der: &[u8], name: &str) -> anyhow::R
             }
         };
         let _ = ev2.send(Event::Closed(reason));
+    });
+    // Entity datagrams.
+    let (c3, ev3) = (conn.clone(), ev.clone());
+    tokio::spawn(async move {
+        while let Ok(d) = c3.read_datagram().await {
+            if ev3.send(Event::Entities(d.to_vec())).is_err() {
+                break;
+            }
+        }
     });
     // Columns, one unidirectional stream each.
     let c2 = conn.clone();

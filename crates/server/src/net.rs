@@ -140,6 +140,8 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
             pos: sh.spawn,
             ..View::default()
         }),
+        conn: Some(conn.clone()),
+        entity_bytes: Default::default(),
     });
     shared.online.fetch_add(1, Ordering::Relaxed);
     shared.input(Input::Join(link.clone()));
@@ -224,6 +226,8 @@ async fn stream_columns(conn: quinn::Connection, link: Arc<PlayerLink>, shared: 
             }
             _ = tokio::time::sleep(Duration::from_millis(50)) => {}
         }
+        // Entities came first out of the same budget.
+        tokens -= link.entity_bytes.swap(0, Ordering::Relaxed) as f64;
         let now = Instant::now();
         tokens = (tokens + budget * (now - last).as_secs_f64()).min(budget);
         last = now;
