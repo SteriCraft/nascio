@@ -201,6 +201,11 @@ fn main() -> anyhow::Result<()> {
         .build()?;
     #[cfg(feature = "gui")]
     if !cli.nogui {
+        // The window is the console: no terminal stays beside it (Windows).
+        #[cfg(windows)]
+        if detach_from_terminal() {
+            return Ok(());
+        }
         // The window starts the server (start dialog) and hands it back here once closed.
         let started = Arc::new(std::sync::Mutex::new(None::<Running>));
         gui::run(gui::Launch {
@@ -225,6 +230,33 @@ fn main() -> anyhow::Result<()> {
     let world = World::load(&dir)?;
     let r = launch(&opts, &world, &dir, rt.handle(), true)?;
     rt.block_on(r.console)?
+}
+
+/// Windows: starts this program again with no console window, for the window of the server
+/// (its console shows everything the terminal would). True if it did, the caller then ends;
+/// false in the new process itself, or if it could not start (the terminal then stays).
+#[cfg(all(windows, feature = "gui"))]
+fn detach_from_terminal() -> bool {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const MARK: &str = "NASCIO_SERVER_DETACHED";
+    if std::env::var_os(MARK).is_some() {
+        return false;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env(MARK, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .is_ok()
 }
 
 /// Runs the console's commands until `stop` or Ctrl+C, then stops the server. `periodic`:

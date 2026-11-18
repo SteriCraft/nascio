@@ -416,7 +416,8 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             .run_if(resource_added::<remote::Remote>)
             .before(pause::pause_input),
     )
-    .add_systems(OnEnter(Mode::Fly), fly::reset_visibility);
+    .add_systems(OnEnter(Mode::Fly), fly::reset_visibility)
+    .add_systems(Last, leave_on_exit);
     if let Some(l) = local {
         app.insert_resource(fly::SharedTerrain(l.terrain.clone()))
             .insert_resource(fly::SharedDeltas(Arc::new(l.deltas)))
@@ -551,6 +552,16 @@ impl LocalWorld {
             climate: Some(climate),
             info,
         })
+    }
+}
+
+/// The game ends (Quitter, window closed): the server is told, so the player leaves its map
+/// and its list at once.
+fn leave_on_exit(mut exit: MessageReader<AppExit>, remote: Option<Res<remote::Remote>>) {
+    if exit.read().next().is_some()
+        && let Some(r) = remote
+    {
+        r.disconnect();
     }
 }
 

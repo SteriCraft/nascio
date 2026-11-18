@@ -210,7 +210,12 @@ impl Remote {
                     };
                     loop {
                         tokio::select! {
-                            Some(msg) = out_rx.recv() => c.send(msg),
+                            Some(msg) = out_rx.recv() => match msg {
+                                // Leaving: the connection is closed, so the server sees the
+                                // player go at once (not after its 30 s idle timeout).
+                                ClientMsg::Bye => c.close(),
+                                msg => c.send(msg),
+                            },
                             ev = c.events.recv() => match ev {
                                 Some(Event::Column(col)) => {
                                     let (cx, cz) = (col.cx, col.cz);
@@ -337,6 +342,13 @@ impl Remote {
 
     pub fn send(&self, m: ClientMsg) {
         let _ = self.out.send(m);
+    }
+
+    /// Leaves the server: tells it, and gives the message a moment to go out before the
+    /// process ends.
+    pub fn disconnect(&self) {
+        self.send(ClientMsg::Bye);
+        std::thread::sleep(Duration::from_millis(250));
     }
 
     /// Whether column `key` and its neighbours are held (it can be meshed).

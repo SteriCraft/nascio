@@ -261,6 +261,19 @@ mod tests {
             "tiles sent again"
         );
 
+        // Leaving: the server drops both players at once (not after its idle timeout).
+        assert_eq!(shared.list().len(), 2);
+        a.disconnect();
+        b.disconnect();
+        let left = Instant::now();
+        while !shared.list().is_empty() {
+            assert!(
+                left.elapsed() < Duration::from_secs(5),
+                "players still listed"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
         server.shutdown().unwrap();
         drop(_rt);
         let _ = std::fs::remove_dir_all(&base);
