@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/chunk", "crates/world", "crates/worldgen", "crates/voxel", "crates/protocol", "crates/client", "crates/server", "crates/tools", "crates/viewer"]
+members = ["crates/core", "crates/chunk", "crates/physics", "crates/world", "crates/worldgen", "crates/voxel", "crates/protocol", "crates/client", "crates/server", "crates/tools", "crates/viewer"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ repository = "https://github.com/SteriCraft/nascio"
 [workspace.dependencies]
 nascio-core = { path = "crates/core" }
 nascio-chunk = { path = "crates/chunk" }
+nascio-physics = { path = "crates/physics" }
 nascio-world = { path = "crates/world" }
 nascio-worldgen = { path = "crates/worldgen" }
 nascio-voxel = { path = "crates/voxel" }

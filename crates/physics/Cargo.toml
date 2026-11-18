@@ -1,0 +1,21 @@
+[package]
+name = "nascio-physics"
+description = "Nascio player physics shared by the server (authority) and the client (prediction)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+# The client depends on this crate: no generation crate here (invariant 5).
+[dependencies]
+nascio-core.workspace = true
+nascio-chunk.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

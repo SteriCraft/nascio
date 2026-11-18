@@ -4422,6 +4422,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nascio-physics"
+version = "0.1.0"
+dependencies = [
+ "nascio-chunk",
+ "nascio-core",
+ "proptest",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "nascio-protocol"
 version = "0.1.0"
 dependencies = [

@@ -30,6 +30,7 @@ crates/
   worldgen/   nascio-worldgen  simulation macro (tectonique, érosion, climat, géologie) + CLI
   chunk/      nascio-chunk     types de chunk sans génération : table des blocs, chunks 32³,
                                teinte, maillage (ce que le client lit)
+  physics/    nascio-physics   physique du joueur (boîte, gravité, collisions, nage, vol), partagée par le serveur et le client
   voxel/      nascio-voxel     génération de chunks (terrain, géologie, végétation), deltas
   protocol/   nascio-protocol  messages, codec de colonnes v2, trames, entités (sans réseau)
   server/     nascio-server    serveur QUIC : simulation 20 Hz, colonnes, éditions, comptes ;
@@ -42,7 +43,7 @@ out/          sorties générées (PNG, mondes de test), ignorées par git
 ```
 Plus tard : `web`.
 
-Sens des dépendances : `core` ← `chunk` ← `world` ← `worldgen` et `voxel` ; `protocol` et `client` ne dépendent que de `core` et `chunk` ; `server` dépend de `voxel` et `protocol` (et, pour sa fenêtre, fonctionnalité `gui` active par défaut, de `worldgen`, Bevy et bevy_egui) ; `tools` et `viewer` dépendent de tout. `voxel` ne dépend pas de `worldgen` (sauf pour ses tests). **`core` ne dépend d'aucun moteur graphique.** **`client` ne dépend d'aucune crate de génération** (`world`, `worldgen`, `voxel`), ce que vérifie `crates/client/tests/no_generation.rs`.
+Sens des dépendances : `core` ← `chunk` ← `world` ← `worldgen` et `voxel` ; `protocol` et `client` ne dépendent que de `core` et `chunk` ; `physics` dépend de `core` et `chunk`, et `client` pourra en dépendre (elle ne contient aucune génération) ; `server` dépend de `voxel` et `protocol` (et, pour sa fenêtre, fonctionnalité `gui` active par défaut, de `worldgen`, Bevy et bevy_egui) ; `tools` et `viewer` dépendent de tout. `voxel` ne dépend pas de `worldgen` (sauf pour ses tests). **`core` ne dépend d'aucun moteur graphique.** **`client` ne dépend d'aucune crate de génération** (`world`, `worldgen`, `voxel`), ce que vérifie `crates/client/tests/no_generation.rs`.
 
 ## Invariants à ne jamais violer
 1. **Le tore partout.** Les coordonnées horizontales (x, z) sont périodiques, de période `WORLD_SIZE = 100_000`. Toute différence, distance, voisinage ou interpolation passe par les fonctions de `nascio-core::torus` (`wrap`, `delta`, `distance`…). On ne soustrait **jamais** deux coordonnées brutes. Les tests doivent couvrir les cas qui traversent la couture.

@@ -1,0 +1,12 @@
+# Chantier 5 — Mouvement autoritaire, prédiction et réconciliation
+
+Plan validé par l'auteur le 2026-11-18, avec ses réponses (`decisions.md`) : portée d'édition 5 m, course sur Maj, pas de montée automatique d'un bloc (saut automatique en option), vol sans traverser les blocs, mort par étouffement si un bloc solide est au-dessus de la tête. Étapes : 5.1 physique commune, 5.2 protocole v9, 5.3 serveur, 5.4 prédiction du client, 5.5 visualiseur, 5.6 tests d'intégration et documentation.
+
+## 5.1 — Crate `nascio-physics`
+- `PlayerParams` (TOML `[player]`, valeurs de l'auteur, `validate`), `Input` (touches, cap sur 16 bits, vitesse de vol), `State` (pieds, vitesse, au sol, dans un fluide, mode marche ou vol), `Shapes` (forme de collision par identifiant de bloc, tirée de la matière : plein, couche de neige de 0,125 m, fluide, vide), trait `BlockSource` (`None` = colonne non chargée).
+- `step` : un pas de 1/60 s. Accélération horizontale vers la vitesse voulue (50 m/s² au sol et dans l'eau, 10 en l'air) ; saut, gravité, chute plafonnée ; nage (monter, plonger, couler à 1 m/s) ; vol sans gravité, plafonné à 120 m/s ; collision axe par axe ; marche de 0,5 m ; bond hors de l'eau contre une berge. Cellule inconnue : état inchangé, `Unloaded`.
+- `unstuck` : remet un joueur enfermé sur les blocs qu'il chevauche, ou rend `Suffocated` si la rangée juste au-dessus de sa tête est solide (ou s'il resterait coincé).
+- `auto_jump` : pour l'option du client ; vrai au sol devant une marche d'un bloc avec de la place au-dessus.
+- 18 tests : chute et atterrissage exact, chute plafonnée, vitesses (marche, course, accroupi), arrêt contre un mur à sa face, bloc non franchi sans saut puis franchi en sautant, neige montée sans saut, hauteur du saut (1,25 m ± 0,1), plafond, nage, vol (collision, plafond de vitesse, descente jusqu'au sol), colonne non chargée, couture (mur de l'autre côté, passage est et ouest), poussée et étouffement, saut automatique, paramètres en TOML ; proptest : le même parcours au bord de la couture et 30 km plus loin donne le même mouvement (à 10⁻⁶ m) ; empreinte figée d'une trajectoire de 2 000 pas (même valeur en debug et en release ; à vérifier sous Linux).
+
+Limites connues : la hauteur ne change pas accroupi, et l'on peut tomber d'un bord accroupi (pas de garde au bord) ; le magma est un fluide où l'on nage, alors que la spec le dit mortel (à décider avec la mort par étouffement en 5.3).
