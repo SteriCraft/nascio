@@ -14,6 +14,7 @@ nascio-worldgen.workspace = true
 nascio-voxel.workspace = true
 nascio-protocol.workspace = true
 nascio-client.workspace = true
+nascio-server.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true

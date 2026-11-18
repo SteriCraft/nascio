@@ -40,3 +40,38 @@ Ajout de l'auteur : comme les nonces sont gardés en mémoire, tout jeton émis 
 - il est vérifié après le secret ;
 - il ne compte pas comme un échec de connexion ;
 - `open_registration` vaut faux par défaut, avec une option de développement.
+
+## 2.2 — Jetons signés par le site
+**Fait :**
+- **Module `nascio_server::token`** :
+  - `Claims` contient la version (1), le nom, le serveur (son `server_id`), les dates d'émission et d'expiration (ms UTC) et un nonce de 16 octets ;
+  - le jeton s'écrit `base64url(postcard(Claims) ‖ signature Ed25519)`, sans remplissage, et fait environ 140 caractères ;
+  - `SiteKey` charge la clé privée (PKCS#8), émet un jeton (`issue`) ou signe des `Claims` arbitraires (`sign`, utilisé par les tests pour forger de mauvais jetons) ;
+  - `Verifier` contient la clé publique, le `server_id`, l'instant de démarrage et les nonces vus.
+- **Vérification**, dans l'ordre :
+  1. la longueur (au plus 512 caractères) et le base64url canonique ;
+  2. la signature ;
+  3. la version, l'audience et le nom ;
+  4. la durée de validité, au plus 5 min, imposée par le serveur et pas seulement par le site ;
+  5. l'expiration et l'émission dans le futur, avec 30 s de tolérance ;
+  6. **l'émission avant le démarrage + 30 s** ;
+  7. le nonce jamais vu.
+
+  Un jeton valide est consommé. Les nonces sont oubliés une fois leur jeton expiré (+ 30 s). Chaque erreur a son message, transmis au client : il ne révèle rien de secret.
+- **Règle du redémarrage**, demandée par l'auteur. J'ai pris la borne stricte : `émis ≥ démarrage + 30 s`. En effet, un jeton dépensé juste avant l'arrêt, par un site dont l'horloge avance de 30 s, peut porter jusqu'à cette date ; `démarrage − 30 s` laisserait donc environ une minute de rejeu possible. Le prix est le suivant : avec des horloges synchronisées, les jetons sont refusés pendant les 30 s qui suivent un démarrage, avec le message « token issued before the server started: ask for a new one in 30 s ». Le client devra redemander un jeton. Si c'est gênant, la solution est d'écrire les nonces sur disque : c'est une décision à prendre plus tard.
+- **Outil `site`** (`crates/tools/src/bin/site.rs`), qui tient lieu du site :
+  - `site keygen <fichier>` écrit la clé privée en base64url et affiche la ligne `site_public_key = "…"` à copier dans la configuration du serveur ;
+  - `site public <fichier>` affiche la clé publique d'une clé privée ;
+  - `site token <fichier> --name alice --server eu-1 [--ttl 5m]` émet un jeton et refuse une durée de plus de 5 min.
+
+  `nascio-tools` dépend désormais de `nascio-server`, ce qui est permis : `tools` dépend de tout.
+- Aucune nouvelle dépendance : le base64url est écrit à la main, en 40 lignes testées.
+
+**Tests unitaires** (`token.rs`) :
+- base64url : aller-retour sur 0 à 69 octets, vecteurs connus, refus des caractères `=`, `+` et `/`, des longueurs impossibles et des formes non canoniques ;
+- un jeton valide est accepté une fois, puis refusé comme rejoué ; un second jeton pour le même nom passe ; les nonces expirés sont oubliés ;
+- refus avec le bon motif : autre clé, octet modifié, texte quelconque, jeton vide ou trop long, version, autre serveur, nom invalide, validité de plus de 5 min, expiré, émis dans le futur ; acceptation aux deux bords de la tolérance ;
+- émis avant le démarrage + 30 s : refusé, y compris un jeton frais émis à `T0` ; accepté à partir de `T0 + 30 s` ;
+- les clés de mauvaise taille et le `server_id` vide sont refusés.
+
+Essai manuel : `site keygen`, puis `public` (même clé), puis `token` (141 caractères). `--ttl 10m` est refusé.

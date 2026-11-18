@@ -12,6 +12,7 @@ pub mod net;
 pub mod replicate;
 pub mod security;
 pub mod sim;
+pub mod token;
 
 use std::net::SocketAddr;
 use std::path::Path;
