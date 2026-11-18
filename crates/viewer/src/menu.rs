@@ -361,12 +361,28 @@ fn check_account(login: &Login) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// When the server closes the connection: the reason, and a button to quit.
+/// Back in the menu (the server closed the connection, or the player left): the game's
+/// state goes, so that the next connection starts clean.
+pub fn leave_game(
+    mut commands: Commands,
+    mut streamer: ResMut<crate::fly::Streamer>,
+    mut horizon: ResMut<crate::horizon::Horizon>,
+    mut pause: ResMut<crate::pause::Pause>,
+) {
+    streamer.reset(&mut commands);
+    horizon.reset(&mut commands);
+    pause.open = false;
+    commands.remove_resource::<Remote>();
+    commands.remove_resource::<crate::tiles::TileStore>();
+}
+
+/// When the server closes the connection: the reason, and a button back to the main menu.
 pub fn disconnected_ui(
     mut contexts: EguiContexts,
     remote: Option<bevy::prelude::Res<Remote>>,
     mut god: ResMut<crate::god::God>,
-    mut exit: MessageWriter<AppExit>,
+    mut menu: ResMut<Menu>,
+    mut next: ResMut<NextState<crate::Mode>>,
 ) {
     let Some(remote) = remote else { return };
     let Some(reason) = remote
@@ -388,8 +404,10 @@ pub fn disconnected_ui(
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.label(format!("Le serveur a fermé la connexion : {reason}"));
-            if ui.button("Quitter").clicked() {
-                exit.write(AppExit::Success);
+            if ui.button("Menu principal").clicked() {
+                menu.status = format!("Déconnecté : {reason}");
+                menu.dialog = false;
+                next.set(crate::Mode::Menu);
             }
         });
 }

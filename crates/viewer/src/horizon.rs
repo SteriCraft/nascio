@@ -196,6 +196,14 @@ impl Horizon {
     }
 
     /// Colours of water and ice from the server's block table (network mode).
+    /// Forgets every level (back to the menu): their entities go, the layout starts over.
+    pub fn reset(&mut self, commands: &mut Commands) {
+        for e in self.entities.iter().flatten() {
+            commands.entity(*e).despawn();
+        }
+        *self = Self::new(self.cfg.clone(), self.colors);
+    }
+
     pub fn set_colors(&mut self, colors: WaterColors) {
         self.colors = colors;
     }

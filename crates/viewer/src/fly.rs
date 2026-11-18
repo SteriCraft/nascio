@@ -303,6 +303,18 @@ impl Streamer {
         }
     }
 
+    /// Forgets every column (back to the menu): their entities go, the loader starts over.
+    pub fn reset(&mut self, commands: &mut Commands) {
+        for slot in self.slots.values() {
+            if let Slot::Ready { entities, .. } = slot {
+                for &e in entities {
+                    commands.entity(e).despawn();
+                }
+            }
+        }
+        *self = Self::new();
+    }
+
     /// Meshes these columns again, if loaded or loading.
     pub fn request_remesh(&mut self, keys: impl IntoIterator<Item = (i32, i32)>) {
         self.remesh.extend(keys);

@@ -417,7 +417,11 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             .before(pause::pause_input),
     )
     .add_systems(OnEnter(Mode::Fly), fly::reset_visibility)
-    .add_systems(Last, leave_on_exit);
+    .add_systems(Last, leave_on_exit.after(bevy::window::ExitSystems))
+    .add_systems(
+        OnEnter(Mode::Menu),
+        (menu::leave_game, remote::clear_players),
+    );
     if let Some(l) = local {
         app.insert_resource(fly::SharedTerrain(l.terrain.clone()))
             .insert_resource(fly::SharedDeltas(Arc::new(l.deltas)))

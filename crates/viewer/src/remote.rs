@@ -415,6 +415,16 @@ pub fn remote_sync(
 #[derive(Component)]
 pub struct RemotePlayer(u32);
 
+/// Back to the menu: the other players' boxes go.
+pub fn clear_players(
+    mut commands: Commands,
+    boxes: Query<Entity, bevy::prelude::With<RemotePlayer>>,
+) {
+    for e in &boxes {
+        commands.entity(e).despawn();
+    }
+}
+
 /// Mesh and material of the boxes.
 #[derive(Default)]
 pub struct PlayerLook(Option<(Handle<Mesh>, Handle<StandardMaterial>)>);

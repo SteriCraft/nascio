@@ -323,7 +323,7 @@ fn status(ui: &mut egui::Ui, gui: &mut Gui, players: &[map::Dot]) {
             }
         });
     });
-    ui.small("Clic : voir sur la carte · clic droit : bannir, écrire");
+    ui.small("Clic : voir sur la carte · clic droit : kicker, bannir, écrire");
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
@@ -342,6 +342,10 @@ fn status(ui: &mut egui::Ui, gui: &mut Gui, players: &[map::Dot]) {
                     gui.selected = if on { None } else { Some(p.name.clone()) };
                 }
                 r.context_menu(|ui| {
+                    if ui.button("Kicker").clicked() {
+                        gui.command(format!("kick {}", p.name));
+                        ui.close();
+                    }
                     if ui.button("Bannir…").clicked() {
                         gui.ban_dialog = Some(BanDialog {
                             name: p.name.clone(),
