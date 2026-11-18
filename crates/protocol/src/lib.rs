@@ -1,4 +1,4 @@
-//! Nascio network protocol (proposed spec §7, `docs/reports/spec-proposee.md`).
+//! Nascio network protocol (`docs/world-spec.md` §8).
 //!
 //! Pure data, no networking: the chunk codec v2 and column batches ([`chunk`]), framed
 //! control messages ([`messages`], [`frame`]), quantized entity states ([`entity`]) and the

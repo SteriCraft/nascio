@@ -406,7 +406,7 @@ mod tests {
         assert!(v.verify(&t, T0).is_ok());
     }
 
-    /// The vectors of `spec-proposee.md` §7.2: a site written in another language checks its
+    /// The vectors of `world-spec.md` §8.2: a site written in another language checks its
     /// implementation against them.
     #[test]
     fn fixed_vectors() {

@@ -10,7 +10,7 @@ Phase Serveur et réseau validée par l'auteur, S6 compris : mesure sur deux mac
 ## Fait
 - Roadmap serveur écrite (`docs/roadmap-serveur.md`).
 - C0 : `write_durable`, journal créé d'un coup. Rapport `serveur-C0.md`.
-- S0 : bin `netbench` (codecs, fsync), rapport `serveur-S0.md`, texte proposé `spec-proposee.md` (§5 journal global, §7 réseau).
+- S0 : bin `netbench` (codecs, fsync), rapport `serveur-S0.md`, texte proposé pour la spec (§5 journal global, §7 réseau), intégré à `world-spec.md` §5 et §8 le 2026-11-18.
 - S1 : journal global dans `crates/voxel/src/delta.rs` (segments `deltas/wal/`, LSN + CRC-32C, `flush` = fsync groupé, points de reprise `checkpoint_bytes`, région format 2, migration des anciens `.log`), test du processus tué, `netbench wal` (320 k éditions/s). Rapport `serveur-S1.md`.
 - S2 : crate `crates/protocol` (`chunk` v2 + `Column` zstd, `messages` postcard, `frame`, `entity` quantifié 1/64 m, `clock`, `varint`) ; colonne v2 = 1 290 o terre / 481 o mer. Rapport `serveur-S2.md`.
 - S3 : `crates/server` (config TOML, cache de colonnes partagé, sim 20 Hz, QUIC quinn/rustls-ring, certificat épinglé, flush 50 ms), `crates/client` (connect headless + `Mirror`), `netbot`, test d'intégration `crates/server/tests/edit.rs` (édition vue par 2 clients, refus hors colonnes, client tardif, redémarrage). Arrivée 797 colonnes en 5,3 s (mer, 128 Ko/s). Rapport `serveur-S3.md`.
