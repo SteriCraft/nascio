@@ -38,6 +38,8 @@ pub struct Remote {
     pub status: Arc<Mutex<String>>,
     /// The other players, and the local time base of their samples.
     pub entities: Arc<Mutex<Entities>>,
+    /// Position the server put the camera back to (refused move).
+    correction: Arc<Mutex<Option<[f64; 3]>>>,
     epoch: Instant,
     /// Radius of the columns the server sends, metres.
     pub radius_m: u32,
@@ -53,6 +55,8 @@ impl Remote {
     pub fn start(
         addr: SocketAddr,
         cert: &Path,
+        name: &str,
+        secret: &str,
         blocks: &Blocks,
         spawn_pos: [f64; 3],
     ) -> anyhow::Result<Self> {
@@ -64,6 +68,8 @@ impl Remote {
         let dirty = Arc::new(Mutex::new(BTreeSet::new()));
         let status = Arc::new(Mutex::new(String::new()));
         let entities = Arc::new(Mutex::new(Entities::new(0.05)));
+        let correction = Arc::new(Mutex::new(None));
+        let (name, secret) = (name.to_owned(), secret.to_owned());
         let epoch = Instant::now();
         let (out, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<ClientMsg>();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<anyhow::Result<u32>>();
@@ -73,6 +79,7 @@ impl Remote {
             status.clone(),
             entities.clone(),
         );
+        let co = correction.clone();
         std::thread::Builder::new()
             .name("network".into())
             .spawn(move || {
@@ -85,7 +92,7 @@ impl Remote {
                     Err(e) => return drop(ready_tx.send(Err(e.into()))),
                 };
                 rt.block_on(async move {
-                    let mut c = match connect(addr, &cert, "viewer").await {
+                    let mut c = match connect(addr, &cert, &name, &secret).await {
                         Ok(c) => c,
                         Err(e) => return drop(ready_tx.send(Err(e))),
                     };
@@ -132,6 +139,10 @@ impl Remote {
                                         Err(e) => *lock(&st) = format!("entities: {e:#}"),
                                     }
                                 }
+                                Some(Event::Msg(ServerMsg::Correct { pos })) => {
+                                    *lock(&co) = Some(pos);
+                                    *lock(&st) = "move refused: too fast".into();
+                                }
                                 Some(Event::Msg(ServerMsg::Forget { columns })) => {
                                     lock(&m).forget(&columns);
                                 }
@@ -159,6 +170,7 @@ impl Remote {
             dirty,
             status,
             entities,
+            correction,
             epoch,
             radius_m,
         })
@@ -202,7 +214,7 @@ impl Remote {
 pub fn remote_sync(
     remote: Option<Res<Remote>>,
     mut streamer: ResMut<Streamer>,
-    cam: Res<FlyCam>,
+    mut cam: ResMut<FlyCam>,
     time: Res<Time>,
     mut since: Local<f32>,
 ) {
@@ -212,6 +224,9 @@ pub fn remote_sync(
         .collect();
     if !dirty.is_empty() {
         streamer.request_remesh(dirty);
+    }
+    if let Some(p) = lock(&remote.correction).take() {
+        cam.pos = WorldPos::new(p[0], p[1], p[2]);
     }
     *since += time.delta_secs();
     if *since >= 0.05 {

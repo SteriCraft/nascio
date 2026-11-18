@@ -39,6 +39,28 @@ pub struct ServerConfig {
     pub max_players: usize,
     /// Spawn point (x, z in metres); y is the surface plus two blocks.
     pub spawn_xz: [f64; 2],
+    /// An unknown name creates its account at login (otherwise accounts are made with the
+    /// console's `adduser`).
+    pub open_registration: bool,
+    /// Argon2id cost of new accounts: memory (KiB) and passes.
+    pub account_hash_kib: u32,
+    pub account_hash_passes: u32,
+    /// Failed logins allowed per address and minute.
+    pub login_failures_per_min: usize,
+    /// Control messages a client may send per second, and in a burst.
+    pub control_msgs_per_s: f64,
+    pub control_burst: f64,
+    /// Block edits a client may ask per second, and in a burst.
+    pub edits_per_s: f64,
+    pub edits_burst: f64,
+    /// Refused messages (over a limit) after which a client is kicked.
+    pub kick_after_violations: u32,
+    /// Fastest move accepted, m/s (0: not checked). A gameplay value, to be set by the
+    /// author; the default lets the viewer fly.
+    pub max_speed_m_s: f64,
+    /// Farthest block a player may edit from their position, m (0: not checked). A
+    /// gameplay value, to be set by the author.
+    pub edit_reach_m: f64,
     /// Journal size above which the modified regions are written to their files, bytes.
     pub checkpoint_bytes: u64,
 }
@@ -63,6 +85,17 @@ impl Default for ServerConfig {
             max_players: 1_000,
             spawn_xz: [50_000.0, 50_000.0],
             checkpoint_bytes: 16 << 20,
+            open_registration: true,
+            account_hash_kib: 19 * 1024,
+            account_hash_passes: 2,
+            login_failures_per_min: 5,
+            control_msgs_per_s: 200.0,
+            control_burst: 400.0,
+            edits_per_s: 20.0,
+            edits_burst: 40.0,
+            kick_after_violations: 500,
+            max_speed_m_s: 120.0,
+            edit_reach_m: 160.0,
         }
     }
 }

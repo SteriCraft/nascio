@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
         let (walk, hold) = (cli.walk.clone(), cli.hold);
         tasks.push(tokio::spawn(async move {
             let start = Instant::now();
-            let mut c = connect(cli.addr, &cert, &format!("bot{k}")).await?;
+            let mut c = connect(cli.addr, &cert, &format!("bot{k}"), "netbot-dev-secret").await?;
             let r = c.hello.chunk_radius_m.div_ceil(32) as i32;
             let want = (-r..=r)
                 .flat_map(|dz| (-r..=r).map(move |dx| (dx, dz)))

@@ -16,6 +16,8 @@ fn cfg() -> ServerConfig {
         chunk_radius_m: 96,
         client_budget_bytes_per_s: 4 << 20,
         generation_threads: 4,
+        // The edit far away must reach the "not loaded" check.
+        edit_reach_m: 0.0,
         ..ServerConfig::default()
     }
 }
@@ -48,8 +50,12 @@ async fn an_edit_is_seen_by_every_client_and_survives_a_restart() {
     let _ = std::fs::remove_dir_all(&dir);
     let server = RunningServer::start(&world, cfg(), &dir).unwrap();
 
-    let mut a = connect(server.addr, &server.cert_der, "a").await.unwrap();
-    let mut b = connect(server.addr, &server.cert_der, "b").await.unwrap();
+    let mut a = connect(server.addr, &server.cert_der, "player_a", "test-secret")
+        .await
+        .unwrap();
+    let mut b = connect(server.addr, &server.cert_der, "player_b", "test-secret")
+        .await
+        .unwrap();
     assert_ne!(a.hello.player, b.hello.player);
     let spawn = a.hello.spawn;
     let granite = a.hello.blocks.iter().position(|n| n == "granite").unwrap() as u16;
@@ -84,7 +90,9 @@ async fn an_edit_is_seen_by_every_client_and_survives_a_restart() {
     assert!(refused.contains("not loaded"), "{refused}");
 
     // A later client gets the edit in its column (the cache was rebuilt).
-    let mut c = connect(server.addr, &server.cert_der, "c").await.unwrap();
+    let mut c = connect(server.addr, &server.cert_der, "player_c", "test-secret")
+        .await
+        .unwrap();
     let mut mc = Mirror::default();
     pump(&mut c, &mut mc, |m| m.block(p).is_some()).await;
     assert_eq!(mc.block(p), Some(granite));
@@ -105,7 +113,9 @@ async fn an_edit_is_seen_by_every_client_and_survives_a_restart() {
 
     // Restarted: the edit is there.
     let server = RunningServer::start(&world, cfg(), &dir).unwrap();
-    let mut d = connect(server.addr, &server.cert_der, "d").await.unwrap();
+    let mut d = connect(server.addr, &server.cert_der, "player_d", "test-secret")
+        .await
+        .unwrap();
     let mut md = Mirror::default();
     pump(&mut d, &mut md, |m| m.block(p).is_some()).await;
     assert_eq!(md.block(p), Some(granite));

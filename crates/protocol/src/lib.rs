@@ -14,4 +14,4 @@ pub mod varint;
 
 /// Version of the protocol, checked at the handshake. Any change of a message or a codec
 /// increments it.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;

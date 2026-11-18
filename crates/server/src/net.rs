@@ -2,7 +2,8 @@
 //! control stream, writer of the control stream, and the column streamer (closest columns
 //! first, within the radius, under the byte budget of the client).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -16,8 +17,10 @@ use nascio_protocol::messages::{ClientMsg, ServerHello, ServerMsg, from_bytes, t
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+use crate::accounts::{Accounts, Login};
 use crate::columns::{ColumnCache, wrap_column};
 use crate::config::ServerConfig;
+use crate::security::{AbuseLog, Bucket, LoginGuard};
 use crate::sim::{Input, PlayerLink, View};
 
 /// What every connection needs.
@@ -31,9 +34,53 @@ pub struct Shared {
     /// Column bytes sent (statistics).
     pub sent_bytes: AtomicU64,
     pub sent_columns: AtomicU64,
+    pub accounts: Accounts,
+    pub abuse: AbuseLog,
+    pub logins: LoginGuard,
+    /// Players online, by account name.
+    pub sessions: Mutex<BTreeMap<String, Session>>,
+}
+
+/// A player online.
+pub struct Session {
+    pub id: u32,
+    pub ip: IpAddr,
+    pub link: Arc<PlayerLink>,
+    conn: quinn::Connection,
 }
 
 impl Shared {
+    /// Players online: name, id, position.
+    pub fn list(&self) -> Vec<(String, u32, [f64; 3])> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(n, s)| {
+                let v = s.link.view.lock().unwrap_or_else(|e| e.into_inner()).pos;
+                (n.clone(), s.id, v)
+            })
+            .collect()
+    }
+
+    /// Kicks a player (told why, then disconnected); false if not online.
+    pub fn kick(&self, name: &str, reason: &str) -> bool {
+        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = sessions.get(name) else {
+            return false;
+        };
+        let _ = s.link.out.send(ServerMsg::Kick {
+            reason: reason.to_owned(),
+        });
+        let (conn, reason) = (s.conn.clone(), reason.to_owned());
+        tokio::spawn(async move {
+            // Time for the message to leave.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            conn.close(2u32.into(), reason.as_bytes());
+        });
+        true
+    }
+
     fn input(&self, i: Input) {
         let _ = self
             .inputs
@@ -114,6 +161,11 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     } else {
         None
     };
+    let ip = conn.remote_address().ip();
+    let refuse = match refuse {
+        Some(r) => Some(r),
+        None => login(&shared, ip, &hello.name, &hello.secret).await.err(),
+    };
     if let Some(reason) = refuse {
         send.write_all(&frame(&to_bytes(&ServerMsg::Refused {
             reason: reason.clone(),
@@ -125,6 +177,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         return Ok(());
     }
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
+    let name = hello.name.clone();
     let mut sh = shared.hello.clone();
     sh.player = id;
     sh.server_unix_ms = unix_ms();
@@ -147,6 +200,18 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         send_space: usize::MAX.into(),
         entity_bytes: Default::default(),
     });
+    {
+        let mut sessions = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions.insert(
+            name.clone(),
+            Session {
+                id,
+                ip,
+                link: link.clone(),
+                conn: conn.clone(),
+            },
+        );
+    }
     shared.online.fetch_add(1, Ordering::Relaxed);
     shared.input(Input::Join(link.clone()));
 
@@ -189,9 +254,42 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         }
     });
 
-    // Reader of the control stream.
+    // Reader of the control stream, with the limits of the client.
+    let cfg = &shared.cfg;
+    let now = Instant::now();
+    let mut control = Bucket::new(cfg.control_msgs_per_s, cfg.control_burst, now);
+    let mut edits = Bucket::new(cfg.edits_per_s, cfg.edits_burst, now);
+    let mut violations = 0u32;
+    // Last accepted position, and when.
+    let mut last_move = (sh.spawn, now);
+    // Events by kind: the first of each kind is logged, then every hundredth.
+    let counts: Mutex<BTreeMap<String, u64>> = Mutex::default();
+    let abuse = |kind: &str, detail: &str| {
+        let mut c = counts.lock().unwrap_or_else(|e| e.into_inner());
+        let n = c.entry(kind.to_owned()).or_insert(0);
+        *n += 1;
+        if *n == 1 || (*n).is_multiple_of(100) {
+            shared
+                .abuse
+                .log(unix_ms(), ip, &name, kind, &format!("{detail} (#{n})"));
+        }
+    };
     let result: anyhow::Result<()> = async {
         while let Some(f) = read_frame(&mut recv, &mut de, &mut buf).await? {
+            let now = Instant::now();
+            if !control.take(now) {
+                violations += 1;
+                abuse("flood", "message over the limit");
+                if violations >= cfg.kick_after_violations {
+                    abuse("kick", "too many messages");
+                    let _ = link.out.send(ServerMsg::Kick {
+                        reason: "too many messages".into(),
+                    });
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    break;
+                }
+                continue;
+            }
             match from_bytes::<ClientMsg>(&f)? {
                 ClientMsg::Ping { client_ms } => {
                     let _ = link.out.send(ServerMsg::Pong {
@@ -200,12 +298,53 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
                     });
                 }
                 ClientMsg::Move { pos, yaw, pitch } => {
-                    if pos.iter().all(|v| v.is_finite()) {
-                        *link.view.lock().unwrap_or_else(|e| e.into_inner()) = View {
-                            pos: [torus::wrap_f64(pos[0]), pos[1], torus::wrap_f64(pos[2])],
-                            yaw,
-                            pitch,
-                        };
+                    if !pos.iter().all(|v| v.is_finite()) {
+                        continue;
+                    }
+                    let pos = [torus::wrap_f64(pos[0]), pos[1], torus::wrap_f64(pos[2])];
+                    let d = distance(last_move.0, pos);
+                    let dt = now.saturating_duration_since(last_move.1).as_secs_f64();
+                    // Slack for jitter: half a second of motion and two metres.
+                    if cfg.max_speed_m_s > 0.0 && d > cfg.max_speed_m_s * (dt + 0.5) + 2.0 {
+                        violations += 1;
+                        abuse("speed", &format!("{d:.1} m in {dt:.2} s"));
+                        let _ = link.out.send(ServerMsg::Correct { pos: last_move.0 });
+                        continue;
+                    }
+                    last_move = (pos, now);
+                    *link.view.lock().unwrap_or_else(|e| e.into_inner()) = View { pos, yaw, pitch };
+                }
+                ClientMsg::SetBlock { pos, block } => {
+                    let refused = if !edits.take(now) {
+                        violations += 1;
+                        abuse("edits", "edit over the limit");
+                        Some("too many edits".to_owned())
+                    } else {
+                        let at = [
+                            f64::from(pos[0]) + 0.5,
+                            f64::from(pos[1]) + 0.5,
+                            f64::from(pos[2]) + 0.5,
+                        ];
+                        let d = distance(last_move.0, at);
+                        (cfg.edit_reach_m > 0.0 && d > cfg.edit_reach_m).then(|| {
+                            violations += 1;
+                            abuse("reach", &format!("edit {d:.0} m away"));
+                            format!("out of reach ({d:.0} m)")
+                        })
+                    };
+                    match refused {
+                        Some(reason) => {
+                            let _ = link.out.send(ServerMsg::EditRefused { pos, reason });
+                        }
+                        None => shared.input(Input::Msg(id, ClientMsg::SetBlock { pos, block })),
+                    }
+                    if violations >= cfg.kick_after_violations {
+                        abuse("kick", "too many refused messages");
+                        let _ = link.out.send(ServerMsg::Kick {
+                            reason: "too many refused messages".into(),
+                        });
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        break;
                     }
                 }
                 ClientMsg::Bye => break,
@@ -216,6 +355,12 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         Ok(())
     }
     .await;
+    {
+        let mut sessions = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if sessions.get(&name).is_some_and(|s| s.id == id) {
+            sessions.remove(&name);
+        }
+    }
     shared.input(Input::Leave(id));
     shared.online.fetch_sub(1, Ordering::Relaxed);
     streamer.abort();
@@ -223,6 +368,61 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     datagrams.abort();
     conn.close(0u32.into(), b"bye");
     result
+}
+
+/// Distance on the torus, metres.
+fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let (dx, dz) = (torus::delta_f64(a[0], b[0]), torus::delta_f64(a[2], b[2]));
+    (dx * dx + (b[1] - a[1]).powi(2) + dz * dz).sqrt()
+}
+
+/// Checks a login (hashing on a blocking thread); `Err` holds the reason given to the client.
+async fn login(shared: &Arc<Shared>, ip: IpAddr, name: &str, secret: &str) -> Result<(), String> {
+    let cfg = &shared.cfg;
+    let now = Instant::now();
+    if !shared.logins.allowed(ip, cfg.login_failures_per_min, now) {
+        shared
+            .abuse
+            .log(unix_ms(), ip, name, "login", "blocked: too many failures");
+        return Err("too many failed logins: wait a minute".into());
+    }
+    let (sh, n, s, open) = (
+        shared.clone(),
+        name.to_owned(),
+        secret.to_owned(),
+        cfg.open_registration,
+    );
+    let r = tokio::task::spawn_blocking(move || sh.accounts.login(&n, &s, open, unix_ms()))
+        .await
+        .map_err(|e| format!("{e}"))?;
+    match r {
+        Ok(login) => {
+            if login == Login::Created {
+                println!("account {name} created ({ip})");
+            }
+            // Only once the secret is right: a stranger does not learn who is online.
+            if shared
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(name)
+            {
+                return Err(format!("{name} is already connected"));
+            }
+            Ok(())
+        }
+        Err(e) => {
+            shared.logins.failed(ip, now);
+            let e = format!("{e:#}");
+            shared.abuse.log(unix_ms(), ip, name, "login", &e);
+            // Do not tell which of the two was wrong.
+            Err(if e == "unknown account" || e == "wrong secret" {
+                "wrong name or secret".into()
+            } else {
+                e
+            })
+        }
+    }
 }
 
 /// Column offsets within `radius` columns, closest first (ties in a fixed order).

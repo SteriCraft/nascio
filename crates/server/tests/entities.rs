@@ -57,13 +57,15 @@ async fn motion_is_smooth_through_150_ms_of_latency() {
         chunk_radius_m: 64,
         generation_threads: 2,
         spawn_xz: [0.0, 0.0],
+        // The mover jumps from the spawn onto its circle.
+        max_speed_m_s: 0.0,
         ..ServerConfig::default()
     };
     let server = RunningServer::start(&world, cfg, &dir).unwrap();
-    let mover = connect(server.addr, &server.cert_der, "mover")
+    let mover = connect(server.addr, &server.cert_der, "mover", "test-secret")
         .await
         .unwrap();
-    let mut obs = connect(server.addr, &server.cert_der, "observer")
+    let mut obs = connect(server.addr, &server.cert_der, "observer", "test-secret")
         .await
         .unwrap();
     let id = mover.hello.player;

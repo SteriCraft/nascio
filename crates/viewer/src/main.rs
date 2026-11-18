@@ -104,6 +104,12 @@ struct Args {
     /// Server certificate (DER) for `--connect` (default: `<world>/server/cert.der`).
     #[arg(long)]
     cert: Option<PathBuf>,
+    /// Account name for `--connect` (created on first use if the server allows it).
+    #[arg(long, default_value = "viewer")]
+    name: String,
+    /// Account secret for `--connect` (at least 8 characters).
+    #[arg(long, default_value = "viewer-dev-secret")]
+    secret: String,
     /// Run a scripted benchmark path (TOML, see `bench/default.toml`), then quit.
     /// Implies the 3D mode, 1920x1080, no vsync and the file's settings.
     #[arg(long)]
@@ -300,6 +306,8 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             let r = remote::Remote::start(
                 addr,
                 &cert,
+                &args.name,
+                &args.secret,
                 terrain.blocks(),
                 [cam.pos.x, cam.pos.y, cam.pos.z],
             )?;

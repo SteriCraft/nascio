@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ClientHello {
     pub protocol: u32,
-    /// Player name (accounts come in S7).
+    /// Account name.
     pub name: String,
+    /// Account secret (the connection is encrypted; the server keeps only a hash).
+    pub secret: String,
 }
 
 /// Answer of the server to [`ClientHello`].
@@ -98,6 +100,10 @@ pub enum ServerMsg {
     },
     Kick {
         reason: String,
+    },
+    /// A `Move` was refused (too fast): the player is put back here.
+    Correct {
+        pos: [f64; 3],
     },
 }
 

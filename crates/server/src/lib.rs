@@ -5,10 +5,12 @@
 //! `fsync_interval_ms` (group commit), and chunk columns built once and shared by every
 //! client ([`columns`]). The server is the only source of generation (invariant 5).
 
+pub mod accounts;
 pub mod columns;
 pub mod config;
 pub mod net;
 pub mod replicate;
+pub mod security;
 pub mod sim;
 
 use std::net::SocketAddr;
@@ -173,7 +175,18 @@ impl RunningServer {
                     }
                 })?,
         );
+        let server_dir = data_dir.join("server");
+        let accounts = accounts::Accounts::open_with(
+            &server_dir,
+            argon2::Params::new(cfg.account_hash_kib, cfg.account_hash_passes, 1, Some(32))
+                .map_err(|e| anyhow::anyhow!("argon2 parameters: {e}"))?,
+        )?;
+        let abuse = security::AbuseLog::open(&server_dir.join("abuse.log"))?;
         let shared = Arc::new(net::Shared {
+            accounts,
+            abuse,
+            logins: Default::default(),
+            sessions: Default::default(),
             cfg,
             hello,
             cache,

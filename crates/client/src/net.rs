@@ -63,9 +63,14 @@ impl Connection {
     }
 }
 
-/// Connects and shakes hands. `cert_der` is the server's certificate, trusted as is
+/// Connects and logs in. `cert_der` is the server's certificate, trusted as is
 /// (self-signed server certificate, pinned by the client).
-pub async fn connect(addr: SocketAddr, cert_der: &[u8], name: &str) -> anyhow::Result<Connection> {
+pub async fn connect(
+    addr: SocketAddr,
+    cert_der: &[u8],
+    name: &str,
+    secret: &str,
+) -> anyhow::Result<Connection> {
     let mut roots = RootCertStore::empty();
     roots.add(CertificateDer::from(cert_der.to_vec()))?;
     let mut cfg = quinn::ClientConfig::with_root_certificates(Arc::new(roots))?;
@@ -89,6 +94,7 @@ pub async fn connect(addr: SocketAddr, cert_der: &[u8], name: &str) -> anyhow::R
     let hello = ClientMsg::Hello(ClientHello {
         protocol: nascio_protocol::PROTOCOL_VERSION,
         name: name.to_owned(),
+        secret: secret.to_owned(),
     });
     send.write_all(&frame(&to_bytes(&hello)?)).await?;
     let mut de = Deframer::new(MAX_CONTROL_FRAME);

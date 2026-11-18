@@ -20,6 +20,8 @@ tokio.workspace = true
 quinn.workspace = true
 rcgen.workspace = true
 rayon.workspace = true
+argon2.workspace = true
+ring.workspace = true
 
 [dev-dependencies]
 nascio-worldgen.workspace = true

@@ -45,7 +45,7 @@ async fn site(world: &World, terrain: &Terrain, k: usize, scx: i32, scz: i32) {
         ..ServerConfig::default()
     };
     let server = RunningServer::start(world, cfg, &dir).unwrap();
-    let mut c = connect(server.addr, &server.cert_der, "mesh")
+    let mut c = connect(server.addr, &server.cert_der, "mesh", "test-secret")
         .await
         .unwrap();
     let blocks = terrain.blocks();

@@ -206,7 +206,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn bot(k: usize, cli: &Cli, cert: &[u8], c: &Counters, until: Instant) -> anyhow::Result<()> {
-    let mut conn = connect(cli.addr, cert, &format!("swarm{k}")).await?;
+    let mut conn = connect(cli.addr, cert, &format!("swarm{k}"), "swarm-dev-secret").await?;
     let centre = match &cli.centre {
         Some(v) => [v[0], v[1], v[2]],
         None => conn.hello.spawn,

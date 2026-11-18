@@ -17,7 +17,7 @@ Ce fichier ne modifie pas `docs/world-spec.md` : il propose un texte, à valider
 - Transport QUIC (TLS 1.3) : un flux bidirectionnel de contrôle, des flux unidirectionnels pour les chunks, des datagrammes non fiables pour les états des entités.
 
 ### 7.2 Poignée de main
-Le client envoie la version du protocole ; le serveur répond avec `generator_version`, l'empreinte de génération, la table des blocs (nom → identifiant de la session) et son heure UTC. Le client mesure le décalage de son horloge (aller-retour, à la manière de NTP) et dérive le temps du jeu de l'UTC corrigée : aucune horloge interne.
+Le client envoie la version du protocole, son nom de compte et son secret (dans le canal chiffré, certificat du serveur épinglé) ; le serveur vérifie le secret (Argon2id, sel par compte), refuse une deuxième session et bloque une adresse après trop d'échecs, puis répond avec `generator_version`, l'empreinte de génération, la table des blocs (nom → identifiant de la session) et son heure UTC. Le client mesure le décalage de son horloge (aller-retour, à la manière de NTP) et dérive le temps du jeu de l'UTC corrigée : aucune horloge interne.
 
 ### 7.3 Chunks
 - Codec v2 : un octet de version, la palette (nombre puis identifiants, varints), puis des plages (indice de palette, longueur − 1), varints, dans l'ordre des indices des blocs (`x`, puis `z`, puis `y`) ; pas de plages quand la palette n'a qu'une entrée : un chunk uniforme tient en 3 à 5 octets.
@@ -33,3 +33,8 @@ Le client envoie la version du protocole ; le serveur répond avec `generator_ve
 - Positions quantifiées (1/64 m ; lacet sur 16 bits, tangage sur 8 bits), envoyées en différence par rapport au dernier état confirmé par le client. Chaque datagramme porte un numéro (`seq`) et le tick du serveur ; le client acquitte les numéros reçus (`Ack`, flux de contrôle). Une entité en différence désigne le datagramme qui lui sert de base (au plus 64 datagrammes plus tôt) ; sinon elle est envoyée en entier. Une entité sortie du rayon (`entity_radius_m`, 256 m) est envoyée comme retirée jusqu'à l'acquittement du retrait.
 - Le client affiche les entités 100 ms derrière le serveur, par interpolation sur le tore, avec une extrapolation de 250 ms au plus.
 - Budget par client `client_budget_bytes_per_s` (128 Ko/s) : entités, puis éditions, puis chunks.
+
+### 7.5 Limites et abus
+- Chaque client a des seaux de jetons pour ses messages de contrôle et ses éditions ; au-delà, le message est ignoré ou l'édition refusée, et après trop de refus le client est expulsé.
+- Un déplacement plus rapide que la vitesse maximale est refusé et le joueur est remis à sa dernière position acceptée (`Correct`) ; une édition hors de portée est refusée. Les valeurs (vitesse, portée) relèvent du gameplay.
+- Les refus sont consignés dans `<data>/server/abuse.log` (heure, adresse, compte, type, détail), sans jamais de secret.
