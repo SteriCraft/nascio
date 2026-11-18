@@ -214,7 +214,7 @@ Sorties : `geo_context` (contexte dominant), `sediment_thickness` (m), `weatheri
    - mince sur les cratons et quasi nulle sur les orogènes ;
    - sur l'océan, les sédiments pélagiques s'épaississent avec l'âge de la croûte.
 
-   Les bancs alternent **grès, argile, calcaire et évaporites (gypse)** selon le contexte : calcaire et argile en milieu marin, grès et argile sur les continents, gypse en climat aride. Leur épaisseur va de quelques mètres à environ 30 m. Ils suivent une altitude absolue légèrement ondulée, comme des strates horizontales.
+   Les bancs alternent **grès, argile, calcaire, craie et évaporites (gypse)** selon le contexte : calcaire, craie et argile en milieu marin, grès et argile sur les continents (avec du calcaire, et de la craie sur les plates-formes), gypse en climat aride. Leur épaisseur va de quelques mètres à environ 30 m. Ils suivent une altitude absolue légèrement ondulée, comme des strates horizontales.
 4. **Socle** :
    - continental : granite et gneiss, ou schistes et roches métamorphiques dans les orogènes ;
    - océanique : basalte en surface, puis gabbro ;
@@ -241,6 +241,7 @@ Les limites entre contextes sont déformées par un bruit périodique : elles ne
 Chaque type de gisement décrit :
 - le bloc et ses proportions (un mélange est possible, ainsi qu'un « toit » d'un autre bloc pour les couches) ;
 - les contextes et leurs poids, et les contextes requis (multiplicatifs ; `"a|b"` prend le plus grand des deux) ;
+- facultativement, les roches hôtes (`host_rock`, noms de blocs) : le corps ne remplace que ces roches, par exemple le silex dans le calcaire et la craie ;
 - la forme, la plage de profondeur, la taille, la teneur et la rareté ;
 - une température maximale facultative (`max_temperature_c`) : la plage de profondeur d'un corps se resserre au-dessus de cet isotherme de sa colonne (même tirage aléatoire, sans effet sur le déterminisme). Elle sert de fenêtre à huile : 120 °C pour le pétrole, 200 °C pour le gaz ;
 - à titre indicatif, les éléments obtenus après raffinage.

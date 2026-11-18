@@ -80,6 +80,8 @@ struct Ore {
     blocks: Vec<(BlockId, f64)>,
     /// `(block, share of the thickness from the top)`.
     cap: Option<(BlockId, f64)>,
+    /// Rocks the body may replace (`host_rock`); empty: any rock of its class.
+    host_rock: Vec<BlockId>,
 }
 
 /// Geological data of a world for the chunks.
@@ -170,11 +172,17 @@ impl Geology {
                     Some(c) => Some((id(&c.block)?, c.fraction)),
                     None => None,
                 };
+                let host_rock = d
+                    .host_rock
+                    .iter()
+                    .map(|n| id(n))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
                 ores.push(Ore {
                     shape: d.shape,
                     host: d.host,
                     blocks: list,
                     cap,
+                    host_rock,
                 });
             }
         }
@@ -312,14 +320,28 @@ impl Geology {
         // Lateral facies changes: the same bed shifts lithology across a basin.
         let h = (h + 0.3 * (facies + 1.0)).fract();
         let marine = setting::oceanic(col.setting) || col.setting == setting::MARINE_SHELF;
+        // Chalk: pelagic carbonate of shelves, raised on the platforms (older worlds: limestone).
+        let chalk = ids.chalk.unwrap_or(ids.limestone);
         let table: &[(BlockId, f64)] = if marine {
-            &[(ids.limestone, 0.45), (ids.clay, 0.9), (ids.sandstone, 1.0)]
+            &[
+                (ids.limestone, 0.3),
+                (chalk, 0.45),
+                (ids.clay, 0.9),
+                (ids.sandstone, 1.0),
+            ]
         } else if col.arid {
             &[
                 (ids.sandstone, 0.35),
                 (ids.clay, 0.65),
                 (ids.limestone, 0.8),
                 (ids.gypsum, 1.0),
+            ]
+        } else if col.setting == setting::PLATFORM {
+            &[
+                (ids.sandstone, 0.35),
+                (ids.clay, 0.65),
+                (ids.limestone, 0.85),
+                (chalk, 1.0),
             ]
         } else {
             &[(ids.sandstone, 0.4), (ids.clay, 0.75), (ids.limestone, 1.0)]
@@ -412,13 +434,15 @@ impl Geology {
         }
     }
 
-    /// The first body of `bodies` that contains block `(x, y, z)` (wrapped) of class `class`
-    /// in a column whose top is `top`: `(body, ore of its type, mineralisation probability,
-    /// height in the body)`.
+    /// The first body of `bodies` that contains block `(x, y, z)` (wrapped), a `rock` of class
+    /// `class`, in a column whose top is `top`: `(body, ore of its type, mineralisation
+    /// probability, height in the body)`.
+    #[allow(clippy::too_many_arguments)]
     fn body_at<'a>(
         &'a self,
         bodies: &'a [Body],
         class: Class,
+        rock: BlockId,
         x: i32,
         y: i32,
         z: i32,
@@ -442,7 +466,7 @@ impl Geology {
                 Shape::Placer => matches!(class, Class::Loose | Class::Weathered | Class::Sediment),
                 Shape::Trap => false,
             };
-            if !host_ok {
+            if !host_ok || !(ore.host_rock.is_empty() || ore.host_rock.contains(&rock)) {
                 return None;
             }
             let (p, rel) = if b.shape.follows_surface() {
@@ -459,32 +483,36 @@ impl Geology {
     }
 
     /// Deposit type of the first body containing the block, mineralised or not (sections).
+    #[allow(clippy::too_many_arguments)]
     pub fn ore_kind(
         &self,
         bodies: &[Body],
         class: Class,
+        rock: BlockId,
         x: i32,
         y: i32,
         z: i32,
         top: i32,
     ) -> Option<u16> {
-        self.body_at(bodies, class, x, y, z, top)
+        self.body_at(bodies, class, rock, x, y, z, top)
             .next()
             .map(|(b, ..)| b.kind)
     }
 
-    /// Ore replacing a block of class `class` at block `(x, y, z)` (wrapped) of a column whose
-    /// top is `top`, if a body of `bodies` mineralises it.
+    /// Ore replacing `rock`, of class `class`, at block `(x, y, z)` (wrapped) of a column
+    /// whose top is `top`, if a body of `bodies` mineralises it.
+    #[allow(clippy::too_many_arguments)]
     pub fn ore(
         &self,
         bodies: &[Body],
         class: Class,
+        rock: BlockId,
         x: i32,
         y: i32,
         z: i32,
         top: i32,
     ) -> Option<BlockId> {
-        for (b, ore, p, rel) in self.body_at(bodies, class, x, y, z, top) {
+        for (b, ore, p, rel) in self.body_at(bodies, class, rock, x, y, z, top) {
             if block_hash(b.seed, x, y, z) >= p {
                 continue;
             }

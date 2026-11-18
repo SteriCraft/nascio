@@ -277,7 +277,9 @@ impl ColumnSet {
             rock.get_or_insert_with(|| terrain.rock_column(geo, wx, wz, top, self.slope(x, z)));
         let (b, class) = terrain.rock_at(rc, geo, top, moho, top - y);
         if !self.bodies.is_empty()
-            && let Some(ore) = terrain.geology().ore(&self.bodies, class, wx, y, wz, top)
+            && let Some(ore) = terrain
+                .geology()
+                .ore(&self.bodies, class, b, wx, y, wz, top)
         {
             return ore;
         }

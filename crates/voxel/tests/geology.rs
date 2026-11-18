@@ -29,7 +29,7 @@ fn rank(c: Class) -> u8 {
 }
 
 /// From the top down: soil, weathering, sediments, basement, then magma below the Moho; the
-/// column supplies limestone, clay and quartz sand somewhere.
+/// column supplies limestone, chalk, clay and quartz sand somewhere.
 #[test]
 fn column_layers_in_order() {
     let t = terrain();
@@ -65,6 +65,7 @@ fn column_layers_in_order() {
         ("basalt", ids.basalt),
         ("gabbro", ids.gabbro),
         ("granulite", ids.granulite),
+        ("chalk", ids.chalk.expect("generator 20 has chalk")),
     ] {
         assert!(seen[usize::from(id)] > 0, "no {name}");
     }

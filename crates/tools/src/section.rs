@@ -165,7 +165,7 @@ pub fn render(
                     terrain.rock_block(&geo, bx, bz, c.top, slope, c.moho, c.top - yi);
                 let ore = terrain
                     .geology()
-                    .ore_kind(&bodies, class, bx, yi, bz, c.top);
+                    .ore_kind(&bodies, class, b, bx, yi, bz, c.top);
                 match (ore, catalog) {
                     (Some(k), Some(cat)) if usize::from(k) < cat.deposits.len() => {
                         ores_used[usize::from(k)] = true;

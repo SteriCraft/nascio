@@ -34,6 +34,8 @@ pub struct ColumnIds {
     pub ice: Option<BlockId>,
     pub snow: Option<BlockId>,
     pub snow_layer: Option<BlockId>,
+    /// Chalk beds (generator 20), `None` in older registries: limestone instead.
+    pub chalk: Option<BlockId>,
     /// Vegetation blocks of M6, `None` in older registries.
     pub spruce_log: Option<BlockId>,
     pub spruce_leaves: Option<BlockId>,
@@ -88,6 +90,7 @@ impl Blocks {
             ice: table.id("ice"),
             snow: table.id("snow"),
             snow_layer: table.id("snow_layer"),
+            chalk: table.id("chalk"),
             spruce_log: table.id("spruce_log"),
             spruce_leaves: table.id("spruce_leaves"),
             cactus: table.id("cactus"),

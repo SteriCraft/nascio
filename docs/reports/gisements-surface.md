@@ -97,3 +97,8 @@ Je propose **19 → 20** : le catalogue par défaut, les blocs du registre et le
 2. Le silex : approximation dans tous les sédiments de plate-forme, ou petite étape `host_rock` (calcaire seulement) d'abord ? Faut-il un bloc `chalk` (craie) ?
 3. Le chapeau de cuivre : approximation par contexte (arcs), ou `above = "porphyry_copper"` ?
 4. Régénérer `out/m7/world-42` (le monde du serveur) en v20, ou garder un dossier séparé jusqu'à nouvel ordre ?
+
+## G1 — `host_rock` et la craie (fait)
+- Bloc `chalk` en fin de table des blocs ; bancs de craie dans les sédiments marins et de plate-forme humide (parts dans `decisions.md`).
+- Champ `host_rock` du catalogue : il restreint le remplacement à certaines roches, en plus du filtre de la forme ; `voxel::geology` passe la roche remplacée à `body_at`.
+- `generator_version` 20, valeurs dorées mises à jour ; test du catalogue `host_rock_is_optional_and_checked`, test de la colonne avec la craie.

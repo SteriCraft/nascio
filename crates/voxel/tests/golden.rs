@@ -62,7 +62,7 @@ fn chunk_hash(t: &Terrain, p: ChunkPos) -> String {
     blake3::hash(&bytes).to_hex()[..16].to_string()
 }
 
-const GOLDEN_WORLD: &str = "b2a8a0e0280459677f28c0aca9631efef84fc473f51cccf74b7a5d4de5fcf855";
+const GOLDEN_WORLD: &str = "e221acae668e0c2087f92b72299724089f6af737b2da5897aa301ecc15121554";
 const GOLDEN_CHUNKS: [&str; 24] = [
     "66e9640b07ad6da0",
     "832c5daebb8b7c8d",
@@ -79,7 +79,7 @@ const GOLDEN_CHUNKS: [&str; 24] = [
     "7b57ffe1d93b9b03",
     "0445a6ba4cd05489",
     "51f1d8ff142dbcb3",
-    "3026edee840c118f",
+    "f6c62369954e0e57",
     "f59aa78d0033124f",
     "d4f6a7abf60c28e4",
     "dd6d073c390489aa",
@@ -95,7 +95,7 @@ fn world_hash_is_the_reference() {
     let (w, _) = world();
     assert_eq!(
         (GENERATOR_VERSION, w.hash().as_str()),
-        (19, GOLDEN_WORLD),
+        (20, GOLDEN_WORLD),
         "world of seed 42 at 1/25 changed"
     );
 }
@@ -111,7 +111,7 @@ fn chunk_hashes_are_the_reference() {
         .collect();
     assert_eq!(
         (GENERATOR_VERSION, got.as_slice()),
-        (19, GOLDEN_CHUNKS.map(String::from).as_slice()),
+        (20, GOLDEN_CHUNKS.map(String::from).as_slice()),
         "chunks changed:\n{}",
         listing.join("\n")
     );
@@ -149,7 +149,7 @@ fn height_bits_are_the_reference() {
     let (_, t) = world();
     assert_eq!(
         (GENERATOR_VERSION, height_bits_hash(t).as_str()),
-        (19, "ccf275a1c32c972e"),
+        (20, "ccf275a1c32c972e"),
         "surface heights changed (bits)"
     );
 }

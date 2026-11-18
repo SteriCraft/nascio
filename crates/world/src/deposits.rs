@@ -131,6 +131,10 @@ pub struct DepositType {
     pub shape: Shape,
     #[serde(default)]
     pub host: Host,
+    /// Rocks (block names) the body may replace, e.g. flint in limestone and chalk; empty:
+    /// any rock its shape allows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_rock: Vec<String>,
     pub depth_m: [f64; 2],
     pub size_m: [f64; 2],
     pub thickness_m: [f64; 2],
@@ -202,6 +206,10 @@ impl DepositType {
                 "deposit {n}: block shares must be > 0"
             );
         }
+        anyhow::ensure!(
+            self.host_rock.iter().all(|r| !r.trim().is_empty()),
+            "deposit {n}: empty host_rock name"
+        );
         if let Some(c) = &self.cap {
             anyhow::ensure!(
                 self.shape == Shape::Layer && c.fraction > 0.0 && c.fraction < 1.0,
@@ -565,3 +573,37 @@ pub fn pick_block(d: &DepositType, rel: f64, h: f64) -> &str {
 
 /// Keeps the world size in scope for the tile size check.
 const _: () = assert!((WORLD_SIZE_F64 as usize).is_multiple_of(TILE_M as usize));
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flint(extra: &str) -> String {
+        format!(
+            r#"[[deposit]]
+name = "flint"
+label = "Flint"
+map_color = [1, 2, 3]
+blocks = [{{ block = "flint", color = [1, 2, 3] }}]
+contexts = {{ platform = 1.0 }}
+shape = "lens"
+depth_m = [0, 60]
+size_m = [8, 30]
+thickness_m = [1, 2]
+grade = 0.3
+abundance = 500
+{extra}"#
+        )
+    }
+
+    #[test]
+    fn host_rock_is_optional_and_checked() {
+        let c = Catalog::parse(&flint(r#"host_rock = ["limestone", "chalk"]"#)).unwrap();
+        assert_eq!(c.deposits[0].host_rock, ["limestone", "chalk"]);
+        let plain = Catalog::parse(&flint("")).unwrap();
+        assert!(plain.deposits[0].host_rock.is_empty());
+        // Absent from a written catalogue when empty.
+        assert!(!toml::to_string(&plain).unwrap().contains("host_rock"));
+        assert!(Catalog::parse(&flint(r#"host_rock = [" "]"#)).is_err());
+    }
+}

@@ -20,6 +20,8 @@
 #   shape       vein (filon), stock (amas porphyrique), lens (lentille), layer (couche),
 #               blanket (manteau d'altération), placer, trap (piège, carte seulement)
 #   host        pour une couche : "sediment" (défaut) ou "basement"
+#   host_rock   facultatif : roches (noms de blocs) que le corps peut remplacer, en plus de ce
+#               que permet sa forme ; par exemple le silex dans "limestone" et "chalk"
 #   depth_m     profondeur du centre sous la surface rocheuse [min, max]
 #               (couche en socle : sous la couverture sédimentaire)
 #   size_m      longueur ou diamètre [min, max]

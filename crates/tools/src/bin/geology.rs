@@ -173,7 +173,7 @@ fn stats(world: &World, columns: usize, depth: i32) -> anyhow::Result<()> {
                     Class::Basement => "basement",
                 })
                 .or_default() += 1;
-            let id = g.ore(&bodies, class, bx, y, bz, top).unwrap_or(b);
+            let id = g.ore(&bodies, class, b, bx, y, bz, top).unwrap_or(b);
             if id >= builtin {
                 ore += 1;
             }
