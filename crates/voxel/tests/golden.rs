@@ -62,7 +62,7 @@ fn chunk_hash(t: &Terrain, p: ChunkPos) -> String {
     blake3::hash(&bytes).to_hex()[..16].to_string()
 }
 
-const GOLDEN_WORLD: &str = "e221acae668e0c2087f92b72299724089f6af737b2da5897aa301ecc15121554";
+const GOLDEN_WORLD: &str = "df7468cfe5a111ab4f1fd653f8ce23fc32605821cb8e906aee99d6db63d7e29f";
 const GOLDEN_CHUNKS: [&str; 24] = [
     "66e9640b07ad6da0",
     "832c5daebb8b7c8d",

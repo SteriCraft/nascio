@@ -28,7 +28,13 @@
 #   thickness_m épaisseur [min, max] (filons, couches, manteaux, placers ; amas et lentilles :
 #               hauteur)
 #   grade       part des blocs minéralisés au cœur du corps (0..1)
-#   abundance   corps par 100 km² de contexte de poids 1 (rareté)
+#   abundance   corps par 100 km² de contexte de poids 1 (rareté) ; absent pour un type posé
+#               au-dessus d'un autre
+#   above       facultatif : type (plus haut dans ce fichier) sur les corps duquel ce type est
+#               posé, centré, au lieu d'être tiré par tuile ; par exemple le chapeau de cuivre
+#               oxydé au-dessus d'un porphyre
+#   probability avec above : chance qu'un corps du type parent en reçoive un (0..1), multipliée
+#               par le poids des contextes de ce type à sa position
 #   max_temperature_c  facultatif : roche la plus chaude où le corps peut commencer (°C) ; la
 #               plage de profondeur se resserre au-dessus de cet isotherme de la colonne
 #   elements    à titre indicatif : éléments obtenus après raffinage (sous-produits compris)
@@ -363,3 +369,136 @@ thickness_m = [5, 20]
 grade = 0.9
 abundance = 72
 elements = ["volcanic glass"]
+
+# --- Cuivre et fer de surface (premiers échelons, generator_version 20) ---
+# Les types suivants sont ajoutés en fin de catalogue : les indices des types plus haut ne
+# changent pas.
+
+[[deposit]]
+name = "copper_oxide"
+label = "Oxidised copper cap"
+map_color = [46, 178, 130]
+# Chapeau oxydé au-dessus des porphyres : malachite, azurite et cuivre natif près de la surface.
+# Une lentille plutôt qu'un manteau : les arcs, montagneux, ont rarement 2 m d'altérites.
+blocks = [
+  { block = "malachite", color = [38, 138, 92], share = 0.55, density = 3900 },
+  { block = "azurite", color = [40, 72, 160], share = 0.15, density = 3800 },
+  { block = "native_copper", color = [184, 112, 64], share = 0.3, density = 4000 },
+]
+contexts = { arc = 1.0, orogen = 1.0 }
+shape = "lens"
+above = "porphyry_copper"
+probability = 0.8
+depth_m = [0, 8]
+size_m = [80, 250]
+thickness_m = [6, 16]
+grade = 0.5
+elements = ["Cu"]
+
+[[deposit]]
+name = "native_copper"
+label = "Native copper (basalts)"
+map_color = [196, 110, 60]
+# Cuivre natif des basaltes de rift et de point chaud (type Keweenaw).
+blocks = [{ block = "native_copper", color = [184, 112, 64], density = 4000 }]
+contexts = { rift = 1.0, hotspot = 0.6 }
+shape = "vein"
+depth_m = [0, 120]
+size_m = [60, 250]
+thickness_m = [1, 3]
+grade = 0.4
+abundance = 60
+elements = ["Cu", "Ag"]
+
+[[deposit]]
+name = "bog_iron"
+label = "Bog iron (limonite)"
+map_color = [168, 104, 40]
+# Fer des marais : limonite sous le sol des bassins et des plates-formes humides. Le sol fait
+# jusqu'à 3 m : le centre du manteau est plus bas, pour qu'il ne tombe pas tout entier dedans.
+blocks = [{ block = "limonite", color = [150, 100, 42], density = 3600 }]
+contexts = { basin = 1.0, platform = 1.0, craton = 0.3 }
+requires = ["humid"]
+shape = "blanket"
+depth_m = [3.5, 5]
+size_m = [100, 500]
+thickness_m = [1, 3]
+grade = 0.6
+abundance = 150
+elements = ["Fe"]
+
+[[deposit]]
+name = "flint"
+label = "Flint and chert"
+map_color = [96, 96, 108]
+# Rognons de silex, seulement dans le calcaire et la craie.
+blocks = [{ block = "flint", color = [64, 64, 70], density = 2600 }]
+contexts = { platform = 1.0, basin = 0.5, marine_shelf = 0.5 }
+shape = "lens"
+host_rock = ["limestone", "chalk"]
+depth_m = [0, 60]
+size_m = [8, 30]
+thickness_m = [1, 2]
+grade = 0.3
+abundance = 500
+elements = ["flint (tools)"]
+
+# --- Uranium et thorium ---
+
+[[deposit]]
+name = "uranium_rollfront"
+label = "Roll-front uranium"
+map_color = [196, 222, 40]
+blocks = [{ block = "uraninite", color = [34, 34, 30], density = 7500 }]
+contexts = { basin = 1.0, platform = 0.2 }
+shape = "layer"
+depth_m = [30, 300]
+size_m = [200, 800]
+thickness_m = [1, 3]
+grade = 0.25
+abundance = 3
+elements = ["U", "V"]
+
+[[deposit]]
+name = "uranium_unconformity"
+label = "Unconformity uranium"
+map_color = [160, 200, 30]
+blocks = [{ block = "uraninite", color = [34, 34, 30], density = 7500 }]
+contexts = { craton = 1.0 }
+shape = "layer"
+host = "basement"
+depth_m = [0, 40]
+size_m = [100, 400]
+thickness_m = [3, 10]
+grade = 0.35
+abundance = 2
+elements = ["U"]
+
+[[deposit]]
+name = "uranium_vein"
+label = "Vein uranium (granites)"
+map_color = [228, 240, 90]
+# Approximation : dans tout l'orogène, pas seulement dans les granites (decisions.md).
+blocks = [{ block = "uraninite", color = [34, 34, 30], density = 7500 }]
+contexts = { orogen = 1.0 }
+shape = "vein"
+depth_m = [20, 400]
+size_m = [50, 200]
+thickness_m = [0.5, 2]
+grade = 0.3
+abundance = 4
+elements = ["U"]
+
+[[deposit]]
+name = "monazite"
+label = "Coastal monazite"
+map_color = [206, 156, 92]
+blocks = [{ block = "monazite_sand", color = [176, 140, 92], density = 3000 }]
+contexts = { coast = 1.0 }
+shape = "placer"
+depth_m = [0.5, 2]
+size_m = [150, 500]
+thickness_m = [0.5, 2]
+grade = 0.4
+abundance = 24
+elements = ["Th", "Ce", "La", "Nd"]

@@ -613,6 +613,42 @@ abundance = 1
     }
 
     #[test]
+    fn surface_bodies_cross_the_seam() {
+        // A blanket (depth below the ground) and a lens centred 10 m east of the seam: the
+        // same ore on both sides of x = 0, whatever the side the block is reached from.
+        let mut blanket = body(Shape::Blanket, 10.0);
+        blanket.y = 4.0;
+        blanket.c = 1.5;
+        let lens = body(Shape::Lens, 10.0);
+        for b in [blanket, lens] {
+            let idx = BodyIndex::new(vec![b]);
+            assert_eq!(idx.near(99_968.0, 480.0, 32.0).len(), 1, "{:?}", b.shape);
+            assert_eq!(idx.near(0.0, 480.0, 32.0).len(), 1, "{:?}", b.shape);
+            let (y, top) = if b.shape == Shape::Blanket {
+                (96.0, 100.0)
+            } else {
+                (-100.0, 0.0)
+            };
+            let mut inside = 0;
+            for dx in [-40.0, -20.0, -5.0, 5.0] {
+                let east = b.ore_at(dx, y, 500.0, top);
+                assert_eq!(
+                    east,
+                    b.ore_at(100_000.0 + dx, y, 500.0, top),
+                    "{:?}",
+                    b.shape
+                );
+                inside += usize::from(east.is_some());
+            }
+            assert!(
+                inside >= 3,
+                "{:?}: the body reaches across the seam",
+                b.shape
+            );
+        }
+    }
+
+    #[test]
     fn blocks_by_share_and_cap() {
         let c = Catalog::default_catalog();
         let pc = c

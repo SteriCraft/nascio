@@ -107,3 +107,41 @@ Je propose **19 → 20** : le catalogue par défaut, les blocs du registre et le
 - Champs `above` et `probability` du catalogue : un corps au plus par corps parent, avec la probabilité `probability` × le poids des contextes, centré sur le parent ; validations (parent antérieur, avec des blocs, sans `above` ; probabilité dans ]0, 1] ; pas d'abondance, ni placer ni carte seule).
 - `worldgen::deposits` : `shape_body` (mise en forme d'un corps, extraite sans changer l'ordre des tirages : valeurs dorées inchangées) et `above_bodies`.
 - Tests : `above_names_an_earlier_type_with_a_probability` (catalogue) ; `crates/worldgen/tests/deposits_above.rs` (monde au 1/25 : chaque chapeau est sur un porphyre, les autres types ne bougent pas, déterminisme).
+
+## G3 — les huit types, le monde d'essai et les vérifications (fait)
+Monde d'essai : `out/gisements/world-42` (graine 42, échelle 1, `generator_version` 20, hachage `b9eab955…`, retrouvé à l'identique par une seconde génération). Images de vérification dans `out/gisements/` : `new-types.png` (les huit types sur le relief), `section-copper-cap.png`, `section-bog-iron.png`, et `world-42/previews/deposits.png` (carte générale).
+
+### Mesures, avant (`out/m7/world-42`, v19) et après
+| Mesure | Avant | Après |
+|---|---|---|
+| Part du minerai, 500 premiers m sous les terres continentales (`stats`) | 0,1270 % | 0,1303 % |
+| Colonnes à moins de 2 km d'un affleurement de cuivre (`reach`) | 8,3 % | 15,4 % |
+| … d'un affleurement de fer | 0 % | 25,8 % |
+| … des deux | 0 % | 2,6 % |
+| Calcaire / craie (part des blocs) | 7,34 % / — | 6,70 % / 0,65 % |
+
+Le silex affleure dans les 20 premiers mètres à moins de 2 km de 42 % des colonnes. `depths` : tous les types commencent sous 60 °C ; les corps existants sont inchangés (mêmes nombres, mêmes profondeurs).
+
+| Type | Corps | Minerai (Mm³) | Profondeur moyenne |
+|---|---|---|---|
+| copper_oxide | 495 (112 à terre) | 30,9 | 4 m |
+| native_copper | 180 | 2,7 | 62 m |
+| bog_iron | 890 | 67,0 | 4 m |
+| flint | 15 871 | 1,1 (avant le filtre des roches hôtes) | 30 m |
+| uranium_rollfront | 82 | 7,0 | 144 m |
+| uranium_unconformity | 17 | 1,5 | 188 m |
+| uranium_vein | 35 | 0,1 | 216 m |
+| monazite | 23 | 0,2 | 1 m |
+
+### Écarts au plan
+- Chapeau de cuivre : lentille près de la surface au lieu d'un manteau (un manteau n'en donnait que 34 sur 635 porphyres, faute d'altérites dans les arcs), et les corps `above` minéralisent en premier là où ils chevauchent leur parent.
+- Fer des marais : centre à 3,5-5 m au lieu de 0,5-3 m, pour passer sous le sol (jusqu'à 3 m).
+- Outil `stats` : minerai reconnu par son nom (la craie décalait les indices des mondes v19).
+
+### Ce que montrent les images
+- `new-types.png` : les chapeaux de cuivre suivent les arcs insulaires de l'ouest, en mer pour les trois quarts ; à terre, sur la côte ouest du continent central, au pied de la chaîne, et sur la bande montagneuse du sud-ouest. Le fer des marais forme un grand champ dans les basses terres humides du sud-est du continent central et au sud du continent méridional ; il manque dans les régions sèches et en montagne. Le cuivre natif (rouge) est sur les îles de rift et de point chaud et sur la côte nord-est, en bonne partie en mer lui aussi ; l'uranium des filons suit la chaîne centrale ; une partie de l'uranium en front d'oxydation tombe sur les plateaux continentaux en mer ; la monazite est sur les côtes ; le silex fait un pointillé sur les plates-formes et les plateaux.
+- `section-copper-cap.png` : le porphyre affleure au fond d'une vallée ; le chapeau couvre son sommet sur 200 m, sous le sol, et se prolonge en lentille horizontale dans les grès et les calcaires des flancs.
+- `section-bog-iron.png` : une bande de limonite d'un à deux blocs, juste sous le sol rouge, dans la latérite, sur environ 450 m ; ni sous l'eau, ni coupée par une rivière.
+
+### Tests
+`surface_bodies_cross_the_seam` (manteau et lentille de part et d'autre de x = 0), `deposits_above.rs` (G2), test du catalogue par défaut ; valeurs dorées : hachage du monde au 1/25 `df7468cf…`, chunks témoins inchangés.

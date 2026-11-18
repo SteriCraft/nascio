@@ -8,7 +8,7 @@
 
 use anyhow::Context;
 use nascio_core::torus;
-use nascio_world::deposits::{Body, BodyIndex, Host, Shape, block_hash};
+use nascio_world::deposits::{Body, BodyIndex, Catalog, Host, Shape, block_hash};
 use nascio_world::geology::setting;
 use nascio_world::grid::PeriodicGrid;
 use nascio_world::noise::Fbm;
@@ -82,6 +82,20 @@ struct Ore {
     cap: Option<(BlockId, f64)>,
     /// Rocks the body may replace (`host_rock`); empty: any rock of its class.
     host_rock: Vec<BlockId>,
+}
+
+/// The bodies of the types placed `above` another first, the rest after, each in its order:
+/// where a body overlaps its parent (an oxidised cap on the top of its porphyry), the one on
+/// top mineralises the block first.
+fn on_top_first(bodies: Vec<Body>, cat: &Catalog) -> Vec<Body> {
+    let on_top = |b: &Body| {
+        cat.deposits
+            .get(usize::from(b.kind))
+            .is_some_and(|d| d.above.is_some())
+    };
+    let (mut first, rest): (Vec<Body>, Vec<Body>) = bodies.into_iter().partition(on_top);
+    first.extend(rest);
+    first
 }
 
 /// Geological data of a world for the chunks.
@@ -217,7 +231,7 @@ impl Geology {
             strata: Fbm::new(s("column-strata"), 2_000.0, 2, 0.5),
             facies: Fbm::new(s("column-facies"), 4_000.0, 2, 0.5),
             strata_seed: s("column-beds"),
-            bodies: BodyIndex::new(world.bodies()?),
+            bodies: BodyIndex::new(on_top_first(world.bodies()?, &cat)),
             ores,
         })
     }

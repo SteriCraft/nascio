@@ -5,6 +5,7 @@
 //! cargo run -p nascio-voxel --release --bin geology -- stats out/m5/world-42
 //! cargo run -p nascio-voxel --release --bin geology -- geotherm --out out/geotherm.png
 //! cargo run -p nascio-voxel --release --bin geology -- depths out/m5/world-42
+//! cargo run -p nascio-tools --release --bin geology -- reach out/gisements/world-42
 //! ```
 
 // Tool output (colours, statistics): platform maths is fine here.
@@ -71,6 +72,29 @@ enum Command {
         #[arg(long, default_value_t = 60.0)]
         limit: f64,
     },
+    /// Share of continental land columns within `radius` m of a copper outcrop, of an iron
+    /// outcrop, and of both: an ore block of the list in the first `depth` m under dry ground.
+    Reach {
+        world: PathBuf,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "malachite,azurite,native_copper,chalcopyrite"
+        )]
+        copper: Vec<String>,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "limonite,magnetite,hematite"
+        )]
+        iron: Vec<String>,
+        #[arg(long, default_value_t = 2_000.0)]
+        radius: f64,
+        #[arg(long, default_value_t = 6)]
+        depth: i32,
+        #[arg(long, default_value_t = 20_000)]
+        columns: usize,
+    },
     /// Underground temperature curves (ocean, continent, orogen), as PNG and a table.
     Geotherm {
         /// World whose `[geotherm]` is used (default parameters otherwise).
@@ -117,6 +141,20 @@ fn main() -> anyhow::Result<()> {
             depth,
         } => stats(&World::load(&world)?, columns, depth)?,
         Command::Depths { world, limit } => depths(&World::load(&world)?, limit)?,
+        Command::Reach {
+            world,
+            copper,
+            iron,
+            radius,
+            depth,
+            columns,
+        } => reach(
+            &World::load(&world)?,
+            &[("copper", &copper), ("iron", &iron)],
+            radius,
+            depth,
+            columns,
+        )?,
         Command::Geotherm { world, out } => {
             let g = match world {
                 Some(p) => World::load(&p)?.config.geotherm,
@@ -132,7 +170,11 @@ fn stats(world: &World, columns: usize, depth: i32) -> anyhow::Result<()> {
     let terrain = Terrain::from_world(world, VoxelConfig::default())?;
     let g = terrain.geology();
     let blocks = terrain.blocks();
-    let builtin = nascio_worldgen::blocks::BUILTIN.len() as u16;
+    // Ore: a block that is not a rock-column block (by name: older worlds have fewer of them).
+    let is_ore = |id: u16| {
+        let name = &blocks.def(id).name;
+        !nascio_worldgen::blocks::BUILTIN.iter().any(|b| b.0 == name)
+    };
     let mut per_block: BTreeMap<u16, u64> = BTreeMap::new();
     let mut per_class: BTreeMap<&str, u64> = BTreeMap::new();
     let (mut rock, mut ore, mut sampled, mut tries) = (0u64, 0u64, 0usize, 0u64);
@@ -174,7 +216,7 @@ fn stats(world: &World, columns: usize, depth: i32) -> anyhow::Result<()> {
                 })
                 .or_default() += 1;
             let id = g.ore(&bodies, class, b, bx, y, bz, top).unwrap_or(b);
-            if id >= builtin {
+            if is_ore(id) {
                 ore += 1;
             }
             *per_block.entry(id).or_default() += 1;
@@ -193,7 +235,7 @@ fn stats(world: &World, columns: usize, depth: i32) -> anyhow::Result<()> {
             "  {:<16} {:9.4} %{}",
             blocks.def(*id).name,
             *n as f64 / rock.max(1) as f64 * 100.0,
-            if *id >= builtin { "  (ore)" } else { "" }
+            if is_ore(*id) { "  (ore)" } else { "" }
         );
     }
     Ok(())
@@ -271,6 +313,163 @@ fn depths(world: &World, limit: f64) -> anyhow::Result<()> {
             failures.join(", ")
         );
     }
+    Ok(())
+}
+
+/// Continental land columns sampled like `stats`: `(x, z)` in metres.
+fn land_columns(terrain: &Terrain, columns: usize) -> Vec<(f64, f64)> {
+    let mut out = Vec::with_capacity(columns);
+    let mut tries = 0u64;
+    while out.len() < columns && tries < 50 * columns as u64 {
+        tries += 1;
+        let h = mix64(0xC0FF_EE00 ^ tries);
+        let x = (h & 0xFFFF_FFFF) as f64 / 4_294_967_296.0 * WORLD_SIZE_F64;
+        let z = (h >> 32) as f64 / 4_294_967_296.0 * WORLD_SIZE_F64;
+        let col = terrain.column_geo(x, z);
+        let top = terrain.height(x, z).floor() as i32;
+        if top <= 0 || setting::oceanic(col.setting) || col.oceanic {
+            continue;
+        }
+        out.push((x, z));
+    }
+    out
+}
+
+/// Outcrops of the ore blocks `names`: points (on a 16 m grid over the bodies that may hold
+/// them) where one of them lies in the first `depth` m under dry ground.
+fn outcrops(
+    terrain: &Terrain,
+    world: &World,
+    names: &[String],
+    depth: i32,
+) -> anyhow::Result<Vec<(f64, f64)>> {
+    use rayon::prelude::*;
+    let catalog = world
+        .catalog()?
+        .ok_or_else(|| anyhow::anyhow!("world without deposit catalogue"))?;
+    let blocks = terrain.blocks();
+    let g = terrain.geology();
+    let wanted: Vec<bool> = catalog
+        .deposits
+        .iter()
+        .map(|d| {
+            d.block_defs()
+                .iter()
+                .any(|(b, _, _)| names.iter().any(|n| n == b))
+        })
+        .collect();
+    let bodies: Vec<_> = world
+        .bodies()?
+        .into_iter()
+        .filter(|b| wanted[usize::from(b.kind)])
+        .collect();
+    let step = 16.0;
+    let found: Vec<Vec<(f64, f64)>> = bodies
+        .par_iter()
+        .map(|b| {
+            let top0 = terrain.height(b.x, b.z);
+            let r = b.radius();
+            if !b.shape.follows_surface() && top0 - b.y_range().1 > f64::from(depth) + r.min(300.0)
+            {
+                return Vec::new();
+            }
+            let n = (r / step).ceil() as i32;
+            let mut hits = Vec::new();
+            for j in -n..=n {
+                for i in -n..=n {
+                    if f64::from(i).hypot(f64::from(j)) * step > r {
+                        continue;
+                    }
+                    let (x, z) = (b.x + f64::from(i) * step, b.z + f64::from(j) * step);
+                    let top = terrain.height(x, z).floor() as i32;
+                    if top <= 0 || terrain.water_top(x, z) > top + 1 {
+                        continue;
+                    }
+                    let col = terrain.column_geo(x, z);
+                    let e = 2.0;
+                    let slope = (terrain.height(x + e, z) - terrain.height(x - e, z))
+                        .hypot(terrain.height(x, z + e) - terrain.height(x, z - e))
+                        / (2.0 * e);
+                    let moho = terrain.moho_y(x, z, top);
+                    let (bx, bz) = (x.floor() as i32, z.floor() as i32);
+                    let near = g.bodies_near(x - 1.0, z - 1.0, 2.0);
+                    let hit = (0..depth).any(|d| {
+                        let (rock, class) = terrain.rock_block(&col, bx, bz, top, slope, moho, d);
+                        g.ore(&near, class, rock, bx, top - d, bz, top)
+                            .is_some_and(|id| names.iter().any(|n| *n == blocks.def(id).name))
+                    });
+                    if hit {
+                        hits.push((
+                            nascio_core::torus::wrap_f64(x),
+                            nascio_core::torus::wrap_f64(z),
+                        ));
+                    }
+                }
+            }
+            hits
+        })
+        .collect();
+    Ok(found.into_iter().flatten().collect())
+}
+
+/// For each column of `cols`, whether one of `points` lies within `radius` m (on the torus).
+fn within(points: &[(f64, f64)], cols: &[(f64, f64)], radius: f64) -> Vec<bool> {
+    let cells = (WORLD_SIZE_F64 / radius).floor().max(1.0) as i64;
+    let size = WORLD_SIZE_F64 / cells as f64;
+    let cell = |x: f64, z: f64| ((x / size) as i64 % cells, (z / size) as i64 % cells);
+    let mut grid: BTreeMap<(i64, i64), Vec<(f64, f64)>> = BTreeMap::new();
+    for &p in points {
+        grid.entry(cell(p.0, p.1)).or_default().push(p);
+    }
+    cols.iter()
+        .map(|&(x, z)| {
+            let (ci, cj) = cell(x, z);
+            (-1..=1).any(|dj| {
+                (-1..=1).any(|di| {
+                    let k = ((ci + di).rem_euclid(cells), (cj + dj).rem_euclid(cells));
+                    grid.get(&k).is_some_and(|v| {
+                        v.iter()
+                            .any(|&p| nascio_core::torus::distance_f64(p, (x, z)) <= radius)
+                    })
+                })
+            })
+        })
+        .collect()
+}
+
+fn reach(
+    world: &World,
+    sets: &[(&str, &Vec<String>)],
+    radius: f64,
+    depth: i32,
+    columns: usize,
+) -> anyhow::Result<()> {
+    let terrain = Terrain::from_world(world, VoxelConfig::default())?;
+    let cols = land_columns(&terrain, columns);
+    println!(
+        "{} continental land columns; outcrop: ore in the first {depth} m under dry ground",
+        cols.len()
+    );
+    let mut all = vec![true; cols.len()];
+    for (label, names) in sets {
+        let pts = outcrops(&terrain, world, names, depth)?;
+        let near = within(&pts, &cols, radius);
+        let share = near.iter().filter(|&&b| b).count() as f64 / cols.len().max(1) as f64;
+        println!(
+            "  {label:<7} ({}): {} outcrop points (16 m grid), {:.1} % of the columns within {radius:.0} m",
+            names.join(", "),
+            pts.len(),
+            share * 100.0
+        );
+        for (a, b) in all.iter_mut().zip(near) {
+            *a &= b;
+        }
+    }
+    let both = all.iter().filter(|&&b| b).count() as f64 / cols.len().max(1) as f64;
+    println!(
+        "  all sets within {radius:.0} m: {:.1} % of the columns",
+        both * 100.0
+    );
     Ok(())
 }
 
