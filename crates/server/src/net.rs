@@ -45,6 +45,9 @@ pub struct Shared {
     /// Column bytes sent (statistics).
     pub sent_bytes: AtomicU64,
     pub sent_columns: AtomicU64,
+    /// `WorldSky` and horizon tiles sent (statistics; the client cache test reads them).
+    pub sent_skies: AtomicU64,
+    pub sent_tiles: AtomicU64,
     pub accounts: Accounts,
     /// Secret hashes computed at once (`account_hash_concurrency`).
     pub hashing: tokio::sync::Semaphore,
@@ -520,6 +523,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
                             shared
                                 .sent_bytes
                                 .fetch_add(shared.sky.len() as u64, Ordering::Relaxed);
+                            shared.sent_skies.fetch_add(1, Ordering::Relaxed);
                         }
                     });
                 }
@@ -722,6 +726,7 @@ async fn stream_columns(conn: quinn::Connection, link: Arc<PlayerLink>, shared: 
                     shared
                         .sent_bytes
                         .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    shared.sent_tiles.fetch_add(1, Ordering::Relaxed);
                     Ok((bytes.len() as f64 - TILE_RESERVE).max(0.0) as usize)
                 });
             }

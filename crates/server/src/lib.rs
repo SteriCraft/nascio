@@ -263,6 +263,8 @@ impl RunningServer {
             online: AtomicU32::new(0),
             sent_bytes: AtomicU64::new(0),
             sent_columns: AtomicU64::new(0),
+            sent_skies: AtomicU64::new(0),
+            sent_tiles: AtomicU64::new(0),
         });
         tokio::spawn(net::accept_loop(endpoint.clone(), shared.clone()));
         let discovery = match shared.cfg.discovery_port {

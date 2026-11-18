@@ -75,13 +75,17 @@ fn cache_root() -> std::path::PathBuf {
         .join("client-cache")
 }
 
-/// Cache folder of a world: `g<generator_version>-<fingerprint>`. `None` if the server's
-/// fingerprint is not plain hexadecimal (it becomes a path).
-fn cache_dir(generator_version: u32, fingerprint: &str) -> Option<std::path::PathBuf> {
+/// Cache folder of a world under `root`: `g<generator_version>-<fingerprint>`. `None` if the
+/// server's fingerprint is not plain hexadecimal (it becomes a path).
+fn cache_dir(
+    root: &std::path::Path,
+    generator_version: u32,
+    fingerprint: &str,
+) -> Option<std::path::PathBuf> {
     let ok = !fingerprint.is_empty()
         && fingerprint.len() <= 128
         && fingerprint.bytes().all(|b| b.is_ascii_hexdigit());
-    ok.then(|| cache_root().join(format!("g{generator_version}-{fingerprint}")))
+    ok.then(|| root.join(format!("g{generator_version}-{fingerprint}")))
 }
 
 /// The `WorldSky` file of a cache folder.
@@ -114,6 +118,17 @@ impl Remote {
     /// `cert`: the server's certificate (DER), pinned. The player starts at the spawn point of
     /// the server.
     pub fn start(addr: SocketAddr, cert: Vec<u8>, name: &str, auth: Auth) -> anyhow::Result<Self> {
+        Self::start_in(addr, cert, name, auth, cache_root())
+    }
+
+    /// [`Remote::start`] with the disk cache under `root` (tests).
+    pub(crate) fn start_in(
+        addr: SocketAddr,
+        cert: Vec<u8>,
+        name: &str,
+        auth: Auth,
+        root: std::path::PathBuf,
+    ) -> anyhow::Result<Self> {
         let mirror = Arc::new(Mutex::new(Mirror::default()));
         let dirty = Arc::new(Mutex::new(BTreeSet::new()));
         let status = Arc::new(Mutex::new(String::new()));
@@ -158,7 +173,7 @@ impl Remote {
                         Err(e) => return drop(ready_tx.send(Err(e))),
                     };
                     let spawn = c.hello.spawn;
-                    let cache = cache_dir(c.hello.generator_version, &c.hello.fingerprint);
+                    let cache = cache_dir(&root, c.hello.generator_version, &c.hello.fingerprint);
                     let (radius, blocks) = (c.hello.chunk_radius_m, c.blocks.clone());
                     let ready_with = |sky: WorldSky| -> anyhow::Result<Ready> {
                         Ok((radius, blocks.clone(), spawn, Arc::new(sky), cache.clone()))

@@ -4497,6 +4497,7 @@ dependencies = [
  "nascio-client",
  "nascio-core",
  "nascio-protocol",
+ "nascio-server",
  "nascio-voxel",
  "nascio-worldgen",
  "rayon",
