@@ -10,8 +10,8 @@
 // terminator, the seam twilight band and distant sunsets show on the horizon. Direct light
 // fades in from 0° to +10° of e_vis, sky light from −6° to +10° (§2.5). Shadows come from Bevy's cascades of the
 // camera's sun (the sun barely moves over the shadow range). Clouds (max of c_min(s) and the
-// weather) dim the direct light. Seasonal snow covers every face but the downward ones (the
-// sides of the voxel steps match their tops); the snow cover of the 160 m climate cell is
+// weather) dim the direct light. Seasonal snow is a thin layer on upward faces only (no sides,
+// no undersides: author's decision); the snow cover of the 160 m climate cell is
 // corrected by the lapse rate between the fragment's height and the cell's mean height, so
 // the snow line follows the fine relief. Haze and the far edge of the relief use the same air
 // as the sky dome (`atmosphere.wesl`), so they match it at every height (pre-M6).
@@ -124,7 +124,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 @if(VERTEX_UVS_A)
     material = in.uv;
     let is_water = abs(material.x - MATERIAL_WATER) < 0.5;
-    // Foliage: its sides keep their green under the snow.
+    // Foliage: a little less snow on its tops.
     let is_foliage = abs(material.x - MATERIAL_FOLIAGE) < 0.5;
     pbr_input.material.base_color = alpha_discard(
         pbr_input.material.flags,
@@ -156,15 +156,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let weather = select(climate.r, curved.haze.w, curved.haze.w >= 0.0);
     let cloud = max(c_min, weather);
 
-    // Seasonal snow on land faces (not on water), sides included, never on downward faces.
+    // Seasonal snow: a thin layer on the upward faces of land blocks (not on water), never on
+    // their sides or undersides (author's decision). Foliage keeps a hint of green on top.
     // World height of the fragment (the display drop undone), for the snow and the haze.
     let hf = in.world_position.y + curved.drop.x * dot(rel, rel) - curved.drop.z + curved.snow.x;
     if !is_water {
-        let facing = select(
-            smoothstep(-0.5, -0.2, n.y),
-            0.05 + 0.85 * smoothstep(0.5, 0.9, n.y),
-            is_foliage
-        );
+        let facing = smoothstep(0.5, 0.9, n.y) * select(1.0, 0.9, is_foliage);
         let snow = smoothstep(0.15, 0.6, snow_cover(climate, hf)) * facing;
         albedo = mix(albedo, vec3<f32>(0.86, 0.89, 0.93), snow);
     }
