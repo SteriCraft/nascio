@@ -179,87 +179,124 @@ fn tile_bodies(seed: u64, kind: usize, d: &DepositType, t: usize, inp: &Inputs) 
                 break;
             }
         }
-        let size = uniform(&mut rng, d.size_m);
-        let thick = uniform(&mut rng, d.thickness_m);
-        let mut depth = uniform(&mut rng, d.depth_m);
-        let aspect = 0.45 + 0.55 * rng.random::<f64>();
-        let mut yaw = rng.random::<f64>() * std::f64::consts::TAU;
-        let dip = (45.0 + 40.0 * rng.random::<f64>()).to_radians();
-        let grade = (d.grade * (0.75 + 0.5 * rng.random::<f64>())).min(1.0);
-        let body_seed = rng.random::<u32>();
-        let Some((mut x, mut z)) = pos else {
-            continue;
-        };
-        let k = inp.cell_index(x, z);
-        let sediment = f64::from(inp.geo.sediment.data()[k]);
-        let weathering = f64::from(inp.geo.weathering.data()[k]);
-        let (a, b, c) = match d.shape {
-            Shape::Vein => (size / 2.0, size * (0.2 + 0.25 * aspect), thick / 2.0),
-            Shape::Stock | Shape::Lens => (size / 2.0, size / 2.0 * aspect, thick / 2.0),
-            Shape::Layer | Shape::Blanket | Shape::Trap => {
-                (size / 2.0, size / 2.0 * aspect, thick / 2.0)
-            }
-            Shape::Placer => (size / 2.0, size / 2.0 * (0.12 + 0.1 * aspect), thick / 2.0),
-        };
-        let surface = inp.surface(x, z);
-        if let Some(t_max) = d.max_temperature_c
-            && !d.shape.follows_surface()
-        {
-            // Same draw, range shrunk to the rock cooler than `t_max` (top of the body).
-            let limit = inp.heat.depth_of(x, z, surface, t_max) + c;
-            if limit <= d.depth_m[0] {
-                continue;
-            }
-            let hi = d.depth_m[1].min(limit);
-            let span = (d.depth_m[1] - d.depth_m[0]).max(1e-9);
-            depth = d.depth_m[0] + (depth - d.depth_m[0]) / span * (hi - d.depth_m[0]);
+        if let Some(b) = shape_body(kind, d, &mut rng, pos, inp) {
+            out.push(b);
         }
-        let y = match d.shape {
-            Shape::Layer if d.host == Host::Sediment => {
-                // Inside the sedimentary cover.
-                let room = sediment - 2.0 * c;
-                if room <= d.depth_m[0] {
-                    continue;
-                }
-                surface
-                    - (c + d.depth_m[0]
-                        + rng.random::<f64>()
-                            * (room - d.depth_m[0]).min(d.depth_m[1] - d.depth_m[0]))
-            }
-            Shape::Layer => surface - sediment - depth - c,
-            Shape::Blanket => {
-                if weathering < 2.0 * c.min(1.0) {
-                    continue;
-                }
-                depth.min((weathering - c).max(c))
-            }
-            Shape::Placer => {
-                let river = d.contexts.contains_key("river_source")
-                    || d.requires.iter().any(|r| r == "river_source");
-                let Some((px, pz, py)) = snap_placer(inp, x, z, river) else {
-                    continue;
-                };
-                (x, z, yaw) = (px, pz, py);
-                depth.max(c)
-            }
-            _ => surface - depth,
-        };
-        out.push(Body {
-            kind: kind as u16,
-            shape: d.shape,
-            x: torus::wrap_f64(x),
-            z: torus::wrap_f64(z),
-            y,
-            a: a as f32,
-            b: b as f32,
-            c: c as f32,
-            yaw: yaw as f32,
-            dip: dip as f32,
-            grade: grade as f32,
-            seed: body_seed,
-        });
     }
     out
+}
+
+/// Draws the size, depth and orientation of a body of type `kind` at `pos` and places it in
+/// its column; `None` without a position or without room for it. The draws come first, in the
+/// same order whatever the outcome.
+fn shape_body(
+    kind: usize,
+    d: &DepositType,
+    rng: &mut ChaCha8Rng,
+    pos: Option<(f64, f64)>,
+    inp: &Inputs,
+) -> Option<Body> {
+    let size = uniform(rng, d.size_m);
+    let thick = uniform(rng, d.thickness_m);
+    let mut depth = uniform(rng, d.depth_m);
+    let aspect = 0.45 + 0.55 * rng.random::<f64>();
+    let mut yaw = rng.random::<f64>() * std::f64::consts::TAU;
+    let dip = (45.0 + 40.0 * rng.random::<f64>()).to_radians();
+    let grade = (d.grade * (0.75 + 0.5 * rng.random::<f64>())).min(1.0);
+    let body_seed = rng.random::<u32>();
+    let (mut x, mut z) = pos?;
+    let k = inp.cell_index(x, z);
+    let sediment = f64::from(inp.geo.sediment.data()[k]);
+    let weathering = f64::from(inp.geo.weathering.data()[k]);
+    let (a, b, c) = match d.shape {
+        Shape::Vein => (size / 2.0, size * (0.2 + 0.25 * aspect), thick / 2.0),
+        Shape::Stock | Shape::Lens => (size / 2.0, size / 2.0 * aspect, thick / 2.0),
+        Shape::Layer | Shape::Blanket | Shape::Trap => {
+            (size / 2.0, size / 2.0 * aspect, thick / 2.0)
+        }
+        Shape::Placer => (size / 2.0, size / 2.0 * (0.12 + 0.1 * aspect), thick / 2.0),
+    };
+    let surface = inp.surface(x, z);
+    if let Some(t_max) = d.max_temperature_c
+        && !d.shape.follows_surface()
+    {
+        // Same draw, range shrunk to the rock cooler than `t_max` (top of the body).
+        let limit = inp.heat.depth_of(x, z, surface, t_max) + c;
+        if limit <= d.depth_m[0] {
+            return None;
+        }
+        let hi = d.depth_m[1].min(limit);
+        let span = (d.depth_m[1] - d.depth_m[0]).max(1e-9);
+        depth = d.depth_m[0] + (depth - d.depth_m[0]) / span * (hi - d.depth_m[0]);
+    }
+    let y = match d.shape {
+        Shape::Layer if d.host == Host::Sediment => {
+            // Inside the sedimentary cover.
+            let room = sediment - 2.0 * c;
+            if room <= d.depth_m[0] {
+                return None;
+            }
+            surface
+                - (c + d.depth_m[0]
+                    + rng.random::<f64>() * (room - d.depth_m[0]).min(d.depth_m[1] - d.depth_m[0]))
+        }
+        Shape::Layer => surface - sediment - depth - c,
+        Shape::Blanket => {
+            if weathering < 2.0 * c.min(1.0) {
+                return None;
+            }
+            depth.min((weathering - c).max(c))
+        }
+        Shape::Placer => {
+            let river = d.contexts.contains_key("river_source")
+                || d.requires.iter().any(|r| r == "river_source");
+            let (px, pz, py) = snap_placer(inp, x, z, river)?;
+            (x, z, yaw) = (px, pz, py);
+            depth.max(c)
+        }
+        _ => surface - depth,
+    };
+    Some(Body {
+        kind: kind as u16,
+        shape: d.shape,
+        x: torus::wrap_f64(x),
+        z: torus::wrap_f64(z),
+        y,
+        a: a as f32,
+        b: b as f32,
+        c: c as f32,
+        yaw: yaw as f32,
+        dip: dip as f32,
+        grade: grade as f32,
+        seed: body_seed,
+    })
+}
+
+/// Draws the bodies of type `kind`, placed above the bodies `parents` of another type: one per
+/// parent with the probability `d.probability` × the weight of `d` at the parent, centred on
+/// it. Each parent has its own RNG (its rank among the parents).
+fn above_bodies(
+    seed: u64,
+    kind: usize,
+    d: &DepositType,
+    parents: &[Body],
+    inp: &Inputs,
+) -> Vec<Body> {
+    let p = d.probability.unwrap_or(0.0);
+    parents
+        .par_iter()
+        .enumerate()
+        .map(|(i, parent)| {
+            let mut rng = stage_rng(seed, &format!("deposits/{}/above/{i}", d.name));
+            let w = d.weight(inp.weights(parent.x, parent.z));
+            let draw = rng.random::<f64>();
+            let pos = (draw < (p * w).min(1.0)).then_some((parent.x, parent.z));
+            shape_body(kind, d, &mut rng, pos, inp)
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Summary of the placement.
@@ -329,9 +366,22 @@ pub fn run(
         res,
         cell,
     };
-    let mut bodies = Vec::new();
+    let mut bodies: Vec<Body> = Vec::new();
     let nt = catalog.deposits.len().max(1);
     for (kind, d) in catalog.deposits.iter().enumerate() {
+        if let Some(parent) = &d.above {
+            // Validated: an earlier type, already placed.
+            let pk = catalog
+                .deposits
+                .iter()
+                .position(|o| &o.name == parent)
+                .expect("validated parent") as u16;
+            let parents: Vec<Body> = bodies.iter().filter(|b| b.kind == pk).copied().collect();
+            let above = above_bodies(seed, kind, d, &parents, &inp);
+            bodies.extend(above);
+            progress.set_range(0.0, 0.8, kind, nt, 1.0);
+            continue;
+        }
         let per_tile: Vec<Vec<Body>> = (0..TILES * TILES)
             .into_par_iter()
             .map(|t| tile_bodies(seed, kind, d, t, &inp))

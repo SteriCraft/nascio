@@ -102,3 +102,8 @@ Je propose **19 → 20** : le catalogue par défaut, les blocs du registre et le
 - Bloc `chalk` en fin de table des blocs ; bancs de craie dans les sédiments marins et de plate-forme humide (parts dans `decisions.md`).
 - Champ `host_rock` du catalogue : il restreint le remplacement à certaines roches, en plus du filtre de la forme ; `voxel::geology` passe la roche remplacée à `body_at`.
 - `generator_version` 20, valeurs dorées mises à jour ; test du catalogue `host_rock_is_optional_and_checked`, test de la colonne avec la craie.
+
+## G2 — `above` (fait)
+- Champs `above` et `probability` du catalogue : un corps au plus par corps parent, avec la probabilité `probability` × le poids des contextes, centré sur le parent ; validations (parent antérieur, avec des blocs, sans `above` ; probabilité dans ]0, 1] ; pas d'abondance, ni placer ni carte seule).
+- `worldgen::deposits` : `shape_body` (mise en forme d'un corps, extraite sans changer l'ordre des tirages : valeurs dorées inchangées) et `above_bodies`.
+- Tests : `above_names_an_earlier_type_with_a_probability` (catalogue) ; `crates/worldgen/tests/deposits_above.rs` (monde au 1/25 : chaque chapeau est sur un porphyre, les autres types ne bougent pas, déterminisme).

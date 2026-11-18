@@ -139,7 +139,18 @@ pub struct DepositType {
     pub size_m: [f64; 2],
     pub thickness_m: [f64; 2],
     pub grade: f64,
+    /// Bodies per 100 km² of context of weight 1, drawn across the tiles. 0 (or absent) for a
+    /// type placed `above` another.
+    #[serde(default)]
     pub abundance: f64,
+    /// Placed above the bodies of this other type (earlier in the catalogue), centred on
+    /// them, instead of across the tiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub above: Option<String>,
+    /// With `above`: chance, in (0, 1], that a body of the other type gets one, times the
+    /// context weight of this type at its position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probability: Option<f64>,
     /// Hottest rock the body may start in, °C (e.g. the oil window): the depth range of a body
     /// shrinks above that isotherm of its column (`[geotherm]`). None: no limit.
     #[serde(default)]
@@ -256,6 +267,28 @@ impl Catalog {
                 "duplicate deposit {}",
                 d.name
             );
+            let n = &d.name;
+            match (&d.above, d.probability) {
+                (None, None) => {}
+                (Some(p), Some(prob)) => {
+                    let parent = c.deposits[..i].iter().find(|o| &o.name == p);
+                    anyhow::ensure!(
+                        parent.is_some_and(|o| o.shape != Shape::Trap && o.above.is_none()),
+                        "deposit {n}: above = {p} must name an earlier type with blocks, not \
+                         itself placed above another"
+                    );
+                    anyhow::ensure!(
+                        prob > 0.0 && prob <= 1.0,
+                        "deposit {n}: probability must lie in (0, 1]"
+                    );
+                    anyhow::ensure!(
+                        d.abundance == 0.0 && !matches!(d.shape, Shape::Placer | Shape::Trap),
+                        "deposit {n}: a type placed above another has no abundance and is \
+                         neither a placer nor a trap"
+                    );
+                }
+                _ => anyhow::bail!("deposit {n}: above and probability go together"),
+            }
         }
         anyhow::ensure!(c.deposits.len() < 127, "at most 126 deposit types");
         anyhow::ensure!(
@@ -605,5 +638,45 @@ abundance = 500
         // Absent from a written catalogue when empty.
         assert!(!toml::to_string(&plain).unwrap().contains("host_rock"));
         assert!(Catalog::parse(&flint(r#"host_rock = [" "]"#)).is_err());
+    }
+
+    /// A cap of type `cap` above `parent`, with `extra` lines.
+    fn cap(parent: &str, extra: &str) -> String {
+        flint("")
+            .replace("name = \"flint\"", "name = \"cap\"")
+            .replace(
+                "abundance = 500\n",
+                &format!("above = \"{parent}\"\n{extra}"),
+            )
+    }
+
+    #[test]
+    fn above_names_an_earlier_type_with_a_probability() {
+        let ok = format!("{}\n{}", flint(""), cap("flint", "probability = 0.6\n"));
+        let c = Catalog::parse(&ok).unwrap();
+        assert_eq!(c.deposits[1].above.as_deref(), Some("flint"));
+        assert_eq!(c.deposits[1].probability, Some(0.6));
+        assert_eq!(c.deposits[1].abundance, 0.0);
+        let plain = toml::to_string(&c.deposits[0]).unwrap();
+        assert!(!plain.contains("above") && !plain.contains("probability"));
+        let bad = [
+            // Unknown parent, later parent, itself.
+            format!("{}\n{}", flint(""), cap("nope", "probability = 0.6\n")),
+            format!("{}\n{}", cap("flint", "probability = 0.6\n"), flint("")),
+            cap("cap", "probability = 0.6\n"),
+            // Probability missing, out of range, or without above; an abundance as well.
+            format!("{}\n{}", flint(""), cap("flint", "")),
+            format!("{}\n{}", flint(""), cap("flint", "probability = 1.5\n")),
+            format!("{}\n{}", flint(""), cap("flint", "probability = 0\n")),
+            flint("probability = 0.5"),
+            format!(
+                "{}\n{}",
+                flint(""),
+                cap("flint", "probability = 0.6\nabundance = 3\n")
+            ),
+        ];
+        for text in bad {
+            assert!(Catalog::parse(&text).is_err(), "{text}");
+        }
     }
 }

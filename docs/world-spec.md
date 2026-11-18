@@ -242,6 +242,7 @@ Chaque type de gisement décrit :
 - le bloc et ses proportions (un mélange est possible, ainsi qu'un « toit » d'un autre bloc pour les couches) ;
 - les contextes et leurs poids, et les contextes requis (multiplicatifs ; `"a|b"` prend le plus grand des deux) ;
 - facultativement, les roches hôtes (`host_rock`, noms de blocs) : le corps ne remplace que ces roches, par exemple le silex dans le calcaire et la craie ;
+- facultativement, un type parent (`above`, un type placé plus haut dans le catalogue, avec des blocs) et une probabilité (`probability`, dans ]0, 1]) : au lieu d'être tirés par tuile (pas d'`abundance`), les corps sont posés sur ceux du parent, un au plus par corps parent, avec la probabilité `probability` × le poids des contextes du type à sa position, centrés sur lui (même `x`, `z`) ; chaque corps parent a son propre RNG (`deposits/<nom>/above/<rang>`). Exemple : le chapeau de cuivre oxydé au-dessus d'un porphyre. Un type placé au-dessus d'un autre n'est ni un placer ni une carte seule, et ne peut pas servir de parent ;
 - la forme, la plage de profondeur, la taille, la teneur et la rareté ;
 - une température maximale facultative (`max_temperature_c`) : la plage de profondeur d'un corps se resserre au-dessus de cet isotherme de sa colonne (même tirage aléatoire, sans effet sur le déterminisme). Elle sert de fenêtre à huile : 120 °C pour le pétrole, 200 °C pour le gaz ;
 - à titre indicatif, les éléments obtenus après raffinage.
