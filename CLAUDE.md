@@ -68,9 +68,10 @@ cargo test --workspace
 cargo run -p nascio-worldgen --release -- generate --seed 42 --out out/world-42
 cargo run -p nascio-server --release            # boîte de démarrage : monde existant ou nouveau, options
 cargo run -p nascio-server --release -- out/server/world-42 --data out/server/data --open-registration --nogui
-cargo run -p nascio-viewer --release -- out/server/world-42
+cargo run -p nascio-viewer --release
+cargo run -p nascio-viewer --release -- out/server/world-42 --fly
 ```
-Le serveur ouvre sa fenêtre sur la boîte de démarrage (`--nogui` pour s'en passer, avec le dossier du monde) ; le client ouvre son menu (`--fly` : vol libre local sans serveur).
+Le serveur ouvre sa fenêtre sur la boîte de démarrage (`--nogui` pour s'en passer, avec le dossier du monde) ; le client ouvre son menu et ne lit aucun monde : ciel, climat réduit et horizon viennent du serveur, gardés dans `client-cache/` (`--fly` : vol libre sur un monde local, sans serveur).
 
 ## Profils de compilation (Bevy)
 - `[profile.dev] opt-level = 1` et `[profile.dev.package."*"] opt-level = 3`.

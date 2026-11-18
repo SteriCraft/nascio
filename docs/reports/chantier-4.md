@@ -80,3 +80,13 @@ Les étapes 2 (protocole) et 3 (serveur) du plan sont regroupées : les volumes 
 - Le contrôle « table des blocs du serveur = table du monde local » disparaît, puisqu'il n'y a plus de monde local.
 - En vol libre, rien ne change : terrain, deltas, climat en 625², tuiles calculées sur place.
 - fmt et clippy verts (`--workspace --all-targets`). **Rien n'a été lancé.**
+
+## Étape 5 — Documentation
+
+- Spec : §7, l'horizon en tuiles (dont la limite des éditions) et ce que le client réseau reçoit ; §8.1, la v8 et l'octet de type des flux ; §8.3, les tuiles, `WorldSky`, les volumes mesurés et le cache disque du client.
+- `CLAUDE.md` : commandes du client (menu sans monde, `--fly` avec monde) ; `serveur-etat.md` à jour.
+
+## À vérifier par l'auteur (après le chantier 5)
+- Rien n'a été lancé à part la mesure `netbench horizon`. Tests écrits mais pas lancés : `crates/voxel/tests/horizon.rs`, `crates/protocol/tests/no_geology.rs`, ainsi que les tests unitaires des codecs. Les tests du serveur (`edit`, `mesh`, `entities`…) passent par `nascio-client`, qui lit maintenant l'octet de type : à relancer.
+- À l'écran, en `--fly` puis en réseau : l'horizon est-il identique à l'ancien ? Attendus : couleurs en sRGB 8 bits, centre non replié. Vérifier aussi la couture, le ciel en 125² (neige saisonnière, nuages un peu plus flous), le sol lointain, et une seconde connexion qui doit lire le cache sans rien télécharger.
+- Un client lancé hors du dépôt (`.exe` copié ailleurs) doit se connecter sans dossier de monde.
