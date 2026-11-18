@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
                 match c.next(Duration::from_millis(500)).await {
                     Some(Event::Column(col)) => {
                         bytes += col.chunks.len();
-                        m.column(col);
+                        m.column(*col);
                         if half.is_none() && m.len() * 2 >= want {
                             half = Some(start.elapsed());
                         }

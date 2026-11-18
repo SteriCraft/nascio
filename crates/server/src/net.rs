@@ -74,7 +74,10 @@ async fn read_frame(
             Ok(Some(n)) => de.push(&buf[..n]),
             Ok(None) => return Ok(None),
             // The client closed the connection: a normal end.
-            Err(quinn::ReadError::ConnectionLost(quinn::ConnectionError::ApplicationClosed(_))) => {
+            Err(quinn::ReadError::ConnectionLost(
+                quinn::ConnectionError::ApplicationClosed(_)
+                | quinn::ConnectionError::LocallyClosed,
+            )) => {
                 return Ok(None);
             }
             Err(e) => return Err(e.into()),

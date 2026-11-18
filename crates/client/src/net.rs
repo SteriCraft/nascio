@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 #[derive(Debug)]
 pub enum Event {
     Msg(ServerMsg),
-    Column(Column),
+    Column(Box<Column>),
     /// The connection ended (reason).
     Closed(String),
 }
@@ -152,7 +152,7 @@ pub async fn connect(addr: SocketAddr, cert_der: &[u8], name: &str) -> anyhow::R
                 };
                 match Column::decompress(&bytes, max_id) {
                     Ok(c) => {
-                        let _ = ev.send(Event::Column(c));
+                        let _ = ev.send(Event::Column(Box::new(c)));
                     }
                     Err(e) => {
                         let _ = ev.send(Event::Closed(format!("bad column: {e:#}")));

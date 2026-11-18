@@ -26,7 +26,7 @@ async fn pump(c: &mut Connection, m: &mut Mirror, mut done: impl FnMut(&Mirror) 
     while !done(m) {
         assert!(start.elapsed() < Duration::from_secs(60), "timed out");
         match c.next(Duration::from_millis(200)).await {
-            Some(Event::Column(col)) => m.column(col),
+            Some(Event::Column(col)) => m.column(*col),
             Some(Event::Msg(ServerMsg::Blocks {
                 chunk,
                 lsn,

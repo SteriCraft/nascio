@@ -120,6 +120,11 @@ impl ColumnCache {
             cy_min: lo,
             version,
             chunks,
+            tint: {
+                let mut t = self.terrain.chunk_tint(cx, cz);
+                t.water_depth = col.water_depths();
+                t
+            },
         }
         .compress()?;
         self.built.fetch_add(1, Ordering::Relaxed);

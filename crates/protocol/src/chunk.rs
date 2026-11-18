@@ -9,9 +9,9 @@
 //! every client.
 
 use anyhow::{Context, bail, ensure};
-use nascio_voxel::Chunk;
 use nascio_voxel::block::BlockId;
 use nascio_voxel::chunk::VOLUME;
+use nascio_voxel::{Chunk, ChunkTint};
 
 use crate::varint::{Reader, put, put_i};
 
@@ -104,6 +104,9 @@ pub struct Column {
     /// the position.
     pub version: u64,
     pub chunks: Vec<Chunk>,
+    /// Render data of the column (grass tint of its corners, water depth of each local
+    /// column), computed by the server from the world's climate: the client has no world.
+    pub tint: ChunkTint,
 }
 
 impl std::fmt::Debug for Column {
@@ -128,6 +131,11 @@ impl Column {
         put(&mut raw, u64::from(self.cz as u32));
         put_i(&mut raw, i64::from(self.cy_min));
         put(&mut raw, self.version);
+        put(&mut raw, self.tint.grass.map_or(0, |g| u64::from(g) + 1));
+        for c in self.tint.corners.iter().flatten() {
+            raw.extend_from_slice(&c.to_le_bytes());
+        }
+        raw.extend_from_slice(&self.tint.water_depth);
         put(&mut raw, self.chunks.len() as u64);
         let mut one = Vec::with_capacity(256);
         for c in &self.chunks {
@@ -159,6 +167,20 @@ impl Column {
         let cz = r.var_max(u64::from(u32::MAX))? as u32 as i32;
         let cy_min = i32::try_from(r.var_i()?)?;
         let version = r.var()?;
+        let grass = match r.var_max(u64::from(max_id) + 1)? {
+            0 => None,
+            g => Some((g - 1) as BlockId),
+        };
+        let mut corners = [[0f32; 3]; 4];
+        for c in corners.iter_mut().flatten() {
+            *c = f32::from_le_bytes(r.take(4)?.try_into()?);
+        }
+        let water_depth: [u8; 1024] = r.take(1024)?.try_into()?;
+        let tint = ChunkTint {
+            grass,
+            corners,
+            water_depth,
+        };
         let n = r.var_max(MAX_COLUMN_CHUNKS as u64)? as usize;
         let mut chunks = Vec::with_capacity(n);
         for _ in 0..n {
@@ -176,6 +198,7 @@ impl Column {
             cy_min,
             version,
             chunks,
+            tint,
         })
     }
 }
@@ -266,7 +289,11 @@ mod tests {
             cy_min in -200i32..200,
             version in any::<u64>(),
         ) {
-            let col = Column { cx, cz, cy_min, version, chunks };
+            let mut tint = ChunkTint::NONE;
+            tint.grass = Some(3);
+            tint.corners[2] = [0.25, 0.5, 0.125];
+            tint.water_depth[5] = 7;
+            let col = Column { cx, cz, cy_min, version, chunks, tint };
             let bytes = col.compress().unwrap();
             prop_assert_eq!(Column::decompress(&bytes, 400).unwrap(), col);
         }

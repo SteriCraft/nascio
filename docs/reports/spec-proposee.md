@@ -21,6 +21,7 @@ Le client envoie la version du protocole ; le serveur répond avec `generator_ve
 
 ### 7.3 Chunks
 - Codec v2 : un octet de version, la palette (nombre puis identifiants, varints), puis des plages (indice de palette, longueur − 1), varints, dans l'ordre des indices des blocs (`x`, puis `z`, puis `y`) ; pas de plages quand la palette n'a qu'une entrée : un chunk uniforme tient en 3 à 5 octets.
+- Une colonne transporte aussi ses données de rendu, calculées par le serveur à partir du climat : bloc teinté, couleurs des quatre coins (`f32`), profondeur de l'eau de chaque colonne locale.
 - Les chunks voyagent par lots compressés en zstd (niveau 3) ; l'unité de cache du serveur est la colonne de chunks encodée et compressée, faite une fois et partagée entre les clients, invalidée par une édition.
 - Le serveur choisit les colonnes envoyées (rayon `chunk_radius_m`, 512 m par défaut ; colonnes les plus proches d'abord). Au-delà, l'horizon est servi en tuiles de hauteurs précalculées. Le client ne génère jamais de terrain.
 - Les éditions sont diffusées par chunk à la fin de chaque tick (indice local, bloc) ; au-delà de `resend_after` éditions dans un chunk pendant un tick, le chunk entier est renvoyé.

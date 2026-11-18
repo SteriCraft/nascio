@@ -348,6 +348,11 @@ fn codecs(world: PathBuf, sites: u64, side: i32, seed: u64) -> anyhow::Result<()
             cy_min: *range.start(),
             version: 0,
             chunks: samples[k..k + n].iter().map(|s| s.chunk.clone()).collect(),
+            tint: {
+                let mut t = terrain.chunk_tint(cx, cz);
+                t.water_depth = col.water_depths();
+                t
+            },
         };
         let bytes = c.compress()?;
         if samples[k].land {
