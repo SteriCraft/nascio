@@ -5,7 +5,7 @@
 **Consignes de la nuit (2026-11-18)** : étapes dans l'ordre (C0, S0, S1, S2…) ; décisions dans `decisions.md` (raison + alternative écartée) ; rapport court `docs/reports/serveur-<étape>.md` par étape ; un commit par étape, **pas de push** ; spec inchangée (texte proposé dans `docs/reports/spec-proposee.md`) ; ne pas décider ce qui touche au gameplay, aux invariants de `CLAUDE.md` ou à `generator_version` (le noter, continuer) ; tests verts avant l'étape suivante ; ce fichier à jour à chaque commit. Le matin : synthèse de tous les rapports. Reprise automatique prévue à 2 h 15 (tâche de session).
 
 ## Étape en cours
-Phase Serveur et réseau validée par l'auteur, S6 compris : mesure sur deux machines, en Wi-Fi, à 250 et 500 bots. Le changement de régime a disparu. Corrections de la mesure faites : tampons UDP, hachages limités, rafales après coupure, `swarm` sans téléportation. Le tout est poussé. Chantiers de l'auteur : **chantier 1 fait** (crate `nascio-chunk`, protocole v5, rapport `chantier-1.md`), non poussé ; en attente de la revue de l'auteur.
+Phase Serveur et réseau validée par l'auteur, S6 compris : mesure sur deux machines, en Wi-Fi, à 250 et 500 bots. Le changement de régime a disparu. Corrections de la mesure faites : tampons UDP, hachages limités, rafales après coupure, `swarm` sans téléportation. Le tout est poussé. Chantiers de l'auteur : **chantier 1 validé et poussé** (crate `nascio-chunk`, protocole v5, rapport `chantier-1.md`, `CLAUDE.md` mis à jour). Chantier 2 (comptes) : plan présenté, en attente de l'accord de l'auteur.
 
 ## Fait
 - Roadmap serveur écrite (`docs/roadmap-serveur.md`).
@@ -27,6 +27,8 @@ Chantiers décidés par l'auteur (`decisions.md`, décisions du 2026-11-18), dan
 3. sites d'apparition et point par compte (calculés au démarrage du serveur, sans toucher `generator_version`) ;
 4. horizon en tuiles et climat réduit envoyés par le serveur ;
 5. mouvement autoritaire, avec prédiction et réconciliation.
+
+À faire au prochain changement de format du monde (décision de l'auteur, 2026-11-18) : le feuillage devient une propriété de `blocks.toml` (aujourd'hui déduit du nom, `nascio_chunk::block::FOLIAGE`).
 
 Questions encore ouvertes pour l'auteur : la définition exacte des classes de terrain des sites ; la physique du joueur, et si le vol libre reste un droit d'administrateur ; la durée de validité et l'usage unique des jetons.
 
