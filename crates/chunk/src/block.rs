@@ -158,9 +158,10 @@ impl BlockRegistry {
 pub enum FaceTint {
     /// White: the texture as is.
     None,
-    /// The chunk's climate grass tint (`ChunkTint::at`) when the block is the chunk's tinted
-    /// block (`tint.grass`), white otherwise.
-    Climate,
+    /// The chunk's climate grass tint (`ChunkTint::at`) times the factor when the block is the
+    /// chunk's tinted block (`tint.grass`), white otherwise. The factor brings a grey texture's
+    /// mean back to the tint (1 / its mean linear luminance).
+    Climate(f32),
     /// A fixed linear RGB colour.
     Fixed([f32; 3]),
 }

@@ -20,7 +20,7 @@ pub const MIP_LEVELS: u32 = 6;
 /// Default folder of the block textures (local test images, never committed).
 pub const DEFAULT_DIR: &str = "textures_temp/blocks";
 /// Colour of the spruce leaves (sRGB), applied as a fixed tint.
-pub const SPRUCE_GREEN: [u8; 3] = [56, 92, 50];
+pub const SPRUCE_GREEN: [u8; 3] = [40, 70, 42];
 
 /// Block name -> file stem, when they differ.
 const ALIASES: [(&str, &str); 1] = [("snow_layer", "snow")];
@@ -84,6 +84,12 @@ fn read_image(path: &Path) -> Option<image::RgbaImage> {
 }
 
 /// Opaque RGBA8 level 0 (transparent pixels filled with the mean colour), then all mips.
+/// Mean linear luminance of a layer: its 1×1 mip (a linear-light average).
+fn mean_luminance(layer: &[u8]) -> f32 {
+    let p = &layer[layer.len() - 4..];
+    0.2126 * to_linear_u8(p[0]) + 0.7152 * to_linear_u8(p[1]) + 0.0722 * to_linear_u8(p[2])
+}
+
 fn build_layer(img: &image::RgbaImage) -> Vec<u8> {
     let mut sum = [0.0f64; 3];
     let mut weight = 0.0f64;
@@ -169,10 +175,16 @@ pub fn load(dir: &Path, blocks: &Blocks) -> Option<BlockTextureSet> {
                 layer
             }
         }?;
+        // Grey textures made to be tinted: their mean is brought back to the tint (the block's
+        // average colour stays the untextured one).
+        let k = 1.0 / mean_luminance(&layers[usize::from(layer)]).max(0.05);
         let tint = match stem {
-            "grass_top" => FaceTint::Climate,
-            "spruce_leaves" => FaceTint::Fixed(srgb_triplet_to_linear(SPRUCE_GREEN)),
-            "water" => water_tint?,
+            "grass_top" => FaceTint::Climate(k),
+            "spruce_leaves" => FaceTint::Fixed(srgb_triplet_to_linear(SPRUCE_GREEN).map(|c| c * k)),
+            "water" => match water_tint? {
+                FaceTint::Fixed(c) => FaceTint::Fixed(c.map(|c| c * k)),
+                t => t,
+            },
             _ => FaceTint::None,
         };
         Some(FaceTexture { layer, tint })
@@ -391,7 +403,7 @@ mod tests {
 
         let g = t("grass");
         assert_eq!(layer_of(&set, g.top), "grass_top");
-        assert_eq!(g.top.unwrap().tint, FaceTint::Climate);
+        assert!(matches!(g.top.unwrap().tint, FaceTint::Climate(_)));
         assert_eq!(layer_of(&set, g.side), "grass");
         assert_eq!(g.side.unwrap().tint, FaceTint::None);
         assert_eq!(layer_of(&set, g.bottom), "dirt");
@@ -440,19 +452,38 @@ mod tests {
     fn tints() {
         let blocks = Blocks::builtin();
         let d = Dir::new("tints");
-        d.solid("spruce_leaves", [40, 80, 40, 255]);
-        d.solid("water", [30, 60, 120, 255]);
+        // Grey textures: each tint is divided by the texture's mean linear luminance, so the
+        // face's mean colour is the tint.
+        d.solid("spruce_leaves", [128, 128, 128, 255]);
+        d.solid("water", [200, 200, 200, 255]);
+        d.solid("grass_top", [100, 100, 100, 255]);
+        d.solid("grass", [90, 120, 60, 255]);
         let set = load(&d.0, &blocks).unwrap();
-        let leaves = set.table[usize::from(blocks.id("spruce_leaves").unwrap())];
-        assert_eq!(
-            leaves.top.unwrap().tint,
-            FaceTint::Fixed(srgb_triplet_to_linear(SPRUCE_GREEN))
-        );
+        let lum = |v: u8| srgb_to_linear(f32::from(v) / 255.0);
+        let close = |a: [f32; 3], b: [f32; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-3);
+        let tint = |name: &str, face: fn(&BlockTextures) -> Option<FaceTexture>| {
+            face(&set.table[usize::from(blocks.id(name).unwrap())])
+                .unwrap()
+                .tint
+        };
+        let FaceTint::Fixed(c) = tint("spruce_leaves", |t| t.top) else {
+            panic!("leaves: fixed tint");
+        };
+        assert!(close(
+            c.map(|c| c * lum(128)),
+            srgb_triplet_to_linear(SPRUCE_GREEN)
+        ));
         let wid = blocks.id("water").unwrap();
-        assert_eq!(
-            set.table[usize::from(wid)].side.unwrap().tint,
-            FaceTint::Fixed(blocks.linear(wid))
-        );
+        let FaceTint::Fixed(c) = tint("water", |t| t.side) else {
+            panic!("water: fixed tint");
+        };
+        assert!(close(c.map(|c| c * lum(200)), blocks.linear(wid)));
+        let FaceTint::Climate(k) = tint("grass", |t| t.top) else {
+            panic!("grass top: climate tint");
+        };
+        assert!((k * lum(100) - 1.0).abs() < 1e-3);
+        // Untinted textures stay as they are.
+        assert_eq!(tint("grass", |t| t.side), FaceTint::None);
     }
 
     #[test]

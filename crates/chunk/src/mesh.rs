@@ -420,8 +420,8 @@ fn emit(
         let (x, z) = (corners[k][0], corners[k][2]);
         let rgb = match texture.map(|t| t.tint) {
             Some(FaceTint::None) => [1.0; 3],
-            Some(FaceTint::Climate) if tinted => tint.at(x, z),
-            Some(FaceTint::Climate) => [1.0; 3],
+            Some(FaceTint::Climate(k)) if tinted => tint.at(x, z).map(|c| c * k),
+            Some(FaceTint::Climate(_)) => [1.0; 3],
             Some(FaceTint::Fixed(c)) => c,
             None if tinted => tint.at(x, z),
             None => block_rgb,
@@ -651,7 +651,7 @@ mod tests {
             );
             let mut t = vec![BlockTextures::default(); b.len()];
             t[usize::from(grass)] = BlockTextures {
-                top: tex(1, FaceTint::Climate),
+                top: tex(1, FaceTint::Climate(1.0)),
                 side: None,
                 bottom: tex(2, FaceTint::None),
             };
@@ -819,7 +819,7 @@ mod tests {
         // Climate on the tinted block.
         let mut b = b0.clone();
         let bt = BlockTextures {
-            top: tex(1, FaceTint::Climate),
+            top: tex(1, FaceTint::Climate(1.0)),
             ..Default::default()
         };
         with_textures(&mut b, &[(grass, bt), (stone, bt)]);
