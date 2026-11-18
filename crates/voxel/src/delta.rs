@@ -797,6 +797,14 @@ impl DeltaStore {
         self.checkpoint()
     }
 
+    /// Number of the last journal record applied to the region of column `(cx, cz)` (0 if
+    /// none): it only grows, across restarts too. Read it **before** the chunks of a column,
+    /// and every edit missing from them has a higher number.
+    pub fn region_lsn(&self, cx: i32, cz: i32) -> u64 {
+        let r = self.region(region_of(cx, cz));
+        read(&r).lsn
+    }
+
     /// Whether column `(cx, cz)` holds a modified block.
     pub fn column_modified(&self, cx: i32, cz: i32) -> bool {
         let n = ChunkPos::new(cx, 0, cz);
@@ -1525,7 +1533,10 @@ mod tests {
         }
         let (s, _) = DeltaStore::open(&d, 1, "h", &b, c).unwrap();
         assert_eq!(s.get(BlockPos::new(0, 0, 0)), Some(AIR));
+        assert_eq!(s.region_lsn(0, 0), 2);
         assert_eq!(s.set(BlockPos::new(1, 0, 0), stone).unwrap(), 3);
+        assert_eq!(s.region_lsn(0, 0), 3);
+        assert_eq!(s.region_lsn(100, 0), 0);
         let _ = std::fs::remove_dir_all(&d);
     }
 

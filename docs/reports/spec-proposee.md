@@ -24,7 +24,8 @@ Le client envoie la version du protocole ; le serveur répond avec `generator_ve
 - Les chunks voyagent par lots compressés en zstd (niveau 3) ; l'unité de cache du serveur est la colonne de chunks encodée et compressée, faite une fois et partagée entre les clients, invalidée par une édition.
 - Le serveur choisit les colonnes envoyées (rayon `chunk_radius_m`, 512 m par défaut ; colonnes les plus proches d'abord). Au-delà, l'horizon est servi en tuiles de hauteurs précalculées. Le client ne génère jamais de terrain.
 - Les éditions sont diffusées par chunk à la fin de chaque tick (indice local, bloc) ; au-delà de `resend_after` éditions dans un chunk pendant un tick, le chunk entier est renvoyé.
-- Le client peut garder les chunks reçus dans un cache disque, indexé par l'empreinte de génération, la position et la version du chunk (compteur d'éditions).
+- Une colonne porte une version : le LSN de sa région (§5) lu avant ses chunks. Un lot d'éditions porte le LSN de sa dernière édition ; le client l'applique à une colonne de version inférieure et le garde tant que la colonne n'est pas arrivée (colonnes et contrôle voyagent sur des flux différents). Au-dessus des chunks d'une colonne, il n'y a que de l'air.
+- Le client peut garder les colonnes reçues dans un cache disque, indexé par l'empreinte de génération, la position et la version.
 
 ### 7.4 Entités et débit
 - Grille spatiale de 32 m ; pour chaque client, un accumulateur de priorité (distance, ancienneté du dernier envoi) ; les 64 entités les plus prioritaires à 20 Hz, les autres à 5 Hz au moins.

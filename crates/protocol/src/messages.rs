@@ -54,7 +54,7 @@ pub enum ClientMsg {
     },
     /// The client already holds these columns at these versions (from its disk cache).
     Have {
-        columns: Vec<([i32; 2], u32)>,
+        columns: Vec<([i32; 2], u64)>,
     },
     Bye,
 }
@@ -73,9 +73,13 @@ pub enum ServerMsg {
         server_unix_ms: i64,
     },
     /// Blocks changed in one chunk during a tick: `(index in the chunk, block)`.
+    ///
+    /// `lsn` is the number of the last of them. A client applies them all to a column of
+    /// lower version (values are absolute: replaying older ones of the batch is harmless),
+    /// keeps them for a column still on its way, and then sets the column's version to `lsn`.
     Blocks {
         chunk: [i32; 3],
-        version: u32,
+        lsn: u64,
         changes: Vec<(u16, u16)>,
     },
     /// A `SetBlock` that was not applied, and why (the client restores the block).
@@ -124,7 +128,7 @@ mod tests {
             hello,
             ServerMsg::Blocks {
                 chunk: [3_124, -2, 0],
-                version: 9,
+                lsn: 9,
                 changes: vec![(0, 1), (32_767, 0)],
             },
             ServerMsg::Pong {

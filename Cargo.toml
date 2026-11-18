@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/world", "crates/worldgen", "crates/voxel", "crates/protocol", "crates/tools", "crates/viewer"]
+members = ["crates/core", "crates/world", "crates/worldgen", "crates/voxel", "crates/protocol", "crates/client", "crates/server", "crates/tools", "crates/viewer"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,8 @@ nascio-worldgen = { path = "crates/worldgen" }
 nascio-voxel = { path = "crates/voxel" }
 nascio-tools = { path = "crates/tools" }
 nascio-protocol = { path = "crates/protocol" }
+nascio-client = { path = "crates/client" }
+nascio-server = { path = "crates/server" }
 
 # All versions are pinned. Upgrading one is an explicit decision (docs/decisions.md).
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -36,6 +38,9 @@ bevy_egui = "=0.43.1"
 zstd = "=0.14.4"
 lz4_flex = "=0.14.2"
 postcard = { version = "=1.1.3", default-features = false, features = ["use-std"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+quinn = "=0.11.12"
+rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "ring", "pem"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

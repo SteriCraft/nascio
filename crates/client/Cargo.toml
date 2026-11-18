@@ -1,0 +1,19 @@
+[package]
+name = "nascio-client"
+description = "Nascio client: connection to the server (headless for now), mirror of the received world"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+nascio-core.workspace = true
+nascio-voxel.workspace = true
+nascio-protocol.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+quinn.workspace = true
+
+[lints]
+workspace = true

@@ -92,14 +92,17 @@ pub fn decode(r: &mut Reader, max_id: BlockId) -> anyhow::Result<Chunk> {
     Ok(Chunk::from_blocks(blocks))
 }
 
-/// The chunks of one column, from `cy_min` up, as sent to the clients.
+/// The chunks of one column, from `cy_min` up, as sent to the clients. Above them there is
+/// only air (block 0).
 #[derive(Clone, PartialEq)]
 pub struct Column {
     pub cx: i32,
     pub cz: i32,
     pub cy_min: i32,
-    /// Edit counter of the column on the server (client cache key with the position).
-    pub version: u32,
+    /// Number of the last journal record of the column's region when the column was read
+    /// (0: never edited). Edits numbered above it are not in the chunks. Client cache key with
+    /// the position.
+    pub version: u64,
     pub chunks: Vec<Chunk>,
 }
 
@@ -124,7 +127,7 @@ impl Column {
         put(&mut raw, u64::from(self.cx as u32));
         put(&mut raw, u64::from(self.cz as u32));
         put_i(&mut raw, i64::from(self.cy_min));
-        put(&mut raw, u64::from(self.version));
+        put(&mut raw, self.version);
         put(&mut raw, self.chunks.len() as u64);
         let mut one = Vec::with_capacity(256);
         for c in &self.chunks {
@@ -133,7 +136,18 @@ impl Column {
             put(&mut raw, one.len() as u64);
             raw.extend_from_slice(&one);
         }
-        Ok(zstd::bulk::compress(&raw, ZSTD_LEVEL)?)
+        // One compressor per thread: creating a zstd context costs more than a small column.
+        thread_local! {
+            static Z: std::cell::RefCell<Option<zstd::bulk::Compressor<'static>>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        Z.with(|z| {
+            let mut z = z.borrow_mut();
+            if z.is_none() {
+                *z = Some(zstd::bulk::Compressor::new(ZSTD_LEVEL)?);
+            }
+            Ok(z.as_mut().expect("compressor").compress(&raw)?)
+        })
     }
 
     /// Inverse of [`compress`](Self::compress); refuses malformed input, ids above `max_id`
@@ -144,7 +158,7 @@ impl Column {
         let cx = r.var_max(u64::from(u32::MAX))? as u32 as i32;
         let cz = r.var_max(u64::from(u32::MAX))? as u32 as i32;
         let cy_min = i32::try_from(r.var_i()?)?;
-        let version = r.var_max(u64::from(u32::MAX))? as u32;
+        let version = r.var()?;
         let n = r.var_max(MAX_COLUMN_CHUNKS as u64)? as usize;
         let mut chunks = Vec::with_capacity(n);
         for _ in 0..n {
@@ -250,7 +264,7 @@ mod tests {
             cx in prop::sample::select(vec![0, 1, 3_124]),
             cz in prop::sample::select(vec![0, 3_124]),
             cy_min in -200i32..200,
-            version in any::<u32>(),
+            version in any::<u64>(),
         ) {
             let col = Column { cx, cz, cy_min, version, chunks };
             let bytes = col.compress().unwrap();
