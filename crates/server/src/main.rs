@@ -1,22 +1,41 @@
-//! `nascio-server <world dir>`: serves a generated world. Deltas live in
-//! `<data>/deltas/`, the certificate in `<data>/server/` (clients pin `cert.der`); `<data>`
-//! is the world folder unless `--data` says otherwise.
+//! `nascio-server [world dir]`: serves a generated world. Deltas live in
+//! `<data>/deltas/`, the certificate in `<data>/server/` (clients pin it); `<data>` is the
+//! world folder unless `--data` says otherwise.
+//!
+//! With its window (feature `gui`, on by default), the server opens on a start dialog: an
+//! existing world or a new one (seed, folder next to the executable), and the options of the
+//! command line, filled from it and from the last start (`server-launch.toml` next to the
+//! executable). Then the window shows the map with the players, the console, the
+//! measurements and the players online; the terminal's console works too. `--nogui` runs
+//! without a window and needs the world folder.
 //!
 //! ```text
-//! cargo run -p nascio-server --release -- out/m7/world-42 --bind 127.0.0.1:7777
+//! cargo run -p nascio-server --release
+//! cargo run -p nascio-server --release -- out/server/world-42 --data out/server/data --nogui
 //! ```
 
-use std::path::PathBuf;
+#[cfg(feature = "gui")]
+mod gui;
+
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use anyhow::Context;
 use clap::Parser;
-use nascio_server::{RunningServer, ServerConfig, accounts};
+use nascio_server::net::Shared;
+use nascio_server::sim::SimStats;
+use nascio_server::{RunningServer, ServerConfig, accounts, say};
 use nascio_world::world_io::World;
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Parser)]
 #[command(name = "nascio-server", about = "Nascio authoritative server")]
 struct Cli {
-    world: PathBuf,
+    /// World folder (with the window: proposed in the start dialog).
+    world: Option<PathBuf>,
     /// TOML settings (`ServerConfig`).
     #[arg(long)]
     config: Option<PathBuf>,
@@ -26,7 +45,7 @@ struct Cli {
     /// Overrides `bind` (default 127.0.0.1:7777; 0.0.0.0:7777 to accept other machines,
     /// which needs a `server_id` of its own).
     #[arg(long)]
-    bind: Option<std::net::SocketAddr>,
+    bind: Option<SocketAddr>,
     /// Overrides `server_id` (the audience of the site's tokens).
     #[arg(long)]
     server_id: Option<String>,
@@ -38,43 +57,86 @@ struct Cli {
     /// account near the world's spawn sites.
     #[arg(long, value_delimiter = ',')]
     spawn_xz: Option<Vec<f64>>,
+    /// No window: the console on the terminal only (a server without a display). Without
+    /// the `gui` feature, there is never a window.
+    #[arg(long)]
+    nogui: bool,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let mut cfg = match &cli.config {
-        Some(p) => ServerConfig::load(p)?,
-        None => ServerConfig::default(),
-    };
-    if let Some(b) = cli.bind {
-        cfg.bind = b;
+/// How to start the server: the command line's options, or the start dialog's.
+#[derive(Clone, Debug, Default)]
+pub struct Options {
+    pub config: Option<PathBuf>,
+    pub data: Option<PathBuf>,
+    pub bind: Option<SocketAddr>,
+    pub server_id: Option<String>,
+    pub open_registration: bool,
+    pub spawn_xz: Option<[f64; 2]>,
+}
+
+impl Options {
+    /// The server's settings: the TOML file, then the overrides.
+    fn config(&self) -> anyhow::Result<ServerConfig> {
+        let mut cfg = match &self.config {
+            Some(p) => ServerConfig::load(p).with_context(|| format!("reading {}", p.display()))?,
+            None => ServerConfig::default(),
+        };
+        if let Some(b) = self.bind {
+            cfg.bind = b;
+        }
+        if let Some(id) = &self.server_id {
+            cfg.server_id = id.clone();
+        }
+        if self.open_registration {
+            cfg.open_registration = true;
+            cfg.secret_login = nascio_server::config::SecretLogin::All;
+        }
+        if let Some(p) = self.spawn_xz {
+            cfg.spawn_xz = Some(p);
+        }
+        Ok(cfg)
     }
-    if let Some(id) = cli.server_id.clone() {
-        cfg.server_id = id;
-    }
-    if cli.open_registration {
-        cfg.open_registration = true;
-        cfg.secret_login = nascio_server::config::SecretLogin::All;
-    }
-    if let Some(v) = &cli.spawn_xz {
-        anyhow::ensure!(v.len() == 2, "--spawn-xz takes x,z");
-        cfg.spawn_xz = Some([v[0], v[1]]);
-    }
-    let world = World::load(&cli.world)?;
-    let data = cli.data.clone().unwrap_or_else(|| cli.world.clone());
-    let server = RunningServer::start(&world, cfg, &data)?;
-    println!(
-        "listening on {} — certificate {}",
+}
+
+/// A started server, seen from outside its console task.
+pub struct Running {
+    /// Console commands (the window's, `stop`).
+    pub commands: UnboundedSender<String>,
+    /// The console task; it ends once the server stopped.
+    pub console: tokio::task::JoinHandle<anyhow::Result<()>>,
+    pub shared: Arc<Shared>,
+    pub stats: Arc<std::sync::Mutex<SimStats>>,
+    pub addr: SocketAddr,
+    /// Set once the server stopped (`stop`, Ctrl+C).
+    pub done: Arc<AtomicBool>,
+}
+
+/// Starts the server on `world` (folder `world_dir`) and its console task, which reads the
+/// standard input too. `periodic`: print the measurements every 10 s (no window). Call from
+/// outside the runtime.
+pub fn launch(
+    opts: &Options,
+    world: &World,
+    world_dir: &Path,
+    rt: &tokio::runtime::Handle,
+    periodic: bool,
+) -> anyhow::Result<Running> {
+    let cfg = opts.config()?;
+    let data = opts.data.clone().unwrap_or_else(|| world_dir.to_owned());
+    let server = rt.block_on(async { RunningServer::start(world, cfg, &data) })?;
+    say!(
+        "world {} (seed {}) — listening on {} — certificate {}",
+        world_dir.display(),
+        world.config.seed,
         server.addr,
         data.join("server").join("cert.der").display()
     );
     let c = &server.shared.cfg;
     match &server.shared.tokens {
-        Some(_) => println!("site tokens accepted for server_id \"{}\"", c.server_id),
-        None => println!("no site_public_key: site tokens refused"),
+        Some(_) => say!("site tokens accepted for server_id \"{}\"", c.server_id),
+        None => say!("no site_public_key: site tokens refused"),
     }
-    println!(
+    say!(
         "secret logins: {:?}{}",
         c.secret_login,
         if c.open_registration {
@@ -85,39 +147,113 @@ async fn main() -> anyhow::Result<()> {
     );
     let sp = &server.shared.spawns;
     match sp.fixed {
-        Some(p) => println!("every player spawns at {}, {}", p.x, p.z),
-        None => println!(
+        Some(p) => say!("every player spawns at {}, {}", p.x, p.z),
+        None => say!(
             "{} spawn sites (console: spawns), points within {} m",
             sp.sites.len(),
             c.spawn_radius_m
         ),
     }
-    // Administration console: one command per line on the standard input.
-    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // Administration console: one command per line on the standard input, or from the
+    // window's console.
+    let (commands, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let stdin_tx = commands.clone();
     std::thread::Builder::new()
         .name("console".into())
         .spawn(move || {
             for line in std::io::stdin().lines() {
                 let Ok(line) = line else { break };
-                if cmd_tx.send(line).is_err() {
+                if stdin_tx.send(line).is_err() {
                     break;
                 }
             }
         })?;
+    let done = Arc::new(AtomicBool::new(false));
+    let (shared, stats, addr) = (server.shared.clone(), server.stats.clone(), server.addr);
+    let console = rt.spawn(console(server, cmd_rx, periodic, done.clone()));
+    Ok(Running {
+        commands,
+        console,
+        shared,
+        stats,
+        addr,
+        done,
+    })
+}
+
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    let spawn_xz = match cli.spawn_xz.as_deref() {
+        None => None,
+        Some([x, z]) => Some([*x, *z]),
+        Some(_) => anyhow::bail!("--spawn-xz takes x,z"),
+    };
+    let opts = Options {
+        config: cli.config.clone(),
+        data: cli.data.clone(),
+        bind: cli.bind,
+        server_id: cli.server_id.clone(),
+        open_registration: cli.open_registration,
+        spawn_xz,
+    };
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    #[cfg(feature = "gui")]
+    if !cli.nogui {
+        // The window starts the server (start dialog) and hands it back here once closed.
+        let started = Arc::new(std::sync::Mutex::new(None::<Running>));
+        gui::run(gui::Launch {
+            world: cli.world.clone(),
+            opts,
+            rt: rt.handle().clone(),
+            started: started.clone(),
+        });
+        let running = started.lock().unwrap_or_else(|e| e.into_inner()).take();
+        return match running {
+            Some(r) => {
+                // The window was closed: stop the server (a no-op if `stop` closed it).
+                let _ = r.commands.send("stop".into());
+                rt.block_on(r.console)?
+            }
+            None => Ok(()),
+        };
+    }
+    let dir = cli
+        .world
+        .context("the world folder is needed without the window (--nogui)")?;
+    let world = World::load(&dir)?;
+    let r = launch(&opts, &world, &dir, rt.handle(), true)?;
+    rt.block_on(r.console)?
+}
+
+/// Runs the console's commands until `stop` or Ctrl+C, then stops the server. `periodic`:
+/// print the measurements every 10 s (the window draws them instead).
+async fn console(
+    server: RunningServer,
+    mut commands: tokio::sync::mpsc::UnboundedReceiver<String>,
+    periodic: bool,
+    done: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
     let term = Term::detect();
-    println!("console: type a command, or help (help <command> for its details)");
+    say!("console: type a command, or help (help <command> for its details)");
     term.start();
     let mut every = tokio::time::interval(Duration::from_secs(10));
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
-            Some(line) = cmd_rx.recv() => {
-                if !command(&server, line.trim()) {
+            Some(line) = commands.recv() => {
+                let line = line.trim();
+                if !line.is_empty() && !periodic {
+                    // The window's console shows what was typed.
+                    nascio_server::console::out(format!("> {line}"));
+                }
+                if !command(&server, line) {
                     break;
                 }
                 term.prompt();
             }
-            _ = every.tick() => {
+            _ = every.tick(), if periodic => {
                 term.interrupt();
                 print_stats(&server);
                 term.prompt();
@@ -125,8 +261,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     term.end();
-    println!("stopping");
-    server.shutdown()
+    say!("stopping");
+    let r = server.shutdown();
+    done.store(true, Ordering::Relaxed);
+    r
 }
 
 /// The console's look on a terminal: a `>` prompt and a blinking underline cursor, which
@@ -199,7 +337,7 @@ fn print_stats(server: &RunningServer) {
         .clone();
     let sh = &server.shared;
     let load = |a: &std::sync::atomic::AtomicU64| a.load(std::sync::atomic::Ordering::Relaxed);
-    println!(
+    say!(
         "players {} · tick p50 {:.2} ms p99 {:.2} ms (replication p99 {:.2} ms) · edits {} (refused {}) · columns built {} sent {} ({:.1} MB) · entities {} datagrams ({:.1} MB, {} skipped) · abuse events {}",
         s.players,
         s.tick_ms(0.5),
@@ -274,10 +412,28 @@ const COMMANDS: &[(&str, &str, &str, &str)] = &[
         "Administrators may log in with their secret when secret_login = \"admin\" (the default), for instance while the site is down.",
     ),
     (
+        "seed",
+        "",
+        "the world's seed",
+        "Prints the seed of the world served (the same seed and generator version make the same world).",
+    ),
+    (
         "spawns",
         "",
         "spawn sites",
         "Lists the world's spawn sites (x, z; drawn from the seed at the first start, kept in server/spawn_sites.toml) and the accounts whose point lies near each. A new account gets a point drawn at random within spawn_radius_m of a site drawn at random, kept for good.",
+    ),
+    (
+        "message",
+        "<text>",
+        "writes to every player",
+        "Every player online reads [Admin]: <text> in their chat.",
+    ),
+    (
+        "tell",
+        "<name> <text>",
+        "writes to one player",
+        "Only that player reads [Admin]: <text> in their chat.",
     ),
     (
         "stop",
@@ -292,16 +448,16 @@ fn help(topic: Option<&str>) {
         None => {
             for (name, args, summary, _) in COMMANDS {
                 let call = format!("{name} {args}");
-                println!("  {call:<34} {summary}");
+                say!("  {call:<34} {summary}");
             }
         }
         Some(t) => match COMMANDS.iter().find(|c| c.0 == t) {
             Some((name, args, summary, details)) => {
-                println!("{name} {args}");
-                println!("  {summary}.");
-                println!("  {details}");
+                say!("{name} {args}");
+                say!("  {summary}.");
+                say!("  {details}");
             }
-            None => println!("no command {t} (help lists them)"),
+            None => say!("no command {t} (help lists them)"),
         },
     }
 }
@@ -315,9 +471,9 @@ fn command(server: &RunningServer, line: &str) -> bool {
         Some("help") => help(words.next()),
         Some("list") => {
             let players = sh.list();
-            println!("{} players online", players.len());
+            say!("{} players online", players.len());
             for (name, id, p) in players {
-                println!("  {name} (#{id}) at {:.0}, {:.0}, {:.0}", p[0], p[1], p[2]);
+                say!("  {name} (#{id}) at {:.0}, {:.0}, {:.0}", p[0], p[1], p[2]);
             }
         }
         Some("kick") => match words.next() {
@@ -329,12 +485,12 @@ fn command(server: &RunningServer, line: &str) -> bool {
                     reason.join(" ")
                 };
                 if sh.kick(name, &reason) {
-                    println!("{name} kicked");
+                    say!("{name} kicked");
                 } else {
-                    println!("{name} is not online");
+                    say!("{name} is not online");
                 }
             }
-            None => println!("kick <name> [reason]"),
+            None => say!("kick <name> [reason]"),
         },
         Some("ban") => match words.next() {
             Some(name) => {
@@ -350,50 +506,51 @@ fn command(server: &RunningServer, line: &str) -> bool {
                 };
                 match sh.ban(name, until, &rest.join(" ")) {
                     Ok((ban, kicked)) => {
-                        println!("{name} {}", ban.message(now));
+                        say!("{name} {}", ban.message(now));
                         if kicked {
-                            println!("{name} kicked");
+                            say!("{name} kicked");
                         }
                     }
-                    Err(e) => println!("refused: {e:#}"),
+                    Err(e) => say!("refused: {e:#}"),
                 }
             }
-            None => println!("ban <name> [30m|12h|7d|2w] [reason]"),
+            None => say!("ban <name> [30m|12h|7d|2w] [reason]"),
         },
         Some("unban") => match words.next() {
             Some(name) => match sh.accounts.unban(name, nascio_server::net::unix_ms()) {
-                Ok(true) => println!("{name} unbanned"),
-                Ok(false) => println!("{name} was not banned"),
-                Err(e) => println!("refused: {e:#}"),
+                Ok(true) => say!("{name} unbanned"),
+                Ok(false) => say!("{name} was not banned"),
+                Err(e) => say!("refused: {e:#}"),
             },
-            None => println!("unban <name>"),
+            None => say!("unban <name>"),
         },
         Some("bans") => {
             let now = nascio_server::net::unix_ms();
             let bans = sh.accounts.bans(now);
-            println!("{} accounts banned", bans.len());
+            say!("{} accounts banned", bans.len());
             for (name, ban) in bans {
-                println!("  {name}: {}", ban.message(now));
+                say!("  {name}: {}", ban.message(now));
             }
         }
         Some("admin") => match (words.next(), words.next()) {
             (Some(name), Some(flag @ ("on" | "off"))) => {
                 match sh.accounts.set_admin(name, flag == "on") {
-                    Ok(()) => println!("{name}: admin {flag}"),
-                    Err(e) => println!("refused: {e:#}"),
+                    Ok(()) => say!("{name}: admin {flag}"),
+                    Err(e) => say!("refused: {e:#}"),
                 }
             }
-            _ => println!("admin <name> on|off"),
+            _ => say!("admin <name> on|off"),
         },
         Some("stats") => print_stats(server),
+        Some("seed") => say!("seed {}", sh.seed),
         Some("spawns") => {
             let sp = &sh.spawns;
             if let Some(p) = sp.fixed {
-                println!("every player spawns at {}, {} (spawn_xz)", p.x, p.z);
+                say!("every player spawns at {}, {} (spawn_xz)", p.x, p.z);
             } else {
                 let count = sh.accounts.per_site(sp.sites.len());
                 for (i, (p, n)) in sp.sites.iter().zip(count).enumerate() {
-                    println!("  site {i}: {}, {} ({n} accounts)", p.x, p.z);
+                    say!("  site {i}: {}, {} ({n} accounts)", p.x, p.z);
                 }
             }
         }
@@ -405,15 +562,37 @@ fn command(server: &RunningServer, line: &str) -> bool {
                     .create(name, secret, nascio_server::net::unix_ms())
                     .and_then(|()| sh.accounts.set_admin(name, admin))
                 {
-                    Ok(()) if admin => println!("administrator {name} created"),
-                    Ok(()) => println!("account {name} created"),
-                    Err(e) => println!("refused: {e:#}"),
+                    Ok(()) if admin => say!("administrator {name} created"),
+                    Ok(()) => say!("account {name} created"),
+                    Err(e) => say!("refused: {e:#}"),
                 }
             }
-            _ => println!("adduser <name> <secret> [admin]"),
+            _ => say!("adduser <name> <secret> [admin]"),
+        },
+        Some("message") => {
+            let text: Vec<&str> = words.collect();
+            if text.is_empty() {
+                say!("message <text>");
+            } else {
+                sh.announce(&text.join(" "));
+                say!("[Admin]: {}", text.join(" "));
+            }
+        }
+        Some("tell") => match words.next() {
+            Some(name) => {
+                let text: Vec<&str> = words.collect();
+                if text.is_empty() {
+                    say!("tell <name> <text>");
+                } else if sh.tell(name, &text.join(" ")) {
+                    say!("[Admin → {name}]: {}", text.join(" "));
+                } else {
+                    say!("{name} is not online");
+                }
+            }
+            None => say!("tell <name> <text>"),
         },
         Some("stop") => return false,
-        Some(c) => println!("unknown command {c} (help)"),
+        Some(c) => say!("unknown command {c} (help)"),
     }
     true
 }

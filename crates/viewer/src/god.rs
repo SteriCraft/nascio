@@ -152,8 +152,10 @@ pub fn god_input(
     mut streamer: ResMut<Streamer>,
     mut gizmos: Gizmos,
     remote: Option<Res<crate::remote::Remote>>,
+    chat: Res<crate::chat::ChatBox>,
+    pause: Res<crate::pause::Pause>,
 ) {
-    if cam.scripted {
+    if cam.scripted || chat.open || pause.open {
         return;
     }
     let escape = god.on && keys.just_pressed(KeyCode::Escape);

@@ -7,6 +7,12 @@ rust-version.workspace = true
 license-file.workspace = true
 repository.workspace = true
 
+[features]
+# The window: map, console, measurements and players (`--nogui` runs without it). A server
+# without a display can be built with `--no-default-features`.
+default = ["gui"]
+gui = ["dep:bevy", "dep:bevy_egui", "dep:nascio-worldgen"]
+
 [dependencies]
 nascio-core.workspace = true
 nascio-world.workspace = true
@@ -26,6 +32,9 @@ postcard.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 socket2.workspace = true
+bevy = { workspace = true, optional = true }
+bevy_egui = { workspace = true, optional = true }
+nascio-worldgen = { workspace = true, optional = true }
 
 [dev-dependencies]
 nascio-worldgen.workspace = true

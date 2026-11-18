@@ -1,6 +1,6 @@
 [package]
 name = "nascio-viewer"
-description = "Development viewer for Nascio worlds (2D maps and free-flight 3D)"
+description = "Nascio client: menu, connection, 3D view and chat; local free flight for development"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +16,6 @@ nascio-core.workspace = true
 nascio-chunk.workspace = true
 nascio-worldgen.workspace = true
 nascio-voxel.workspace = true
-nascio-tools.workspace = true
 nascio-client.workspace = true
 nascio-protocol.workspace = true
 tokio.workspace = true

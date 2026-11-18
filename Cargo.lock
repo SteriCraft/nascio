@@ -4440,6 +4440,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argon2",
+ "bevy",
+ "bevy_egui",
  "clap",
  "nascio-client",
  "nascio-core",
@@ -4492,7 +4494,6 @@ dependencies = [
  "nascio-client",
  "nascio-core",
  "nascio-protocol",
- "nascio-tools",
  "nascio-voxel",
  "nascio-worldgen",
  "rayon",

@@ -7,6 +7,7 @@
 
 pub mod chunk;
 pub mod clock;
+pub mod discovery;
 pub mod entity;
 pub mod frame;
 pub mod messages;
@@ -14,5 +15,5 @@ pub mod varint;
 
 /// Version of the protocol, checked at the handshake. Any change of a message or a codec
 /// increments it. v5: the block table (definitions, not only names) in `ServerHello`. v6: `ClientHello.auth`, a
-/// secret or a token signed by the site.
-pub const PROTOCOL_VERSION: u32 = 6;
+/// secret or a token signed by the site. v7: chat (`ClientMsg::Chat`, `ServerMsg::Chat`).
+pub const PROTOCOL_VERSION: u32 = 7;

@@ -77,6 +77,12 @@ pub struct ServerConfig {
     /// Block edits a client may ask per second, and in a burst.
     pub edits_per_s: f64,
     pub edits_burst: f64,
+    /// Chat lines a client may send per second, and in a burst (more are dropped).
+    pub chat_per_s: f64,
+    pub chat_burst: f64,
+    /// UDP port answering the local network's scans (`nascio_protocol::discovery`), on the
+    /// address of `bind` (0: no answer).
+    pub discovery_port: u16,
     /// Refused messages (over a limit) after which a client is kicked.
     pub kick_after_violations: u32,
     /// Positions and acks over the limit are dropped without counting as violations (a
@@ -129,6 +135,9 @@ impl Default for ServerConfig {
             control_burst: 400.0,
             edits_per_s: 20.0,
             edits_burst: 40.0,
+            chat_per_s: 1.0,
+            chat_burst: 5.0,
+            discovery_port: nascio_protocol::discovery::DISCOVERY_PORT,
             kick_after_violations: 500,
             overrun_kick_after_s: 10.0,
             max_speed_m_s: 120.0,

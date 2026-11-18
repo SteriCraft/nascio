@@ -75,6 +75,10 @@ pub enum ClientMsg {
     Have {
         columns: Vec<([i32; 2], u64)>,
     },
+    /// A chat line for every player (at most [`MAX_CHAT_CHARS`] characters).
+    Chat {
+        text: String,
+    },
     Bye,
 }
 
@@ -117,6 +121,26 @@ pub enum ServerMsg {
     Correct {
         pos: [f64; 3],
     },
+    /// A line of the chat.
+    Chat(Chat),
+}
+
+/// Longest chat line, characters (longer ones are cut by the server).
+pub const MAX_CHAT_CHARS: usize = 256;
+
+/// A line of the chat; the client words it in its own language.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Chat {
+    /// A player logged in.
+    Joined(String),
+    /// A player left (not after a ban, which has its own line).
+    Left(String),
+    /// A player was banned.
+    Banned(String),
+    /// A player wrote to everyone.
+    Say { from: String, text: String },
+    /// An administrator wrote, to everyone or to this player only (`[Admin]: <text>`).
+    Admin(String),
 }
 
 /// Serializes a message (`postcard`).
@@ -167,6 +191,11 @@ mod tests {
                 client_ms: -5,
                 server_unix_ms: 1,
             },
+            ServerMsg::Chat(Chat::Say {
+                from: "alice".into(),
+                text: "salut".into(),
+            }),
+            ServerMsg::Chat(Chat::Admin("redémarrage".into())),
         ];
         for m in msgs {
             let b = to_bytes(&m).unwrap();

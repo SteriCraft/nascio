@@ -444,6 +444,88 @@ fn plate_colors(plate_id: &PeriodicGrid<u8>) -> Vec<Color> {
     slot.into_iter().map(|s| hex(SERIES[s])).collect()
 }
 
+/// Natural colours of the biomes, in code order (the "visual" map).
+const BIOME_NATURAL: [&str; crate::biomes::code::COUNT] = [
+    "#1d4f7a", "#3d7fb8", "#eef2f4", "#8f927a", "#2f4b35", "#3f6b33", "#7d8550", "#a9a26c",
+    "#d6bd88", "#b3a689", "#a39a55", "#1f5427", "#36573a", "#566f4d",
+];
+
+/// The world as seen from above, without its colour codes: shaded relief tinted by the
+/// biomes, the sea darker with depth, rock then snow up high, lakes and large rivers. Built on
+/// the grid of `elevation` (else `elevation_tectonic`); `None` without either.
+pub fn colorize_visual(world: &World) -> Option<Vec<Color>> {
+    let elev = world
+        .layer("elevation")
+        .or_else(|| world.layer("elevation_tectonic"))?;
+    let (w, h) = (elev.width, elev.height);
+    // Another layer read at the cell centre of `(i, j)` (layers may have other grids).
+    let sample = |l: &Layer, i: usize, j: usize| {
+        let li = (i * l.width / w).min(l.width - 1);
+        let lj = (j * l.height / h).min(l.height - 1);
+        l.data.get_f64(lj * l.width + li)
+    };
+    let biome = world.layer("biome");
+    let lake = world.layer("lake_depth");
+    let river = world.layer("river_order");
+    let at = |i: i64, j: i64| {
+        elev.data
+            .get_f64((j.rem_euclid(h as i64) * w as i64 + i.rem_euclid(w as i64)) as usize)
+    };
+    let ve = (elev.cell_m / 32.0).sqrt().max(1.0);
+    let (lx, ly, lz) = {
+        let (az, alt) = (315f64.to_radians(), 45f64.to_radians());
+        (az.sin() * alt.cos(), alt.sin(), -az.cos() * alt.cos())
+    };
+    let water = hex(BIOME_NATURAL[crate::biomes::code::LAKE as usize]);
+    Some(
+        (0..w * h)
+            .map(|k| {
+                let (i, j) = (k % w, k / w);
+                let e = at(i as i64, j as i64);
+                if e <= 0.0 {
+                    // Sea: light on the shelves, dark in the abyss.
+                    let t = (-e / 5_000.0).clamp(0.0, 1.0).sqrt();
+                    return lerp_color(hex("#3f8fb8"), hex("#0b2748"), t);
+                }
+                if lake.is_some_and(|l| sample(l, i, j) > 0.0)
+                    || river.is_some_and(|l| sample(l, i, j) >= 5.0)
+                {
+                    return water;
+                }
+                let code = biome.map_or(crate::biomes::code::TEMPERATE_FOREST as usize, |l| {
+                    sample(l, i, j) as usize
+                });
+                let mut c = hex(BIOME_NATURAL[code.min(BIOME_NATURAL.len() - 1)]);
+                // Bare rock, then snow, up high.
+                c = lerp_color(c, hex("#8a847c"), ((e - 2_200.0) / 1_200.0).clamp(0.0, 1.0));
+                c = lerp_color(c, hex("#f4f6f8"), ((e - 3_600.0) / 900.0).clamp(0.0, 1.0));
+                let (ii, jj) = (i as i64, j as i64);
+                let gx = ve * (at(ii + 1, jj) - at(ii - 1, jj)) / (2.0 * elev.cell_m);
+                let gz = ve * (at(ii, jj + 1) - at(ii, jj - 1)) / (2.0 * elev.cell_m);
+                let n = (1.0 + gx * gx + gz * gz).sqrt();
+                let shade = ((-gx * lx + ly - gz * lz) / n).max(0.0);
+                let f = 0.5 + 0.7 * shade;
+                let ch = |v: u8| (f64::from(v) * f).round().clamp(0.0, 255.0) as u8;
+                Rgb([ch(c[0]), ch(c[1]), ch(c[2])])
+            })
+            .collect(),
+    )
+}
+
+/// Legend of [`colorize_visual`].
+pub fn visual_legend() -> Vec<(Color, String)> {
+    let mut v = vec![
+        (hex("#3f8fb8"), "shallow sea".to_string()),
+        (hex("#0b2748"), "deep sea".to_string()),
+    ];
+    for (k, name) in crate::biomes::NAMES.iter().enumerate().skip(1) {
+        v.push((hex(BIOME_NATURAL[k]), (*name).to_string()));
+    }
+    v.push((hex("#8a847c"), "bare rock (above 2 200 m)".to_string()));
+    v.push((hex("#f4f6f8"), "snow (above 3 600 m)".to_string()));
+    v
+}
+
 /// Per-cell colours of a layer (row-major), or `None` for an unknown layer.
 pub fn colorize(world: &World, name: &str) -> Option<Vec<Color>> {
     let layer = world.layer(name)?;

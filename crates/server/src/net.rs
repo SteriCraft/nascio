@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -13,7 +13,9 @@ use anyhow::{Context, bail};
 use nascio_core::consts::{CHUNK_SIZE, WORLD_SIZE_F64};
 use nascio_core::torus;
 use nascio_protocol::frame::{Deframer, MAX_CONTROL_FRAME, frame};
-use nascio_protocol::messages::{Auth, ClientMsg, ServerHello, ServerMsg, from_bytes, to_bytes};
+use nascio_protocol::messages::{
+    Auth, Chat, ClientMsg, MAX_CHAT_CHARS, ServerHello, ServerMsg, from_bytes, to_bytes,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
@@ -26,6 +28,8 @@ use crate::sim::{Input, PlayerLink, View};
 /// What every connection needs.
 pub struct Shared {
     pub cfg: ServerConfig,
+    /// Seed of the world served.
+    pub seed: u64,
     pub hello: ServerHello,
     pub cache: Arc<ColumnCache>,
     pub inputs: Mutex<Sender<Input>>,
@@ -53,6 +57,8 @@ pub struct Session {
     pub ip: IpAddr,
     pub link: Arc<PlayerLink>,
     conn: quinn::Connection,
+    /// Banned: its departure gets no "left" line (the ban has its own).
+    quiet: AtomicBool,
 }
 
 impl Shared {
@@ -97,8 +103,47 @@ impl Shared {
     ) -> anyhow::Result<(crate::accounts::Ban, bool)> {
         let now = unix_ms();
         let ban = self.accounts.ban(name, until_unix_ms, reason, now)?;
+        if let Some(s) = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+        {
+            s.quiet.store(true, Ordering::Relaxed);
+        }
         let kicked = self.kick(name, &ban.message(now));
+        self.broadcast(&ServerMsg::Chat(Chat::Banned(name.to_owned())));
         Ok((ban, kicked))
+    }
+
+    /// Sends a message to every player online.
+    pub fn broadcast(&self, msg: &ServerMsg) {
+        for s in self
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+        {
+            let _ = s.link.out.send(msg.clone());
+        }
+    }
+
+    /// An administrator's line for everyone (`[Admin]: <text>` on their screens).
+    pub fn announce(&self, text: &str) {
+        self.broadcast(&ServerMsg::Chat(Chat::Admin(chat_text(text))));
+    }
+
+    /// An administrator's line for one player only; false if not online.
+    pub fn tell(&self, name: &str, text: &str) -> bool {
+        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = sessions.get(name) else {
+            return false;
+        };
+        let _ = s
+            .link
+            .out
+            .send(ServerMsg::Chat(Chat::Admin(chat_text(text))));
+        true
     }
 
     fn input(&self, i: Input) {
@@ -108,6 +153,17 @@ impl Shared {
             .unwrap_or_else(|e| e.into_inner())
             .send(i);
     }
+}
+
+/// A chat line as sent: control characters removed, spaces trimmed, at most
+/// [`MAX_CHAT_CHARS`] characters.
+pub fn chat_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_CHAT_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 pub fn unix_ms() -> i64 {
@@ -122,7 +178,7 @@ pub async fn accept_loop(endpoint: quinn::Endpoint, shared: Arc<Shared>) {
         let shared = shared.clone();
         tokio::spawn(async move {
             if let Err(e) = connection(incoming, shared).await {
-                eprintln!("connection: {e:#}");
+                crate::say_err!("connection: {e:#}");
             }
         });
     }
@@ -192,7 +248,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         None => match shared.spawns.of(&shared.accounts, &hello.name) {
             Ok(p) => (p, None),
             Err(e) => {
-                eprintln!("spawn point of {}: {e:#}", hello.name);
+                crate::say_err!("spawn point of {}: {e:#}", hello.name);
                 ([0.0; 3], Some("no spawn point: try again later".to_owned()))
             }
         },
@@ -241,10 +297,13 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
                 ip,
                 link: link.clone(),
                 conn: conn.clone(),
+                quiet: AtomicBool::new(false),
             },
         );
     }
     shared.online.fetch_add(1, Ordering::Relaxed);
+    crate::say!("{name} joined ({ip})");
+    shared.broadcast(&ServerMsg::Chat(Chat::Joined(name.clone())));
     shared.input(Input::Join(link.clone()));
 
     // Writer of the control stream.
@@ -291,6 +350,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     let now = Instant::now();
     let mut control = Bucket::new(cfg.control_msgs_per_s, cfg.control_burst, now);
     let mut edits = Bucket::new(cfg.edits_per_s, cfg.edits_burst, now);
+    let mut chat = Bucket::new(cfg.chat_per_s, cfg.chat_burst, now);
     let mut violations = 0u32;
     let mut overrun = Overrun::default();
     // Last accepted position, and when.
@@ -397,6 +457,21 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
                         break;
                     }
                 }
+                ClientMsg::Chat { text } => {
+                    let text = chat_text(&text);
+                    if text.is_empty() {
+                        continue;
+                    }
+                    if !chat.take(now) {
+                        abuse("chat", "chat line over the limit, dropped");
+                        continue;
+                    }
+                    crate::say!("<{name}> {text}");
+                    shared.broadcast(&ServerMsg::Chat(Chat::Say {
+                        from: name.clone(),
+                        text,
+                    }));
+                }
                 ClientMsg::Bye => break,
                 ClientMsg::Hello(_) => bail!("second hello"),
                 m => shared.input(Input::Msg(id, m)),
@@ -405,11 +480,19 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         Ok(())
     }
     .await;
-    {
+    let quiet = {
         let mut sessions = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if sessions.get(&name).is_some_and(|s| s.id == id) {
-            sessions.remove(&name);
+            sessions
+                .remove(&name)
+                .is_some_and(|s| s.quiet.load(Ordering::Relaxed))
+        } else {
+            true
         }
+    };
+    crate::say!("{name} left");
+    if !quiet {
+        shared.broadcast(&ServerMsg::Chat(Chat::Left(name.clone())));
     }
     shared.input(Input::Leave(id));
     shared.online.fetch_sub(1, Ordering::Relaxed);
@@ -479,7 +562,7 @@ async fn login(shared: &Arc<Shared>, ip: IpAddr, name: &str, auth: &Auth) -> Res
                 } else {
                     ""
                 };
-                println!("account {name} created{how} ({ip})");
+                crate::say!("account {name} created{how} ({ip})");
             }
             // Only once the secret is right, like the session check below.
             if let Some(ban) = shared.accounts.banned(name, unix_ms()) {
@@ -542,7 +625,7 @@ async fn stream_columns(conn: quinn::Connection, link: Arc<PlayerLink>, shared: 
             Some(done) = flight.join_next(), if !flight.is_empty() => {
                 match done {
                     Ok(Ok(n)) => tokens -= n as f64,
-                    Ok(Err(e)) => { eprintln!("column for player {}: {e:#}", link.id); return; }
+                    Ok(Err(e)) => { crate::say_err!("column for player {}: {e:#}", link.id); return; }
                     Err(_) => return,
                 }
             }

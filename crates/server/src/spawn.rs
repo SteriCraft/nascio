@@ -131,7 +131,7 @@ pub fn load_or_draw(
         if file.fingerprint == fingerprint && !file.sites.is_empty() {
             return Ok(file.sites);
         }
-        eprintln!("{}: drawn for another world, drawn again", path.display());
+        crate::say_err!("{}: drawn for another world, drawn again", path.display());
     }
     let sites = draw_sites(terrain, seed, n, rules)?;
     std::fs::create_dir_all(dir)?;

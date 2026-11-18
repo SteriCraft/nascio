@@ -12,7 +12,6 @@
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,6 +24,7 @@ use nascio_chunk::{Blocks, ChunkMesh, mesh_chunk};
 use nascio_client::{Auth, Entities, Event, Mirror, connect_with};
 use nascio_core::consts::CHUNKS_PER_AXIS;
 use nascio_core::coords::{ChunkPos, WorldPos};
+use nascio_protocol::messages::Chat;
 use nascio_protocol::messages::{ClientMsg, ServerMsg};
 
 use crate::fly::{FlyCam, RenderOrigin, Streamer};
@@ -41,6 +41,12 @@ pub struct Remote {
     pub entities: Arc<Mutex<Entities>>,
     /// Position the server put the camera back to (refused move).
     correction: Arc<Mutex<Option<[f64; 3]>>>,
+    /// Chat lines received and not yet shown.
+    pub chat: Arc<Mutex<Vec<Chat>>>,
+    /// Why the connection ended (`None` while it lives).
+    pub closed: Arc<Mutex<Option<String>>>,
+    /// The player's spawn position from the server (world metres).
+    pub spawn: [f64; 3],
     epoch: Instant,
     /// Radius of the columns the server sends, metres.
     pub radius_m: u32,
@@ -53,28 +59,30 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Remote {
-    /// Connects (waits for the handshake) and starts the connection thread. `local`: the
-    /// block table of the local world, which must be the server's: the viewer still draws
-    /// the horizon and picks the blocks of its edits from the local world.
+    /// Connects (waits for the handshake) and starts the connection thread. `cert`: the
+    /// server's certificate (DER), pinned. `local`: the block table of the local world, which
+    /// must be the server's: the viewer still draws the horizon and picks the blocks of its
+    /// edits from the local world. The player starts at the spawn point of the server.
     pub fn start(
         addr: SocketAddr,
-        cert: &Path,
+        cert: Vec<u8>,
         name: &str,
         auth: Auth,
         local: &Blocks,
-        spawn_pos: [f64; 3],
     ) -> anyhow::Result<Self> {
-        let cert = std::fs::read(cert).with_context(|| format!("reading {}", cert.display()))?;
         let local = local.registry().clone();
         let mirror = Arc::new(Mutex::new(Mirror::default()));
         let dirty = Arc::new(Mutex::new(BTreeSet::new()));
         let status = Arc::new(Mutex::new(String::new()));
         let entities = Arc::new(Mutex::new(Entities::new(0.05)));
         let correction = Arc::new(Mutex::new(None));
+        let chat = Arc::new(Mutex::new(Vec::new()));
+        let closed = Arc::new(Mutex::new(None));
         let name = name.to_owned();
         let epoch = Instant::now();
         let (out, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<ClientMsg>();
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<anyhow::Result<(u32, Blocks)>>();
+        type Ready = (u32, Blocks, [f64; 3]);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<anyhow::Result<Ready>>();
         let (m, d, st, en) = (
             mirror.clone(),
             dirty.clone(),
@@ -82,6 +90,7 @@ impl Remote {
             entities.clone(),
         );
         let co = correction.clone();
+        let (ch, cl) = (chat.clone(), closed.clone());
         std::thread::Builder::new()
             .name("network".into())
             .spawn(move || {
@@ -104,9 +113,10 @@ impl Remote {
                         )));
                         return;
                     }
-                    let _ = ready_tx.send(Ok((c.hello.chunk_radius_m, c.blocks.clone())));
+                    let spawn = c.hello.spawn;
+                    let _ = ready_tx.send(Ok((c.hello.chunk_radius_m, c.blocks.clone(), spawn)));
                     c.send(ClientMsg::Move {
-                        pos: spawn_pos,
+                        pos: spawn,
                         yaw: 0.0,
                         pitch: 0.0,
                     });
@@ -151,18 +161,23 @@ impl Remote {
                                 Some(Event::Msg(ServerMsg::EditRefused { pos, reason })) => {
                                     *lock(&st) = format!("edit at {pos:?} refused: {reason}");
                                 }
+                                Some(Event::Msg(ServerMsg::Chat(line))) => lock(&ch).push(line),
                                 Some(Event::Msg(ServerMsg::Kick { reason })) | Some(Event::Closed(reason)) => {
                                     *lock(&st) = format!("disconnected: {reason}");
+                                    lock(&cl).get_or_insert(reason);
                                     break;
                                 }
                                 Some(Event::Msg(_)) => {}
-                                None => break,
+                                None => {
+                                    lock(&cl).get_or_insert_with(|| "connection lost".into());
+                                    break;
+                                }
                             },
                         }
                     }
                 });
             })?;
-        let (radius_m, blocks) = ready_rx
+        let (radius_m, blocks, spawn) = ready_rx
             .recv_timeout(Duration::from_secs(20))
             .context("no answer from the server")??;
         ensure!(radius_m >= 64, "server radius {radius_m} m too small");
@@ -173,6 +188,9 @@ impl Remote {
             status,
             entities,
             correction,
+            chat,
+            closed,
+            spawn,
             epoch,
             radius_m,
             blocks: Arc::new(blocks),

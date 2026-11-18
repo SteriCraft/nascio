@@ -5,6 +5,7 @@
 //! the server sent, and it depends on `nascio-chunk` and never on the generation crates
 //! (checked by `tests/no_generation.rs`). The block table comes from the server's hello.
 
+pub mod discovery;
 pub mod entities;
 pub mod mirror;
 pub mod net;

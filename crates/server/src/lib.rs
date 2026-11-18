@@ -8,6 +8,7 @@
 pub mod accounts;
 pub mod columns;
 pub mod config;
+pub mod console;
 pub mod net;
 pub mod replicate;
 pub mod security;
@@ -44,6 +45,8 @@ pub struct RunningServer {
     endpoint: quinn::Endpoint,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
+    /// Answers the local network's scans.
+    discovery: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// The server's certificate and key in `dir` (`cert.der`, `key.der`), made on first use
@@ -73,7 +76,7 @@ fn udp_socket(bind: SocketAddr, buffer: usize) -> anyhow::Result<std::net::UdpSo
         let _ = s.set_send_buffer_size(buffer);
         let got = s.recv_buffer_size().unwrap_or(0);
         if got < buffer {
-            eprintln!(
+            crate::say_err!(
                 "UDP receive buffer {} KiB instead of {} KiB (Linux: raise net.core.rmem_max)",
                 got >> 10,
                 buffer >> 10
@@ -104,7 +107,7 @@ impl RunningServer {
             },
         )?;
         for w in warnings {
-            eprintln!("deltas: {w}");
+            crate::say_err!("deltas: {w}");
         }
         let deltas = Arc::new(deltas);
         let threads_n = match cfg.generation_threads {
@@ -202,7 +205,7 @@ impl RunningServer {
                     while !s.load(Ordering::Relaxed) {
                         std::thread::sleep(every);
                         if let Err(e) = d.flush() {
-                            eprintln!("deltas: flush failed: {e:#}");
+                            crate::say_err!("deltas: flush failed: {e:#}");
                         }
                     }
                 })?,
@@ -229,6 +232,7 @@ impl RunningServer {
             )
         };
         let shared = Arc::new(net::Shared {
+            seed: world.config.seed,
             tokens,
             hashing: tokio::sync::Semaphore::new(hash_permits),
             accounts,
@@ -246,6 +250,27 @@ impl RunningServer {
             sent_columns: AtomicU64::new(0),
         });
         tokio::spawn(net::accept_loop(endpoint.clone(), shared.clone()));
+        let discovery = match shared.cfg.discovery_port {
+            0 => None,
+            port => {
+                let at = SocketAddr::new(addr.ip(), port);
+                match std::net::UdpSocket::bind(at)
+                    .and_then(|s| s.set_nonblocking(true).map(|()| s))
+                    .and_then(tokio::net::UdpSocket::from_std)
+                {
+                    Ok(socket) => Some(tokio::spawn(discovery(
+                        socket,
+                        shared.clone(),
+                        addr.port(),
+                        cert_der.clone(),
+                    ))),
+                    Err(e) => {
+                        crate::say_err!("local network scans not answered ({at}: {e})");
+                        None
+                    }
+                }
+            }
+        };
         Ok(Self {
             addr,
             cert_der,
@@ -255,11 +280,15 @@ impl RunningServer {
             endpoint,
             stop,
             threads,
+            discovery,
         })
     }
 
     /// Closes the connections, stops the threads and makes every edit durable.
     pub fn shutdown(self) -> anyhow::Result<()> {
+        if let Some(d) = &self.discovery {
+            d.abort();
+        }
         self.endpoint.close(0u32.into(), b"shutdown");
         self.stop.store(true, Ordering::Relaxed);
         for t in self.threads {
@@ -267,5 +296,38 @@ impl RunningServer {
         }
         self.deltas.flush()?;
         Ok(())
+    }
+}
+
+/// Answers the probes of the local network with the game port and the certificate. Only
+/// full-size probes are answered: the answer is never larger (no amplification).
+async fn discovery(
+    socket: tokio::net::UdpSocket,
+    shared: Arc<net::Shared>,
+    port: u16,
+    cert_der: Vec<u8>,
+) {
+    use nascio_protocol::discovery::{PROBE_BYTES, ServerInfo, answer, is_probe};
+    let mut buf = vec![0u8; PROBE_BYTES + 1];
+    loop {
+        let Ok((n, from)) = socket.recv_from(&mut buf).await else {
+            // Windows reports an ICMP "port unreachable" of an earlier answer here.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            continue;
+        };
+        if !is_probe(&buf[..n]) {
+            continue;
+        }
+        let info = ServerInfo {
+            protocol: nascio_protocol::PROTOCOL_VERSION,
+            port,
+            server_id: shared.cfg.server_id.clone(),
+            players: shared.online.load(Ordering::Relaxed),
+            max_players: u32::try_from(shared.cfg.max_players).unwrap_or(u32::MAX),
+            cert_der: cert_der.clone(),
+        };
+        if let Some(a) = answer(&info) {
+            let _ = socket.send_to(&a, from).await;
+        }
     }
 }

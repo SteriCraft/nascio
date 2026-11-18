@@ -65,6 +65,8 @@ pub struct FlySettings {
     pub star_mag_limit: f64,
     /// Vertical sync of the window (`--no-vsync` turns it off at start).
     pub vsync: bool,
+    /// Borderless fullscreen.
+    pub fullscreen: bool,
     /// Weather cloud cover forced everywhere (`--clouds`, captures); `None` follows the climate.
     pub fixed_clouds: Option<f64>,
 }
@@ -81,6 +83,7 @@ impl Default for FlySettings {
             curvature_radius_m: crate::curvature::RenderConfig::default().radius(),
             star_mag_limit: crate::stars::DEFAULT_LIMIT,
             vsync: true,
+            fullscreen: false,
             fixed_clouds: None,
         }
     }
@@ -676,12 +679,15 @@ pub fn fly_input(
     mut god: ResMut<crate::god::God>,
     mut cam: ResMut<FlyCam>,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    chat: Res<crate::chat::ChatBox>,
+    pause: Res<crate::pause::Pause>,
 ) {
     if cam.scripted {
         return;
     }
-    // God mode captures the mouse for good (cross at the centre, right click places).
-    let looking = god.on || (buttons.pressed(MouseButton::Right) && !ui.0);
+    // God mode captures the mouse for good (cross at the centre, right click places); the
+    // in-game menu frees it.
+    let looking = !pause.open && (god.on || (buttons.pressed(MouseButton::Right) && !ui.0));
     if let Ok(mut c) = cursor.single_mut() {
         let (grab, visible) = if looking {
             (CursorGrabMode::Locked, false)
@@ -699,7 +705,7 @@ pub fn fly_input(
         cam.pitch =
             (cam.pitch - f64::from(d.y) * 0.0025).clamp(-FRAC_PI_2 + 0.01, FRAC_PI_2 - 0.01);
     }
-    if !ui.0 && !god.on && scroll.delta.y != 0.0 {
+    if !ui.0 && !god.on && !pause.open && scroll.delta.y != 0.0 {
         let notches = match scroll.unit {
             MouseScrollUnit::Line => f64::from(scroll.delta.y),
             MouseScrollUnit::Pixel => f64::from(scroll.delta.y) / 40.0,
@@ -707,6 +713,10 @@ pub fn fly_input(
         cam.speed = (cam.speed * 1.25f64.powf(notches)).clamp(SPEED_MIN, SPEED_MAX);
     }
 
+    if chat.open || pause.open {
+        // The keyboard writes in the chat, or the menu is open.
+        return;
+    }
     // Physical keys: KeyW is Z on an AZERTY keyboard.
     let axis = |pos: KeyCode, neg: KeyCode| {
         f64::from(u8::from(keys.pressed(pos))) - f64::from(u8::from(keys.pressed(neg)))
@@ -790,18 +800,16 @@ pub fn place_camera(
 
 #[derive(Resource)]
 pub struct HudState {
+    /// The debug panel is shown (F3).
+    pub shown: bool,
     pub teleport: (String, String),
-    pub map_request: bool,
-    /// Minimap span: the whole world, or a 20 km close-up (click the minimap to switch).
-    pub minimap_close: bool,
 }
 
 impl Default for HudState {
     fn default() -> Self {
         Self {
+            shown: false,
             teleport: ("50000".into(), "50000".into()),
-            map_request: false,
-            minimap_close: false,
         }
     }
 }
@@ -820,15 +828,19 @@ pub fn hud(
     terrain: Res<SharedTerrain>,
     info: Res<WorldInfo>,
     sky: Res<crate::sky::SkyState>,
-    mut map: ResMut<crate::map::MapState>,
     climate: Option<Res<crate::sky::ClimateMaps>>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     let p = cam.pos;
     let avg = stats.average();
-    egui::Window::new("Nascio — 3D")
+    if ctx.input(|i| i.key_pressed(egui::Key::F3)) {
+        hud.shown = !hud.shown;
+    }
+    let mut shown = hud.shown;
+    egui::Window::new("Nascio — 3D (F3)")
         .default_pos([10.0, 10.0])
         .resizable(false)
+        .open(&mut shown)
         .show(ctx, |ui| {
             ui.monospace(format!("x {:>9.1}  y {:>7.1}  z {:>9.1}", p.x, p.y, p.z));
             ui.monospace(format!(
@@ -888,41 +900,6 @@ pub fn hud(
                 ));
             }
             ui.separator();
-            ui.add(
-                egui::Slider::new(&mut settings.view_distance_m, VIEW_MIN..=VIEW_MAX)
-                    .text("view distance (m)")
-                    .step_by(32.0),
-            );
-            ui.checkbox(&mut settings.horizon, "horizon");
-            ui.horizontal(|ui| {
-                let mut curved = settings.curvature_radius_m.is_some();
-                ui.checkbox(&mut curved, "curvature");
-                let mut km = settings
-                    .curvature_radius_m
-                    .unwrap_or(curvature::REAL_RADIUS_M)
-                    / 1_000.0;
-                if curved {
-                    ui.add(
-                        egui::Slider::new(
-                            &mut km,
-                            curvature::RADIUS_MIN_M / 1_000.0..=curvature::RADIUS_MAX_M / 1_000.0,
-                        )
-                        .logarithmic(true)
-                        .text("R (km)"),
-                    );
-                    if ui
-                        .small_button("real")
-                        .on_hover_text("15.9 km: same circumference as the torus")
-                        .clicked()
-                    {
-                        km = curvature::REAL_RADIUS_M / 1_000.0;
-                    }
-                }
-                let radius = curved.then_some(km * 1_000.0);
-                if settings.curvature_radius_m != radius {
-                    settings.curvature_radius_m = radius;
-                }
-            });
             let mut fixed = settings.fixed_hour.is_some();
             ui.horizontal(|ui| {
                 ui.checkbox(&mut fixed, "fixed solar hour");
@@ -941,19 +918,7 @@ pub fn hud(
                 }
                 settings.fixed_day = fixed_day.then_some(day);
             });
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut settings.shadows, "shadows");
-                ui.checkbox(&mut settings.night_floor, "night floor");
-            });
-            ui.add(
-                egui::Slider::new(
-                    &mut settings.star_mag_limit,
-                    crate::stars::SLIDER_BRIGHTEST..=crate::stars::FAINTEST,
-                )
-                .step_by(0.1)
-                .text("star magnitude limit"),
-            );
-            vsync_toggle(ui, &mut settings);
+            ui.checkbox(&mut settings.night_floor, "night floor");
             if let Some(p) = sky.sun {
                 ui.monospace(format!(
                     "day {:6.2}  sun e {:+5.1}  e_vis {:+5.1} deg",
@@ -982,17 +947,12 @@ pub fn hud(
                     cam.pos = WorldPos::new(x, ground + 60.0, z);
                 }
             });
-            if ui.button("Back to map").clicked() {
-                hud.map_request = true;
-            }
             ui.small(format!(
-                "Right drag: look · WASD/ZQSD: move · Space/Shift: up/down · seed {}",
+                "Right drag: look · WASD/ZQSD: move · Space/Shift: up/down · F3: this panel · Esc: menu · seed {}",
                 info.seed
             ));
         });
-    if let Some(tex) = map.minimap_texture(ctx) {
-        minimap(ctx, tex, &cam, &mut hud);
-    }
+    hud.shown = shown;
     let ground = terrain.0.height(p.x, p.z).max(0.0);
     let under = underground(&terrain.0, &info, climate.as_deref(), p);
     clock(
@@ -1008,20 +968,8 @@ pub fn hud(
     Ok(())
 }
 
-/// Vsync state and switch (shared by the map and the 3D panels).
-pub fn vsync_toggle(ui: &mut egui::Ui, settings: &mut FlySettings) {
-    ui.horizontal(|ui| {
-        ui.checkbox(&mut settings.vsync, "vsync");
-        ui.label(if settings.vsync {
-            "on: frame rate capped by the display"
-        } else {
-            "off: uncapped"
-        });
-    });
-}
-
-/// Applies the vsync setting to the window.
-pub fn apply_vsync(
+/// Applies the vsync and fullscreen settings to the window.
+pub fn apply_window(
     settings: Res<FlySettings>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
@@ -1030,9 +978,17 @@ pub fn apply_vsync(
     } else {
         bevy::window::PresentMode::AutoNoVsync
     };
+    let mode = if settings.fullscreen {
+        bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Primary)
+    } else {
+        bevy::window::WindowMode::Windowed
+    };
     for mut w in &mut windows {
         if w.present_mode != want {
             w.present_mode = want;
+        }
+        if w.mode != mode {
+            w.mode = mode;
         }
     }
 }
@@ -1153,70 +1109,6 @@ fn clock(
                     }
                 }
             });
-        });
-}
-
-/// Side of the minimap, points.
-const MINIMAP_SIZE: f32 = 220.0;
-/// Span of the minimap's close-up, m.
-const MINIMAP_CLOSE_M: f64 = 20_000.0;
-
-/// Minimap in the bottom-right corner: the elevation map centred on the camera (the torus
-/// repeats), with an arrow for the position and the heading. A click switches between the
-/// whole world and a 20 km close-up.
-fn minimap(ctx: &egui::Context, tex: egui::TextureId, cam: &FlyCam, hud: &mut HudState) {
-    let span = if hud.minimap_close {
-        MINIMAP_CLOSE_M
-    } else {
-        nascio_core::consts::WORLD_SIZE_F64
-    };
-    egui::Area::new(egui::Id::new("minimap"))
-        .anchor(egui::Align2::RIGHT_BOTTOM, [-10.0, -10.0])
-        .show(ctx, |ui| {
-            let (rect, response) = ui
-                .allocate_exact_size(egui::vec2(MINIMAP_SIZE, MINIMAP_SIZE), egui::Sense::click());
-            let w = nascio_core::consts::WORLD_SIZE_F64;
-            let (cx, cz) = (
-                nascio_core::torus::wrap_f64(cam.pos.x) / w,
-                nascio_core::torus::wrap_f64(cam.pos.z) / w,
-            );
-            let h = span / w / 2.0;
-            let uv = egui::Rect::from_min_max(
-                egui::pos2((cx - h) as f32, (cz - h) as f32),
-                egui::pos2((cx + h) as f32, (cz + h) as f32),
-            );
-            let painter = ui.painter_at(rect.expand(2.0));
-            painter.image(tex, rect, uv, egui::Color32::WHITE);
-            painter.rect_stroke(
-                rect,
-                2.0,
-                egui::Stroke::new(1.5, egui::Color32::from_black_alpha(200)),
-                egui::StrokeKind::Outside,
-            );
-            // Heading from north (−z, up on the map) towards east (+x, right).
-            let c = rect.center();
-            let dir = egui::vec2(cam.yaw.sin() as f32, -cam.yaw.cos() as f32);
-            let side = egui::vec2(-dir.y, dir.x);
-            let arrow = vec![
-                c + dir * 12.0,
-                c - dir * 7.0 + side * 7.0,
-                c - dir * 7.0 - side * 7.0,
-            ];
-            painter.add(egui::Shape::convex_polygon(
-                arrow,
-                egui::Color32::from_rgb(230, 40, 40),
-                egui::Stroke::new(1.5, egui::Color32::WHITE),
-            ));
-            painter.text(
-                rect.left_top() + egui::vec2(5.0, 3.0),
-                egui::Align2::LEFT_TOP,
-                format!("{:.0} km · click to zoom", span / 1_000.0),
-                egui::FontId::proportional(11.0),
-                egui::Color32::WHITE,
-            );
-            if response.clicked() {
-                hud.minimap_close = !hud.minimap_close;
-            }
         });
 }
 

@@ -1,19 +1,29 @@
-//! Nascio development viewer: map mode (M1) and free-flight 3D mode (M2).
+//! Nascio client and development viewer.
+//!
+//! It opens on a menu ("Se connecter", "Paramètres", "Quitter"); once connected to a server,
+//! the 3D view shows the columns it sends, with the chat (Enter), a debug panel (F3) and a menu (Esc). The
+//! world map lives in the server's window. The account and the display settings are kept in
+//! `client-settings.toml` next to the executable ([`settings`]); the options of the command
+//! line override them for the session. `--fly` flies over a local world without a server (development: chunks
+//! generated here, benchmarks, captures).
 //!
 //! ```text
-//! cargo run -p nascio-viewer --release -- out/m2/world-42
-//! cargo run -p nascio-viewer --release -- out/m2/world-42 --fly --pos 21000,1500
+//! cargo run -p nascio-viewer --release -- out/server/world-42
+//! cargo run -p nascio-viewer --release -- out/server/world-42 --fly --pos 21000,1500
 //! ```
 
 mod bench;
+mod chat;
 mod curvature;
 mod fly;
 mod generating;
 mod god;
 mod horizon;
-mod map;
+mod menu;
+mod pause;
 mod perf;
 mod remote;
+mod settings;
 mod sky;
 mod stars;
 
@@ -35,10 +45,11 @@ use fly::{FlyCam, FlySettings, RenderOrigin};
 #[derive(Parser, Debug)]
 #[command(about = "Nascio world viewer")]
 struct Args {
-    /// World directory (from `nascio-worldgen generate`).
-    #[arg(default_value = "out/world-42")]
+    /// World directory (from `nascio-worldgen generate`). The server's world: the sky and the
+    /// horizon still come from it (until the server sends them).
+    #[arg(default_value = "out/server/world-42")]
     world: PathBuf,
-    /// Start in the 3D mode.
+    /// Fly over the local world without a server (development).
     #[arg(long)]
     fly: bool,
     /// Camera position `x,z` (height: 60 m above ground) or `x,y,z` (may be underground).
@@ -53,18 +64,15 @@ struct Args {
     /// Camera speed, m/s.
     #[arg(long, default_value_t = 40.0)]
     speed: f64,
-    /// Chunk view distance, m (1 024 m by default, the slider's maximum).
-    #[arg(long, default_value_t = 1_024.0)]
-    view_distance: f32,
+    /// Chunk view distance, m (default: the saved setting, else 1 024 m).
+    #[arg(long)]
+    view_distance: Option<f32>,
     /// Fixed local solar hour for lighting (default: real time).
     #[arg(long)]
     hour: Option<f64>,
-    /// Day of the year (0..365) for the map date and the 3D sky (default: real time).
+    /// Day of the year (0..365) for the 3D sky (default: real time).
     #[arg(long)]
     day: Option<f64>,
-    /// Map mode: layer or climate map shown at start (e.g. `temperature`, `biome`).
-    #[arg(long)]
-    map_layer: Option<String>,
     /// Disable the sun shadows.
     #[arg(long)]
     no_shadows: bool,
@@ -97,19 +105,23 @@ struct Args {
     /// Disable vsync (measure the real frame cost).
     #[arg(long)]
     no_vsync: bool,
-    /// Network mode: chunk columns come from this server (`nascio-server`), edits go to it.
-    /// Sky and horizon still come from the local world, which must be the server's.
+    /// Connect at once to this server (`ip`, `ip:port`), without the menu. Sky and horizon
+    /// still come from the local world, which must be the server's.
     #[arg(long)]
-    connect: Option<std::net::SocketAddr>,
-    /// Server certificate (DER) for `--connect` (default: `<world>/server/cert.der`).
+    connect: Option<String>,
+    /// Server certificate (DER). Default: the one the server gives with its answer to the
+    /// scan probe, pinned at the first connection to an address (`--known-servers`).
     #[arg(long)]
     cert: Option<PathBuf>,
-    /// Account name for `--connect` (created on first use if the server allows it).
-    #[arg(long, default_value = "viewer")]
-    name: String,
-    /// Account secret for `--connect` (at least 8 characters).
-    #[arg(long, default_value = "viewer-dev-secret")]
-    secret: String,
+    /// Certificates pinned by server address.
+    #[arg(long, default_value = "out/client/known_servers.toml")]
+    known_servers: PathBuf,
+    /// Account name (created on first use if the server allows it). Default: the saved one.
+    #[arg(long)]
+    name: Option<String>,
+    /// Account secret (at least 8 characters). Default: the saved one.
+    #[arg(long)]
+    secret: Option<String>,
     /// Log in with this token from the site (`site token … --name <name>`) instead of the
     /// secret, which servers keep for administrators.
     #[arg(long)]
@@ -124,9 +136,6 @@ struct Args {
     /// Generate world SEED into the world directory with a progress window, then quit.
     #[arg(long, value_name = "SEED")]
     generate: Option<u64>,
-    /// Map mode: open the vertical section `x0,z0,x1,z1` at start.
-    #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
-    section: Option<Vec<f64>>,
     /// With `--generate`: resolution divisor (1, 5 or 25).
     #[arg(long, default_value_t = 1)]
     scale: u32,
@@ -138,10 +147,11 @@ struct Args {
     deposits: Option<PathBuf>,
 }
 
+/// The menu (and its connection dialog), then the 3D view.
 #[derive(States, Default, Clone, Copy, Eq, PartialEq, Hash, Debug)]
-enum Mode {
+pub enum Mode {
     #[default]
-    Map,
+    Menu,
     Fly,
 }
 
@@ -173,7 +183,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         args.fly = true;
         args.no_vsync = true;
         args.no_horizon = false;
-        args.view_distance = b.view_distance_m.unwrap_or(fly::VIEW_MAX);
+        args.view_distance = Some(b.view_distance_m.unwrap_or(fly::VIEW_MAX));
         args.hour = Some(b.hour.unwrap_or(10.0));
         if b.curvature_radius_m.is_some() {
             args.curvature_radius = b.curvature_radius_m;
@@ -241,7 +251,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     };
     let god = god::God::new(terrain.blocks().id("granite").unwrap_or(1));
     // Cloud, snow, temperature and humidity harmonics, the diurnal range and the fine elevation
-    // (snow line, HUD weather) for the 3D mode (the map keeps the world).
+    // (snow line, HUD weather) for the 3D mode.
     let climate_world = World {
         config: world.config.clone(),
         layers: world
@@ -288,39 +298,55 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         // A capture ignores the keyboard and the mouse (reproducible pictures).
         scripted: args.screenshot.is_some(),
     };
-    let settings = FlySettings {
-        view_distance_m: args.view_distance.clamp(fly::VIEW_MIN, fly::VIEW_MAX),
+    // Saved settings, then the command line on top (not saved). Benchmarks and captures keep
+    // the defaults: reproducible runs.
+    let saved = if bench_file.is_some() || args.screenshot.is_some() {
+        settings::Saved::default()
+    } else {
+        settings::Saved::load()
+    };
+    let mut settings = FlySettings {
         fixed_hour: args.hour,
         fixed_day: args.day,
-        horizon: !args.no_horizon,
-        curvature_radius_m: render_cfg.radius(),
-        shadows: !args.no_shadows,
-        vsync: !args.no_vsync,
         fixed_clouds: args.clouds.map(|c| c.clamp(0.0, 1.0)),
         ..default()
     };
+    saved.apply(&mut settings);
+    if let Some(v) = args.view_distance {
+        settings.view_distance_m = v.clamp(fly::VIEW_MIN, fly::VIEW_MAX);
+    }
+    if args.render_config.is_some() || args.curvature_radius.is_some() {
+        settings.curvature_radius_m = render_cfg.radius();
+    }
+    settings.horizon &= !args.no_horizon;
+    settings.shadows &= !args.no_shadows;
+    settings.vsync &= !args.no_vsync;
+    settings.fullscreen |= args.fullscreen;
 
-    let mut settings = settings;
-    let remote = match args.connect {
+    let login = menu::Login {
+        name: args.name.clone().unwrap_or_else(|| saved.name.clone()),
+        auth: match &args.token {
+            Some(t) => nascio_client::Auth::Token(t.trim().to_owned()),
+            None => nascio_client::Auth::Secret(
+                args.secret.clone().unwrap_or_else(|| saved.secret.clone()),
+            ),
+        },
+        cert: args.cert.clone(),
+        known: args.known_servers.clone(),
+        blocks: terrain.blocks().table().clone(),
+    };
+    let mut cam = cam;
+    let remote = match &args.connect {
         Some(addr) => {
-            let cert = args
-                .cert
-                .clone()
-                .unwrap_or_else(|| args.world.join("server").join("cert.der"));
-            let r = remote::Remote::start(
-                addr,
-                &cert,
-                &args.name,
-                match &args.token {
-                    Some(t) => nascio_client::Auth::Token(t.trim().to_owned()),
-                    None => nascio_client::Auth::Secret(args.secret.clone()),
-                },
-                terrain.blocks(),
-                [cam.pos.x, cam.pos.y, cam.pos.z],
-            )?;
+            anyhow::ensure!(
+                !login.name.trim().is_empty(),
+                "no account name: give --name (or connect once from the menu)"
+            );
+            let r = menu::connect(addr, &login)?;
             // Only the columns the server sends can be shown, and a column is meshed once its
             // neighbours arrived: keep one column inside the radius.
             settings.view_distance_m = settings.view_distance_m.min(r.radius_m as f32 - 64.0);
+            cam.pos = WorldPos::new(r.spawn[0], r.spawn[1], r.spawn[2]);
             info!("connected to {addr}, columns within {} m", r.radius_m);
             Some(r)
         }
@@ -330,31 +356,19 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     let horizon_cfg = horizon::HorizonConfig::default();
     horizon::check_layout(&horizon_cfg);
 
-    let mut map = map::MapState::new(world, args.world.clone());
-    map.center = (cam.pos.x, cam.pos.z);
-    if let Some(name) = &args.map_layer {
-        map.select(name);
-    }
-    if let Some(day) = args.day {
-        map.set_date(day, args.hour.unwrap_or(12.0));
-    }
-    if let Some(v) = &args.section {
-        anyhow::ensure!(v.len() == 4, "--section takes x0,z0,x1,z1");
-        map.open_section((v[0], v[1]), (v[2], v[3]));
-    }
-
     let mut window = Window {
         title: format!(
-            "{}Nascio viewer — {}{}",
+            "{}Nascio — {}{}",
             gen_cfg.mark(),
             args.world.display(),
             args.connect
+                .as_ref()
                 .map_or(String::new(), |a| format!(" — server {a}"))
         ),
-        present_mode: if args.no_vsync {
-            PresentMode::AutoNoVsync
-        } else {
+        present_mode: if settings.vsync {
             PresentMode::AutoVsync
+        } else {
+            PresentMode::AutoNoVsync
         },
         ..default()
     };
@@ -363,7 +377,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         window.resolution =
             bevy::window::WindowResolution::new(1920, 1080).with_scale_factor_override(1.0);
     }
-    if args.fullscreen {
+    if settings.fullscreen {
         window.mode =
             bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Primary);
     }
@@ -379,7 +393,10 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     .insert_resource(ClimateSource(climate_world))
     .add_plugins(perf::PerfPlugin)
     .init_state::<Mode>()
-    .insert_resource(map)
+    .insert_resource(menu::Menu::new(login, saved.address.clone()))
+    .insert_resource(saved)
+    .init_resource::<chat::ChatBox>()
+    .init_resource::<pause::Pause>()
     .insert_resource(cam)
     .insert_resource(settings)
     .insert_resource(info)
@@ -392,22 +409,34 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     .insert_resource(RenderOrigin(BlockPos::new(0, 0, 0)))
     .insert_resource(ClearColor(Color::srgb(0.45, 0.64, 0.9)))
     .init_resource::<fly::UiCapture>()
-    .init_resource::<fly::HudState>()
+    // The debug panel (F3) is open at once in local flight (development).
+    .insert_resource(fly::HudState {
+        shown: args.fly,
+        ..default()
+    })
     .init_resource::<horizon::HorizonStats>()
     .add_systems(Startup, (setup, sky::setup_sky).chain())
     .add_systems(
         EguiPrimaryContextPass,
         (
-            map::ui.run_if(in_state(Mode::Map)),
-            (god::god_ui, fly::hud).chain().run_if(in_state(Mode::Fly)),
+            menu::menu_ui.run_if(in_state(Mode::Menu)),
+            (
+                god::god_ui,
+                fly::hud,
+                chat::chat_ui,
+                pause::pause_ui,
+                menu::disconnected_ui,
+            )
+                .chain()
+                .run_if(in_state(Mode::Fly)),
         ),
     )
     .add_systems(
         Update,
         (
-            switch_mode,
-            fly::apply_vsync,
+            fly::apply_window,
             (
+                pause::pause_input,
                 fly::fly_input,
                 god::god_input,
                 remote::remote_sync,
@@ -427,9 +456,8 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         )
             .chain(),
     )
-    .add_systems(OnEnter(Mode::Fly), fly::reset_visibility)
-    .add_systems(OnEnter(Mode::Map), hide_scene);
-    if args.fly {
+    .add_systems(OnEnter(Mode::Fly), fly::reset_visibility);
+    if args.fly || remote.is_some() {
         app.insert_state(Mode::Fly);
     }
     if let Some(r) = remote {
@@ -552,37 +580,6 @@ fn setup(
     commands.insert_resource(horizon::HorizonMaterial(horizon));
 }
 
-/// Map and 3D share one camera: the 3D scene is hidden behind the map. Entering the 3D mode,
-/// chunk and horizon visibility are restored by their own systems.
-fn hide_scene(mut q: Query<&mut Visibility, With<fly::Anchor>>) {
-    for mut v in &mut q {
-        *v = Visibility::Hidden;
-    }
-}
-
-fn switch_mode(
-    state: Res<State<Mode>>,
-    mut next: ResMut<NextState<Mode>>,
-    mut map: ResMut<map::MapState>,
-    mut hud: ResMut<fly::HudState>,
-    mut cam: ResMut<FlyCam>,
-    terrain: Res<fly::SharedTerrain>,
-) {
-    match state.get() {
-        Mode::Map if map.fly_request.is_some() => {
-            let (x, z) = map.fly_request.take().unwrap_or(map.center);
-            cam.pos = WorldPos::new(x, terrain.0.height(x, z).max(0.0) + 60.0, z);
-            next.set(Mode::Fly);
-        }
-        Mode::Fly if hud.map_request => {
-            hud.map_request = false;
-            map.center = (cam.pos.x, cam.pos.z);
-            next.set(Mode::Map);
-        }
-        _ => {}
-    }
-}
-
 /// `--screenshot <file>`: capture once the scene has settled (everything in range loaded),
 /// then quit.
 #[derive(Resource)]
@@ -608,7 +605,7 @@ fn auto_screenshot(
 ) {
     shot.frame += 1;
     let loaded = match state.get() {
-        Mode::Map => true,
+        Mode::Menu => true,
         Mode::Fly => streamer.missing == 0 && horizon.pending == 0,
     };
     shot.settled = if loaded { shot.settled + 1 } else { 0 };

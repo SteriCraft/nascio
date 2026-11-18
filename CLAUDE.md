@@ -32,16 +32,17 @@ crates/
                                teinte, maillage (ce que le client lit)
   voxel/      nascio-voxel     génération de chunks (terrain, géologie, végétation), deltas
   protocol/   nascio-protocol  messages, codec de colonnes v2, trames, entités (sans réseau)
-  server/     nascio-server    serveur QUIC : simulation 20 Hz, colonnes, éditions, comptes
+  server/     nascio-server    serveur QUIC : simulation 20 Hz, colonnes, éditions, comptes ;
+                               fenêtre d'administration (carte, console, mesures, joueurs)
   client/     nascio-client    connexion au serveur, miroir des colonnes, entités
   tools/      nascio-tools     outils de développement : chunkbench, topview, geology, coupes
-  viewer/     nascio-viewer    visualiseur Bevy : cartes 2D + vue 3D en vol libre
+  viewer/     nascio-viewer    client Bevy : menu, connexion, vue 3D, chat ; vol libre local
 docs/
 out/          sorties générées (PNG, mondes de test), ignorées par git
 ```
 Plus tard : `web`.
 
-Sens des dépendances : `core` ← `chunk` ← `world` ← `worldgen` et `voxel` ; `protocol` et `client` ne dépendent que de `core` et `chunk` ; `server` dépend de `voxel` et `protocol` ; `tools` et `viewer` dépendent de tout. `voxel` ne dépend pas de `worldgen` (sauf pour ses tests). **`core` ne dépend d'aucun moteur graphique.** **`client` ne dépend d'aucune crate de génération** (`world`, `worldgen`, `voxel`), ce que vérifie `crates/client/tests/no_generation.rs`.
+Sens des dépendances : `core` ← `chunk` ← `world` ← `worldgen` et `voxel` ; `protocol` et `client` ne dépendent que de `core` et `chunk` ; `server` dépend de `voxel` et `protocol` (et, pour sa fenêtre, fonctionnalité `gui` active par défaut, de `worldgen`, Bevy et bevy_egui) ; `tools` et `viewer` dépendent de tout. `voxel` ne dépend pas de `worldgen` (sauf pour ses tests). **`core` ne dépend d'aucun moteur graphique.** **`client` ne dépend d'aucune crate de génération** (`world`, `worldgen`, `voxel`), ce que vérifie `crates/client/tests/no_generation.rs`.
 
 ## Invariants à ne jamais violer
 1. **Le tore partout.** Les coordonnées horizontales (x, z) sont périodiques, de période `WORLD_SIZE = 100_000`. Toute différence, distance, voisinage ou interpolation passe par les fonctions de `nascio-core::torus` (`wrap`, `delta`, `distance`…). On ne soustrait **jamais** deux coordonnées brutes. Les tests doivent couvrir les cas qui traversent la couture.
@@ -65,8 +66,11 @@ Sens des dépendances : `core` ← `chunk` ← `world` ← `worldgen` et `voxel`
 cargo build --workspace
 cargo test --workspace
 cargo run -p nascio-worldgen --release -- generate --seed 42 --out out/world-42
-cargo run -p nascio-viewer --release -- out/world-42
+cargo run -p nascio-server --release            # boîte de démarrage : monde existant ou nouveau, options
+cargo run -p nascio-server --release -- out/server/world-42 --data out/server/data --open-registration --nogui
+cargo run -p nascio-viewer --release -- out/server/world-42
 ```
+Le serveur ouvre sa fenêtre sur la boîte de démarrage (`--nogui` pour s'en passer, avec le dossier du monde) ; le client ouvre son menu (`--fly` : vol libre local sans serveur).
 
 ## Profils de compilation (Bevy)
 - `[profile.dev] opt-level = 1` et `[profile.dev.package."*"] opt-level = 3`.
