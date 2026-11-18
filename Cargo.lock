@@ -4441,6 +4441,7 @@ dependencies = [
  "rcgen",
  "ring",
  "serde",
+ "socket2",
  "tokio",
  "toml",
 ]

@@ -35,6 +35,8 @@ pub struct Shared {
     pub sent_bytes: AtomicU64,
     pub sent_columns: AtomicU64,
     pub accounts: Accounts,
+    /// Secret hashes computed at once (`account_hash_concurrency`).
+    pub hashing: tokio::sync::Semaphore,
     pub abuse: AbuseLog,
     pub logins: LoginGuard,
     /// Players online, by account name.
@@ -278,6 +280,14 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         while let Some(f) = read_frame(&mut recv, &mut de, &mut buf).await? {
             let now = Instant::now();
             if !control.take(now) {
+                let msg = from_bytes::<ClientMsg>(&f)?;
+                // A backlog sent at once after a stall of the link: positions (the next
+                // one supersedes them) and acks (advisory) are dropped without counting
+                // toward a kick.
+                if matches!(msg, ClientMsg::Move { .. } | ClientMsg::Ack { .. }) {
+                    abuse("burst", "position or ack over the limit, dropped");
+                    continue;
+                }
                 violations += 1;
                 abuse("flood", "message over the limit");
                 if violations >= cfg.kick_after_violations {
@@ -392,6 +402,8 @@ async fn login(shared: &Arc<Shared>, ip: IpAddr, name: &str, secret: &str) -> Re
         secret.to_owned(),
         cfg.open_registration,
     );
+    // A rush of logins waits here rather than taking every core.
+    let _permit = shared.hashing.acquire().await.map_err(|e| format!("{e}"))?;
     let r = tokio::task::spawn_blocking(move || sh.accounts.login(&n, &s, open, unix_ms()))
         .await
         .map_err(|e| format!("{e}"))?;

@@ -122,7 +122,7 @@ cd ~/nascio
 ./target/release/nascio-server ~/nascio-s6/world-42 --data ~/nascio-s6/data --bind 0.0.0.0:7777 2>&1 | tee ~/nascio-s6/server-500.log
 ```
 
-**Linux, terminal 2 : CPU et mémoire du serveur toutes les 10 s.** Lance-le une fois le serveur démarré, avant les bots :
+**Linux, terminal 2 : CPU et mémoire du serveur toutes les 10 s.** Lance-le une fois le serveur démarré, avant les bots. Si tu relances le serveur, relance aussi `pidstat` : il suit un numéro de processus.
 ```bash
 pidstat -u -r -h -p "$(pgrep -f target/release/nascio-server)" 10 | tee ~/nascio-s6/pidstat-500.log
 ```
@@ -134,7 +134,7 @@ mpstat -P ALL 10 | tee ~/nascio-s6/mpstat-500.log
 
 **Windows : les bots.** 500 bots, connexion en 10 s, 20 s de stabilisation, 5 minutes de mesure :
 ```powershell
-.\target\release\swarm.exe <IP_LINUX>:7777 out\s6-linux-cert.der --bots 500 --settle 20 --duration 300 | Tee-Object out\s6-swarm-500.log
+.\target\release\swarm.exe <IP_LINUX>:7777 out\s6-linux-cert.der --bots 500 --settle 20 --duration 300 2>&1 | Tee-Object out\s6-swarm-500.log
 ```
 Pendant la mesure, garde le Gestionnaire des tâches ouvert sur le PC (onglet Performance). Note le CPU de `swarm.exe` et l'usage réseau, deux ou trois fois.
 

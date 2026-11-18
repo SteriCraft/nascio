@@ -45,6 +45,12 @@ pub struct ServerConfig {
     /// Argon2id cost of new accounts: memory (KiB) and passes.
     pub account_hash_kib: u32,
     pub account_hash_passes: u32,
+    /// Secret hashes computed at once (0: half the cores). Logins beyond wait their turn
+    /// instead of taking every core during a rush of connections.
+    pub account_hash_concurrency: usize,
+    /// Receive and send buffers asked for the UDP socket, bytes (0: the system default).
+    /// On Linux the kernel caps them at `net.core.rmem_max` / `wmem_max`.
+    pub udp_buffer_bytes: usize,
     /// Failed logins allowed per address and minute.
     pub login_failures_per_min: usize,
     /// Control messages a client may send per second, and in a burst.
@@ -88,6 +94,8 @@ impl Default for ServerConfig {
             open_registration: true,
             account_hash_kib: 19 * 1024,
             account_hash_passes: 2,
+            account_hash_concurrency: 0,
+            udp_buffer_bytes: 4 << 20,
             login_failures_per_min: 5,
             control_msgs_per_s: 200.0,
             control_burst: 400.0,

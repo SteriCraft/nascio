@@ -60,6 +60,29 @@ pub fn certificate(dir: &Path) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     Ok((c, k))
 }
 
+/// The server's UDP socket, with larger buffers: a rush of connections otherwise overflows
+/// the system's default receive buffer, and the lost handshake packets wait for QUIC's
+/// retransmission timers.
+fn udp_socket(bind: SocketAddr, buffer: usize) -> anyhow::Result<std::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let s = Socket::new(Domain::for_address(bind), Type::DGRAM, Some(Protocol::UDP))?;
+    if buffer > 0 {
+        // Best effort: the system may cap them (Linux: net.core.rmem_max / wmem_max).
+        let _ = s.set_recv_buffer_size(buffer);
+        let _ = s.set_send_buffer_size(buffer);
+        let got = s.recv_buffer_size().unwrap_or(0);
+        if got < buffer {
+            eprintln!(
+                "UDP receive buffer {} KiB instead of {} KiB (Linux: raise net.core.rmem_max)",
+                got >> 10,
+                buffer >> 10
+            );
+        }
+    }
+    s.bind(&bind.into())?;
+    Ok(s.into())
+}
+
 impl RunningServer {
     /// Starts a server for `world`; deltas and the certificate live in `data_dir`
     /// (`deltas/`, `server/`). Call from inside a tokio runtime.
@@ -128,8 +151,14 @@ impl RunningServer {
         let per_tick = (cfg.client_budget_bytes_per_s / cfg.tick_hz.max(1)) as usize;
         transport.datagram_send_buffer_size(4 * per_tick.max(cfg.max_datagram_bytes));
         server_cfg.transport_config(Arc::new(transport));
-        let endpoint = quinn::Endpoint::server(server_cfg, cfg.bind)
+        let socket = udp_socket(cfg.bind, cfg.udp_buffer_bytes)
             .with_context(|| format!("listening on {}", cfg.bind))?;
+        let endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(server_cfg),
+            socket,
+            quinn::default_runtime().context("no async runtime")?,
+        )?;
         let addr = endpoint.local_addr()?;
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -182,7 +211,12 @@ impl RunningServer {
                 .map_err(|e| anyhow::anyhow!("argon2 parameters: {e}"))?,
         )?;
         let abuse = security::AbuseLog::open(&server_dir.join("abuse.log"))?;
+        let hash_permits = match cfg.account_hash_concurrency {
+            0 => (std::thread::available_parallelism().map_or(2, |n| n.get()) / 2).max(1),
+            n => n,
+        };
         let shared = Arc::new(net::Shared {
+            hashing: tokio::sync::Semaphore::new(hash_permits),
             accounts,
             abuse,
             logins: Default::default(),

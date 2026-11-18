@@ -22,6 +22,7 @@ rcgen.workspace = true
 rayon.workspace = true
 argon2.workspace = true
 ring.workspace = true
+socket2.workspace = true
 
 [dev-dependencies]
 nascio-worldgen.workspace = true

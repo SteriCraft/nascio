@@ -44,3 +44,30 @@ Ryzen 5 5500 (6 cœurs, 12 fils), Windows. **Le serveur et `swarm` tournent sur 
 ## Questions
 1. As-tu une seconde machine, ou un serveur Linux, pour refaire S6 avec les bots séparés ? C'est la seule façon de mesurer le serveur seul.
 2. 500 joueurs dans 200 m, c'est l'hypothèse de bataille de la roadmap. Faut-il viser plus, par exemple 1 000 dans la même zone ? Au-delà, il faudrait réduire `entity_fast` ou le rayon, ou ajouter un niveau de détail pour les entités lointaines.
+
+## Mesure sur deux machines (2026-11-18)
+Procédure : `serveur-S6-deux-machines.md`. Le serveur tourne sur le portable Linux de l'auteur : Ryzen 5 5600H (6 cœurs, 12 fils), 13 Gio, Ubuntu 24.04. `swarm` tourne sur le PC Windows (Ryzen 5 5500). **Liaison en Wi-Fi**, aucune liaison câblée possible. Monde de référence, fenêtre de 300 s.
+
+| | joueurs | tick p50 | tick p99 | réplication p99 | par bot reçu (p50 / p99 / max) | datagrammes / bot / s | clients sautés |
+|---|---|---|---|---|---|---|---|
+| 500 bots | 428 | 7,3 à 7,8 ms, stable | 11,6 à 14,3 ms | 7,5 à 7,9 ms | 18,3 / 21,3 / 22,2 Ko/s | 16,4 | ~25 % des envois |
+| 250 bots | 248 | 5,0 → 5,65 ms en 3 min, puis plat | 6,8 à 7,1 ms (10,6 au plus) | 4,4 ms | 16,4 / 17,7 / 18,1 Ko/s | 19,8 | seulement pendant la montée en charge |
+
+- **Plus de changement de régime.** Le tick médian reste stable sur 5 minutes dans les deux mesures. La dérive de 7 à 35-40 ms venait bien de la cohabitation du serveur et de `swarm` sur la même machine.
+- **Critères du jalon atteints** : tick p99 < 50 ms (14,3 ms au pire) ; débit par client ≤ 128 Ko/s (22 Ko/s au plus).
+- **CPU, à 250 bots** : environ 1 cœur pour le serveur. Le portable passe de 1,5 % au repos à environ 9,5 % pendant la mesure (`mpstat`, 12 fils), et aucun cœur ne sature. `pidstat` avait suivi un serveur arrêté entre-temps, donc ni le CPU ni la mémoire du processus n'ont été mesurés en charge.
+- **Réseau, à 250 bots** : 41 Mbit/s en sortie (32 Mbit/s de charge utile mesurés par `swarm`), 14 700 paquets par seconde en sortie, 12 400 en entrée. Aucune perte sur l'interface. En revanche, des erreurs de réception UDP du noyau apparaissent pendant la rafale des connexions (75 par seconde pendant 10 s).
+- **À 500 bots, le Wi-Fi sature** (environ 63 Mbit/s utiles). Un quart des envois est sauté parce que le lien est plein, et des coupures provoquent des événements `flood` : le client renvoie d'un coup les messages accumulés. Le serveur, lui, tient : son tick est le même qu'à 250 bots, à 2 ms près.
+- **Connexions perdues pendant la montée en charge** : 72 sur 500, puis 2 sur 250 (`bot160`, `bot170` : « handshake timed out »). Le serveur avait bien reçu leur connexion, mais il a répondu trop tard. C'est le moment où le tampon UDP déborde et où les hachages Argon2id se cumulent.
+- Les événements `speed` du journal venaient de `swarm`, qui téléportait chaque bot de son point d'apparition à sa place dans le disque.
+
+### Corrections après la mesure
+1. **Tampons UDP du serveur** : 4 Mio demandés en réception et en émission (`udp_buffer_bytes`). Le serveur crée lui-même sa socket, avec `socket2` =0.6.5, déjà présent dans les dépendances de tokio. Si le système accorde moins, le serveur l'affiche au démarrage. Sous Linux, le plafond est `net.core.rmem_max` : le réglage `sysctl` de la marche à suivre ne servait à rien tant que le serveur ne demandait pas plus.
+2. **Hachages limités** : au plus `account_hash_concurrency` hachages Argon2id à la fois, la moitié des cœurs par défaut. Une rafale de connexions attend son tour au lieu d'occuper toute la machine.
+3. **Rafale après une coupure** : au-delà de la limite de messages, les `Move` et les `Ack` sont jetés sans compter pour l'expulsion. Le `Move` suivant remplace les précédents, et les acquittements ne sont qu'indicatifs. Ces événements sont journalisés sous le type `burst`. Les autres messages restent comptés : une inondation de `Ping` est toujours expulsée.
+4. **`swarm`** : un bot part du point d'apparition et marche jusqu'à sa place à 80 m/s, sous la limite du serveur. Il applique `Correct`, et le bilan compte les corrections. En local, 50 bots : 0 événement `speed`, 0 correction.
+5. Le test `security.rs` couvre la rafale : 1 000 `Move` et 1 000 `Ack` d'un coup, client toujours connecté. Il couvre aussi la file des hachages (`account_hash_concurrency` = 1).
+
+### Reste
+- Refaire 250 bots avec ces corrections : les connexions perdues pendant la montée en charge doivent disparaître. Lancer `pidstat` **après** le serveur.
+- 500 bots demandent une liaison câblée, ou un second PC de bots sur un autre point d'accès.

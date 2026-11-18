@@ -1,6 +1,7 @@
 //! S7 validation: abuses are refused and logged — wrong secret, repeated failed logins, a
 //! second session, message and edit floods, edits out of reach, teleports — and the
-//! administrator can kick a player.
+//! administrator can kick a player. A backlog of positions and acks sent at once (after a
+//! stall of the link) is dropped without a kick.
 
 use std::time::Duration;
 
@@ -18,6 +19,8 @@ fn cfg() -> ServerConfig {
         // Cheap hashes for the test.
         account_hash_kib: 256,
         account_hash_passes: 1,
+        // One hash at a time: logins queue.
+        account_hash_concurrency: 1,
         login_failures_per_min: 3,
         control_msgs_per_s: 50.0,
         control_burst: 100.0,
@@ -63,6 +66,7 @@ async fn abuses_are_refused_and_logged() {
     let mut alice = connect(addr, &cert, "alice", "alice-secret").await.unwrap();
     // Logged in before the failures below (they block this address for a minute).
     let mut dave = connect(addr, &cert, "dave", "dave-secret").await.unwrap();
+    let mut erin = connect(addr, &cert, "erin", "erin-secret").await.unwrap();
     assert!(server.shared.accounts.exists("alice"));
     let e = connect(addr, &cert, "alice", "not-her-secret")
         .await
@@ -133,6 +137,26 @@ async fn abuses_are_refused_and_logged() {
     let m = wait_for(&mut alice, 20, |m| matches!(m, ServerMsg::Kick { .. })).await;
     assert!(format!("{m:?}").contains("test over"));
 
+    // A backlog of positions and acks after a stall of the link: dropped, never a kick
+    // (the flood below, of pings, is kicked after 300 refusals).
+    let at = erin.hello.spawn;
+    for k in 0..1_000 {
+        erin.send(ClientMsg::Move {
+            pos: [at[0] + f64::from(k % 2), at[1], at[2]],
+            yaw: 0.0,
+            pitch: 0.0,
+        });
+        erin.send(ClientMsg::Ack { seqs: vec![k] });
+    }
+    // The bucket refills (50 per second); erin still answers.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    erin.send(ClientMsg::Ping { client_ms: 7 });
+    let m = wait_for(&mut erin, 20, |m| {
+        matches!(m, ServerMsg::Pong { .. } | ServerMsg::Kick { .. })
+    })
+    .await;
+    assert!(matches!(m, ServerMsg::Pong { client_ms: 7, .. }), "{m:?}");
+
     // A flood of messages: dropped, then the client is kicked.
     for k in 0..2_000 {
         dave.send(ClientMsg::Ping { client_ms: k });
@@ -142,7 +166,7 @@ async fn abuses_are_refused_and_logged() {
 
     // Everything is in the abuse log.
     let log = std::fs::read_to_string(dir.join("server").join("abuse.log")).unwrap();
-    for kind in ["login", "reach", "edits", "speed", "flood", "kick"] {
+    for kind in ["login", "reach", "edits", "speed", "flood", "kick", "burst"] {
         assert!(
             log.lines().any(|l| l.split('\t').nth(3) == Some(kind)),
             "no {kind} in the log:\n{log}"

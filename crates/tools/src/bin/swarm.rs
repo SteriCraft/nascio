@@ -64,6 +64,9 @@ impl Lcg {
     }
 }
 
+/// Speed at which a bot walks from the spawn to its place, m/s (below the server's limit).
+const APPROACH_M_S: f64 = 80.0;
+
 /// Counters of one bot (shared with the reporter).
 #[derive(Default)]
 struct Counters {
@@ -75,6 +78,7 @@ struct Counters {
     edits: AtomicU64,
     refused: AtomicU64,
     errors: AtomicU64,
+    corrected: AtomicU64,
 }
 
 #[tokio::main]
@@ -181,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
         println!("bots seeing no entity: {}", blind.join(", "));
     }
     println!(
-        "entities seen per bot: min {}, mean {:.0}, max {}; columns received in all {}; edits {} (refused {}); errors {}",
+        "entities seen per bot: min {}, mean {:.0}, max {}; columns received in all {}; edits {} (refused {}); corrections {}; errors {}",
         seen.iter().min().unwrap_or(&0),
         seen.iter().sum::<usize>() as f64 / n,
         seen.iter().max().unwrap_or(&0),
@@ -193,6 +197,10 @@ async fn main() -> anyhow::Result<()> {
         counters
             .iter()
             .map(|c| c.refused.load(Ordering::Relaxed))
+            .sum::<u64>(),
+        counters
+            .iter()
+            .map(|c| c.corrected.load(Ordering::Relaxed))
             .sum::<u64>(),
         counters
             .iter()
@@ -228,6 +236,9 @@ async fn bot(k: usize, cli: &Cli, cert: &[u8], c: &Counters, until: Instant) -> 
     let edit_every = cli.bots as f64 / cli.edits.max(1e-9);
     let mut next_edit = rng.next() * edit_every;
     let mut placed = false;
+    // Where the server has the bot: it starts at the spawn and walks to its place in the
+    // disc below the server's speed limit (no teleport), and follows `Correct`.
+    let mut at = conn.hello.spawn;
     let mut every = tokio::time::interval(Duration::from_millis(50));
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     while Instant::now() < until {
@@ -240,11 +251,26 @@ async fn bot(k: usize, cli: &Cli, cert: &[u8], c: &Counters, until: Instant) -> 
                 }
                 off[0] += heading.cos() * cli.speed * 0.05;
                 off[1] += heading.sin() * cli.speed * 0.05;
-                let pos = [
+                let goal = [
                     torus::wrap_f64(centre[0] + off[0]),
                     centre[1],
                     torus::wrap_f64(centre[2] + off[1]),
                 ];
+                let d = [
+                    torus::delta_f64(at[0], goal[0]),
+                    goal[1] - at[1],
+                    torus::delta_f64(at[2], goal[2]),
+                ];
+                let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                let step = (APPROACH_M_S * 0.05).min(len);
+                if len > 0.0 {
+                    at = [
+                        torus::wrap_f64(at[0] + d[0] / len * step),
+                        at[1] + d[1] / len * step,
+                        torus::wrap_f64(at[2] + d[2] / len * step),
+                    ];
+                }
+                let pos = at;
                 conn.send(ClientMsg::Move { pos, yaw: heading as f32, pitch: 0.0 });
                 let t = begin.elapsed().as_secs_f64();
                 if t >= next_edit && t > 5.0 {
@@ -270,6 +296,10 @@ async fn bot(k: usize, cli: &Cli, cert: &[u8], c: &Counters, until: Instant) -> 
                         Err(_) => { c.errors.fetch_add(1, Ordering::Relaxed); }
                     }
                     c.seen.store(ents.len(), Ordering::Relaxed);
+                }
+                Some(Event::Msg(ServerMsg::Correct { pos })) => {
+                    at = pos;
+                    c.corrected.fetch_add(1, Ordering::Relaxed);
                 }
                 Some(Event::Msg(ServerMsg::EditRefused { .. })) => {
                     c.refused.fetch_add(1, Ordering::Relaxed);
