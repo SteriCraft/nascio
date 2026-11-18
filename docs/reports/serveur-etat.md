@@ -5,7 +5,7 @@
 **Consignes de la nuit (2026-11-18)** : étapes dans l'ordre (C0, S0, S1, S2…) ; décisions dans `decisions.md` (raison + alternative écartée) ; rapport court `docs/reports/serveur-<étape>.md` par étape ; un commit par étape, **pas de push** ; spec inchangée (texte proposé dans `docs/reports/spec-proposee.md`) ; ne pas décider ce qui touche au gameplay, aux invariants de `CLAUDE.md` ou à `generator_version` (le noter, continuer) ; tests verts avant l'étape suivante ; ce fichier à jour à chaque commit. Le matin : synthèse de tous les rapports. Reprise automatique prévue à 2 h 15 (tâche de session).
 
 ## Étape en cours
-Phase Serveur et réseau validée par l'auteur, S6 compris : mesure sur deux machines, en Wi-Fi, à 250 et 500 bots. Le changement de régime a disparu. Corrections de la mesure faites : tampons UDP, hachages limités, rafales après coupure, `swarm` sans téléportation. Le tout est poussé. Prochaine étape : les chantiers de l'auteur (voir « Prochaine action »).
+Phase Serveur et réseau validée par l'auteur, S6 compris : mesure sur deux machines, en Wi-Fi, à 250 et 500 bots. Le changement de régime a disparu. Corrections de la mesure faites : tampons UDP, hachages limités, rafales après coupure, `swarm` sans téléportation. Le tout est poussé. Chantiers de l'auteur : **chantier 1 fait** (crate `nascio-chunk`, protocole v5, rapport `chantier-1.md`), non poussé ; en attente de la revue de l'auteur.
 
 ## Fait
 - Roadmap serveur écrite (`docs/roadmap-serveur.md`).
@@ -22,7 +22,7 @@ Phase Serveur et réseau validée par l'auteur, S6 compris : mesure sur deux mac
 
 ## Prochaine action
 Chantiers décidés par l'auteur (`decisions.md`, décisions du 2026-11-18), dans l'ordre proposé :
-1. crate `nascio-chunk` séparée de la génération (définitions des blocs envoyées à la connexion, protocole v5) ;
+1. ~~crate `nascio-chunk` séparée de la génération (définitions des blocs envoyées à la connexion, protocole v5)~~ fait (`chantier-1.md`) ; texte proposé pour `CLAUDE.md` dans le rapport ;
 2. comptes : invitation, bannissement, jetons Ed25519 émis par le site ;
 3. sites d'apparition et point par compte (calculés au démarrage du serveur, sans toucher `generator_version`) ;
 4. horizon en tuiles et climat réduit envoyés par le serveur ;
@@ -33,6 +33,7 @@ Questions encore ouvertes pour l'auteur : la définition exacte des classes de t
 Ancienne note de la nuit (la synthèse a été faite) : Le matin, il demandera une synthèse de tous les rapports (`serveur-C0.md` … `serveur-S7.md`, `spec-proposee.md`) : ce qui est fait, mesures clés, décisions, et la liste regroupée des questions ouvertes (hébergement, budget, rayons, gameplay : point d'apparition, mouvement/collision, vitesse/portée ; invariant 5 : ciel/horizon du client, types de chunk ; inscription, bannissement ; seconde machine pour S6). Rien n’est poussé : 10 commits locaux de la phase (C0 à S7, S4 en deux).
 
 ## Décisions prises
+- Chantier 1 : crate `nascio-chunk` (blocs, chunks, teinte, maillage ; sans zstd ni bruit), réexportée par `world`/`voxel` ; codec v2 et `Column` restent dans `protocol` ; v5 = définitions des blocs dans `ServerHello` ; garde-fou `crates/client/tests/no_generation.rs`.
 - C0 : écriture durable (tmp, fsync, rename, fsync du dossier sous Unix) ; pas de fsync du dossier sous Windows.
 - S0 : codec v2 = varint dans l'ordre des indices + zstd-3 par colonne ; crate `zstd` ; fsync groupé toutes les 50 ms ; budget de 128 Ko/s par client.
 - S1 : journal global, écriture immédiate + `flush` groupé ; fin invalide du dernier segment retirée, ailleurs refus ; le visualiseur fait un `flush` à chaque édition.
