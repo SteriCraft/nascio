@@ -76,6 +76,7 @@ async fn an_edit_is_seen_by_every_client_and_survives_a_restart() {
     a.send(ClientMsg::SetBlock {
         pos: [p.x, p.y, p.z],
         block: granite,
+        cmd: None,
     });
     pump(&mut a, &mut ma, |m| m.block(p) == Some(granite)).await;
     pump(&mut b, &mut mb, |m| m.block(p) == Some(granite)).await;
@@ -84,6 +85,7 @@ async fn an_edit_is_seen_by_every_client_and_survives_a_restart() {
     a.send(ClientMsg::SetBlock {
         pos: [p.x + 20_000, p.y, p.z],
         block: granite,
+        cmd: None,
     });
     let refused = loop {
         match a.next(Duration::from_secs(5)).await {

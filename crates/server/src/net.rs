@@ -53,7 +53,7 @@ pub struct Shared {
     pub accounts: Accounts,
     /// Secret hashes computed at once (`account_hash_concurrency`).
     pub hashing: tokio::sync::Semaphore,
-    pub abuse: AbuseLog,
+    pub abuse: Arc<AbuseLog>,
     pub logins: LoginGuard,
     /// Checks the site's tokens (`None`: no `site_public_key`, tokens refused).
     pub tokens: Option<crate::token::Verifier>,
@@ -155,6 +155,21 @@ impl Shared {
             .link
             .out
             .send(ServerMsg::Chat(Chat::Admin(chat_text(text))));
+        true
+    }
+
+    /// Flight on or off for a player online (console); false if not online.
+    pub fn fly(&self, name: &str, on: bool) -> bool {
+        let id = match self
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+        {
+            Some(s) => s.id,
+            None => return false,
+        };
+        self.input(Input::Msg(id, ClientMsg::Fly(on)));
         true
     }
 
@@ -288,6 +303,8 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     let link = Arc::new(PlayerLink {
         id,
         name: hello.name,
+        spawn: sh.spawn,
+        ip,
         out,
         subs: Mutex::new(BTreeSet::new()),
         view: Mutex::new(View {
@@ -359,8 +376,8 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         }
     });
 
-    // Movement commands, in datagrams, queued for the simulation (which applies them from
-    // 5.3 on); the orientation of the newest one is replicated to the others.
+    // Movement commands, in datagrams, queued for the simulation; the orientation of the
+    // newest one is replicated to the others.
     let (c4, l4, s4, n4) = (conn.clone(), link.clone(), shared.clone(), name.clone());
     let inputs = tokio::spawn(async move {
         let cfg = &s4.cfg;
@@ -468,30 +485,17 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
                         server_unix_ms: unix_ms(),
                     });
                 }
-                ClientMsg::SetBlock { pos, block } => {
-                    let refused = if !edits.take(now) {
+                ClientMsg::SetBlock { pos, block, cmd } => {
+                    // Reach and room are checked by the simulation, from the eyes after `cmd`.
+                    if edits.take(now) {
+                        shared.input(Input::Msg(id, ClientMsg::SetBlock { pos, block, cmd }));
+                    } else {
                         violations += 1;
                         abuse("edits", "edit over the limit");
-                        Some("too many edits".to_owned())
-                    } else {
-                        let at = [
-                            f64::from(pos[0]) + 0.5,
-                            f64::from(pos[1]) + 0.5,
-                            f64::from(pos[2]) + 0.5,
-                        ];
-                        let here = link.view.lock().unwrap_or_else(|e| e.into_inner()).pos;
-                        let d = distance(here, at);
-                        (cfg.edit_reach_m > 0.0 && d > cfg.edit_reach_m).then(|| {
-                            violations += 1;
-                            abuse("reach", &format!("edit {d:.0} m away"));
-                            format!("out of reach ({d:.0} m)")
-                        })
-                    };
-                    match refused {
-                        Some(reason) => {
-                            let _ = link.out.send(ServerMsg::EditRefused { pos, reason });
-                        }
-                        None => shared.input(Input::Msg(id, ClientMsg::SetBlock { pos, block })),
+                        let _ = link.out.send(ServerMsg::EditRefused {
+                            pos,
+                            reason: "too many edits".to_owned(),
+                        });
                     }
                     if violations >= cfg.kick_after_violations {
                         abuse("kick", "too many refused messages");
@@ -500,6 +504,18 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
                         });
                         tokio::time::sleep(Duration::from_millis(200)).await;
                         break;
+                    }
+                }
+                ClientMsg::Fly(on) => {
+                    // Asked at each request: `admin <name> off` takes effect at once.
+                    if shared.accounts.is_admin(&name) {
+                        shared.input(Input::Msg(id, ClientMsg::Fly(on)));
+                    } else {
+                        violations += 1;
+                        abuse(
+                            "fly",
+                            "flight asked by a player who is not an administrator",
+                        );
                     }
                 }
                 ClientMsg::Chat { text } => {
@@ -590,12 +606,6 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     inputs.abort();
     conn.close(0u32.into(), b"bye");
     result
-}
-
-/// Distance on the torus, metres.
-fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
-    let (dx, dz) = (torus::delta_f64(a[0], b[0]), torus::delta_f64(a[2], b[2]));
-    (dx * dx + (b[1] - a[1]).powi(2) + dz * dz).sqrt()
 }
 
 /// Checks a login — a token from the site, or a secret (hashed on a blocking thread) when

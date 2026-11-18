@@ -107,7 +107,15 @@ async fn main() -> anyhow::Result<()> {
                         inputs: vec![step; 3],
                     });
                     last += 3;
-                    while c.events.try_recv().is_ok() {}
+                    // Steps the server took without commands are numbered after ours: the
+                    // next commands follow its acknowledgement.
+                    while let Ok(ev) = c.events.try_recv() {
+                        if let nascio_client::Event::Player(p) = ev
+                            && let Some(a) = p.ack
+                        {
+                            last = last.max(a + 3);
+                        }
+                    }
                 }
             }
             c.close();

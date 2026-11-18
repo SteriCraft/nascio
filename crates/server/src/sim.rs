@@ -1,23 +1,30 @@
 //! The simulation: one thread, a fixed tick. Inputs of a tick are applied in increasing
-//! player id order (arrival order within a player); block changes are broadcast at the end
-//! of the tick, one message per modified chunk, to the players holding its column.
+//! player id order (arrival order within a player); then the edits ready, in player id
+//! order; block changes are broadcast at the end of the edits, one message per modified
+//! chunk, to the players holding its column; then every body moves ([`crate::movement`])
+//! against the blocks of [`WorldView`]; last, each player gets its state and the entities.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use nascio_chunk::BlockId;
 use nascio_core::coords::BlockPos;
-use nascio_protocol::messages::{ClientMsg, ServerMsg};
+use nascio_physics::{Mode, PlayerParams, Shapes};
+use nascio_protocol::ServerDatagram;
+use nascio_protocol::entity::QState;
+use nascio_protocol::messages::{ClientMsg, DeathCause, ServerMsg};
+use nascio_protocol::player::{InputQueue, PlayerState};
 use nascio_voxel::DeltaStore;
+use rayon::prelude::*;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::columns::{ColumnCache, wrap_column};
+use crate::movement::{Body, Rules, reach, solid_top};
 use crate::replicate::{Entity, Grid, ReplConfig, Replicator};
-use nascio_protocol::entity::QState;
-use nascio_protocol::player::InputQueue;
-use rayon::prelude::*;
+use crate::world_view::WorldView;
 
 /// Block changes of one chunk in a tick: number of the last edit, `(index, block)` in order.
 type Changes = (u64, Vec<(u16, u16)>);
@@ -35,15 +42,20 @@ pub struct View {
 pub struct PlayerLink {
     pub id: u32,
     pub name: String,
+    /// The account's spawn point (arrival and respawn).
+    pub spawn: [f64; 3],
+    /// Address of the connection (abuse log).
+    pub ip: std::net::IpAddr,
     /// Control messages to the player.
     pub out: UnboundedSender<ServerMsg>,
     /// Columns sent to the player or on their way (it gets their block changes).
     pub subs: Mutex<BTreeSet<(i32, i32)>>,
+    /// Position from the simulation; heading and pitch from the newest commands.
     pub view: Mutex<View>,
-    /// Entity datagrams, handed to the connection by a network task: the simulation never
-    /// waits on a connection's lock (`None`: tests without a connection).
+    /// Datagrams (state, entities), handed to the connection by a network task: the
+    /// simulation never waits on a connection's lock (`None`: tests without a connection).
     pub datagrams: Option<UnboundedSender<Vec<u8>>>,
-    /// Bytes of entity datagrams queued and not yet handed to the connection.
+    /// Bytes of datagrams queued and not yet handed to the connection.
     pub queued: AtomicUsize,
     /// Largest datagram the path allows, bytes (0: unknown), kept by the network task.
     pub max_datagram: AtomicUsize,
@@ -53,8 +65,8 @@ pub struct PlayerLink {
     /// Entity bytes sent since the column streamer last looked (shared budget).
     pub entity_bytes: AtomicU64,
     /// Horizon tiles asked and not sent yet, oldest first (sent after the near columns).
-    pub tiles: Mutex<std::collections::VecDeque<nascio_chunk::horizon::TileKey>>,
-    /// Movement commands received and not applied yet (applied by the simulation in 5.3).
+    pub tiles: Mutex<VecDeque<nascio_chunk::horizon::TileKey>>,
+    /// Movement commands received and not applied yet.
     pub inputs: Mutex<InputQueue>,
 }
 
@@ -64,6 +76,7 @@ pub const MAX_QUEUED_COMMANDS: usize = 64;
 pub enum Input {
     Join(Arc<PlayerLink>),
     Leave(u32),
+    /// A message of the player; `Fly` comes only from an administrator or the console.
     Msg(u32, ClientMsg),
 }
 
@@ -79,10 +92,19 @@ pub struct SimStats {
     pub entity_bytes: u64,
     /// Client ticks skipped because the client's link was full.
     pub entity_skipped: u64,
+    /// Steps taken: from commands, and without commands (quiet clients).
+    pub steps: u64,
+    pub filled_steps: u64,
+    pub deaths: u64,
+    /// Columns decoded for the simulation, and their bytes.
+    pub sim_columns: usize,
+    pub sim_column_bytes: usize,
     /// Durations of the last ticks, µs (at most 1 200: one minute at 20 Hz).
     pub recent_us: Vec<u32>,
     /// The entity replication part of them, µs.
     pub recent_repl_us: Vec<u32>,
+    /// The movement part of them, µs.
+    pub recent_move_us: Vec<u32>,
 }
 
 impl SimStats {
@@ -94,6 +116,11 @@ impl SimStats {
     /// Percentile `q` of the recent replication durations, ms.
     pub fn repl_ms(&self, q: f64) -> f64 {
         percentile(&self.recent_repl_us, q)
+    }
+
+    /// Percentile `q` of the recent movement durations, ms.
+    pub fn move_ms(&self, q: f64) -> f64 {
+        percentile(&self.recent_move_us, q)
     }
 }
 
@@ -107,107 +134,89 @@ fn percentile(v: &[u32], q: f64) -> f64 {
     f64::from(v[((v.len() - 1) as f64 * q) as usize]) / 1e3
 }
 
+/// An edit waiting for the command it was made after.
+struct Edit {
+    pos: [i32; 3],
+    block: u16,
+    cmd: Option<u32>,
+    /// Tick it arrived.
+    since: u32,
+}
+
+/// A player in the simulation.
+struct Player {
+    link: Arc<PlayerLink>,
+    body: Body,
+    edits: VecDeque<Edit>,
+    /// Edits refused out of reach (the first and every hundredth are logged).
+    out_of_reach: u64,
+    repl: Replicator,
+    /// The `PlayerState` datagram of this tick, sent with the entities.
+    state: Option<Vec<u8>>,
+}
+
 pub struct Sim {
     pub deltas: Arc<DeltaStore>,
     pub cache: Arc<ColumnCache>,
     pub blocks: usize,
     pub tick: Duration,
+    pub tick_hz: u32,
     pub stats: Arc<Mutex<SimStats>>,
     pub repl: ReplConfig,
     /// Pool of the replication (small: the network threads need the cores too).
     pub pool: rayon::ThreadPool,
+    pub player: PlayerParams,
+    pub shapes: Shapes,
+    pub magma: Option<BlockId>,
+    /// Farthest cell a player may edit from its eyes, m (0: not checked).
+    pub edit_reach_m: f64,
+    /// Columns decoded for the simulation (about).
+    pub sim_columns: usize,
+    /// The runtime that builds the columns.
+    pub rt: tokio::runtime::Handle,
+    pub abuse: Arc<crate::security::AbuseLog>,
 }
+
+/// Slack of the reach for rounding, m.
+const REACH_SLACK_M: f64 = 0.01;
 
 impl Sim {
     pub fn run(self, rx: Receiver<Input>, stop: Arc<AtomicBool>) {
-        let mut players: BTreeMap<u32, Arc<PlayerLink>> = BTreeMap::new();
-        let mut repl: BTreeMap<u32, Replicator> = BTreeMap::new();
+        let mut players: BTreeMap<u32, Player> = BTreeMap::new();
+        let mut world = WorldView::new(
+            self.cache.clone(),
+            self.rt.clone(),
+            self.blocks,
+            self.sim_columns,
+        );
+        let rules = Rules {
+            params: &self.player,
+            shapes: &self.shapes,
+            magma: self.magma,
+            steps_per_tick: (self.player.step_hz / self.tick_hz.max(1)).max(1),
+        };
         let mut next = Instant::now();
         let mut tick: u32 = 0;
         while !stop.load(Ordering::Relaxed) {
             next += self.tick;
             tick = tick.wrapping_add(1).max(1);
             let start = Instant::now();
+            world.begin_tick();
             // Inputs of the tick, by player id (stable: arrival order within a player).
             let mut inputs: Vec<Input> = rx.try_iter().collect();
             inputs.sort_by_key(|i| match i {
                 Input::Join(p) => p.id,
                 Input::Leave(id) | Input::Msg(id, _) => *id,
             });
-            let mut changes: BTreeMap<(i32, i32, i32), Changes> = BTreeMap::new();
-            let (mut edits, mut refused) = (0, 0);
             for input in inputs {
-                match input {
-                    Input::Join(p) => {
-                        repl.insert(p.id, Replicator::default());
-                        players.insert(p.id, p);
-                    }
-                    Input::Leave(id) => {
-                        players.remove(&id);
-                        repl.remove(&id);
-                    }
-                    Input::Msg(id, ClientMsg::Ack { seqs }) => {
-                        if let Some(r) = repl.get_mut(&id) {
-                            for s in seqs {
-                                r.ack(s);
-                            }
-                        }
-                    }
-                    Input::Msg(id, ClientMsg::SetBlock { pos, block }) => {
-                        let Some(p) = players.get(&id) else { continue };
-                        let at = BlockPos::new(pos[0], pos[1], pos[2]);
-                        let c = at.chunk();
-                        let held = p
-                            .subs
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .contains(&wrap_column(c.cx, c.cz));
-                        let result = if usize::from(block) >= self.blocks {
-                            Err(anyhow::anyhow!("unknown block {block}"))
-                        } else if !held {
-                            Err(anyhow::anyhow!("column not loaded by the player"))
-                        } else {
-                            self.deltas.set(at, block)
-                        };
-                        match result {
-                            Ok(lsn) => {
-                                edits += 1;
-                                self.cache.invalidate(c.cx, c.cz);
-                                let e = changes.entry((c.cx, c.cy, c.cz)).or_default();
-                                e.0 = lsn;
-                                e.1.push((at.local().index() as u16, block));
-                            }
-                            Err(e) => {
-                                refused += 1;
-                                let _ = p.out.send(ServerMsg::EditRefused {
-                                    pos,
-                                    reason: format!("{e:#}"),
-                                });
-                            }
-                        }
-                    }
-                    Input::Msg(_, _) => {}
-                }
+                self.input(input, tick, &mut players, &mut world);
             }
-            // Broadcast the changes of the tick.
-            for ((cx, cy, cz), (lsn, list)) in changes {
-                let col = wrap_column(cx, cz);
-                for p in players.values() {
-                    if p.subs
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .contains(&col)
-                    {
-                        let _ = p.out.send(ServerMsg::Blocks {
-                            chunk: [cx, cy, cz],
-                            lsn,
-                            changes: list.clone(),
-                        });
-                    }
-                }
-            }
+            let (edits, refused, changed) = self.edits(tick, &mut players, &mut world);
+            let m0 = Instant::now();
+            let mut moved = self.movement(tick, &mut players, &mut world, &rules, &changed);
+            let move_us = m0.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
             let r0 = Instant::now();
-            let (datagrams, bytes, skipped) = self.replicate(tick, &players, &mut repl);
+            let (datagrams, bytes, skipped) = self.replicate(tick, &mut players);
             let repl_us = r0.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
             {
                 let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
@@ -217,12 +226,22 @@ impl Sim {
                 s.entity_datagrams += datagrams;
                 s.entity_bytes += bytes;
                 s.entity_skipped += skipped;
+                s.steps += moved.0;
+                s.filled_steps += moved.1;
+                s.deaths += std::mem::take(&mut moved.2);
                 s.players = players.len();
+                let (held, _) = world.len();
+                s.sim_columns = held;
+                if tick.is_multiple_of(20) {
+                    s.sim_column_bytes = world.heap_bytes();
+                }
                 if s.recent_us.len() >= 1_200 {
                     s.recent_us.remove(0);
                     s.recent_repl_us.remove(0);
+                    s.recent_move_us.remove(0);
                 }
                 s.recent_repl_us.push(repl_us);
+                s.recent_move_us.push(move_us);
                 s.recent_us
                     .push(start.elapsed().as_micros().min(u128::from(u32::MAX)) as u32);
             }
@@ -234,63 +253,321 @@ impl Sim {
         }
     }
 
-    /// Sends every player the entities around them; returns datagrams and bytes sent, and
-    /// the players skipped.
-    fn replicate(
+    fn input(
+        &self,
+        input: Input,
+        tick: u32,
+        players: &mut BTreeMap<u32, Player>,
+        world: &mut WorldView,
+    ) {
+        match input {
+            Input::Join(link) => {
+                let pos = link.view.lock().unwrap_or_else(|e| e.into_inner()).pos;
+                world.want_around(pos[0], pos[2], 2.0);
+                players.insert(
+                    link.id,
+                    Player {
+                        body: Body::new(pos),
+                        link,
+                        edits: VecDeque::new(),
+                        out_of_reach: 0,
+                        repl: Replicator::default(),
+                        state: None,
+                    },
+                );
+            }
+            Input::Leave(id) => {
+                players.remove(&id);
+            }
+            Input::Msg(id, msg) => {
+                let Some(p) = players.get_mut(&id) else {
+                    return;
+                };
+                match msg {
+                    ClientMsg::Ack { seqs } => {
+                        for s in seqs {
+                            p.repl.ack(s);
+                        }
+                    }
+                    ClientMsg::SetBlock { pos, block, cmd } => p.edits.push_back(Edit {
+                        pos,
+                        block,
+                        cmd,
+                        since: tick,
+                    }),
+                    ClientMsg::Respawn if p.body.dead => {
+                        let at = p.link.spawn;
+                        p.body.respawn(at);
+                        world.want_around(at[0], at[2], 2.0);
+                        p.link.view.lock().unwrap_or_else(|e| e.into_inner()).pos =
+                            p.body.state.pos;
+                        let _ = p.link.out.send(ServerMsg::Respawned {
+                            pos: p.body.state.pos,
+                        });
+                    }
+                    ClientMsg::Fly(on) => {
+                        p.body.set_mode(if on { Mode::Fly } else { Mode::Walk });
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Applies the edits whose command was applied (refused after a second of waiting), in
+    /// player id order; returns edits, refusals, and the cells changed with their height.
+    fn edits(
         &self,
         tick: u32,
-        players: &BTreeMap<u32, Arc<PlayerLink>>,
-        repl: &mut BTreeMap<u32, Replicator>,
+        players: &mut BTreeMap<u32, Player>,
+        world: &mut WorldView,
+    ) -> (u64, u64, Vec<([i32; 3], f64)>) {
+        // The edits ready, with the eyes they were made from.
+        let mut ready = Vec::new();
+        for (&id, p) in players.iter_mut() {
+            let applied = p
+                .link
+                .inputs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .applied();
+            while let Some(e) = p.edits.front() {
+                let early = e.cmd.is_some_and(|c| applied.is_none_or(|a| a < c));
+                if early && tick.wrapping_sub(e.since) < self.tick_hz {
+                    break;
+                }
+                let e = p.edits.pop_front().expect("front");
+                let eye = (!early).then(|| p.body.eye_at(e.cmd, &self.player));
+                ready.push((id, e, eye));
+            }
+        }
+        let mut changes: BTreeMap<(i32, i32, i32), Changes> = BTreeMap::new();
+        let mut changed = Vec::new();
+        let (mut edits, mut refused) = (0, 0);
+        for (id, e, eye) in ready {
+            let p = &players[&id];
+            let mut far = None;
+            let at = BlockPos::new(e.pos[0], e.pos[1], e.pos[2]);
+            let cell = [at.x, at.y, at.z];
+            let c = at.chunk();
+            let held = p
+                .link
+                .subs
+                .lock()
+                .unwrap_or_else(|er| er.into_inner())
+                .contains(&wrap_column(c.cx, c.cz));
+            let top = solid_top(&self.shapes, e.block);
+            let result = if usize::from(e.block) >= self.blocks {
+                Err(format!("unknown block {}", e.block))
+            } else if !held {
+                Err("column not loaded by the player".to_owned())
+            } else if p.body.dead {
+                Err("dead".to_owned())
+            } else if let Some(d) = match eye {
+                None => Some(f64::INFINITY),
+                Some(eye) => {
+                    let d = reach(eye, cell);
+                    (self.edit_reach_m > 0.0 && d > self.edit_reach_m + REACH_SLACK_M).then_some(d)
+                }
+            } {
+                Err(if d.is_finite() {
+                    far = Some(d);
+                    format!("out of reach ({d:.1} m)")
+                } else {
+                    "edit ahead of its movement".to_owned()
+                })
+            } else if top > 0.0
+                && players
+                    .values()
+                    .any(|q| !q.body.dead && q.body.overlaps_cell(&self.player, cell, top))
+            {
+                Err("inside a player".to_owned())
+            } else {
+                self.deltas.set(at, e.block).map_err(|er| format!("{er:#}"))
+            };
+            match result {
+                Ok(lsn) => {
+                    edits += 1;
+                    self.cache.invalidate(c.cx, c.cz);
+                    let ch = changes.entry((c.cx, c.cy, c.cz)).or_default();
+                    ch.0 = lsn;
+                    ch.1.push((at.local().index() as u16, e.block));
+                    if top > 0.0 {
+                        changed.push((cell, top));
+                    }
+                }
+                Err(reason) => {
+                    refused += 1;
+                    let _ = p
+                        .link
+                        .out
+                        .send(ServerMsg::EditRefused { pos: e.pos, reason });
+                }
+            }
+            if let Some(d) = far {
+                let p = players.get_mut(&id).expect("player");
+                p.out_of_reach += 1;
+                let n = p.out_of_reach;
+                if n == 1 || n.is_multiple_of(100) {
+                    self.abuse.log(
+                        crate::net::unix_ms(),
+                        p.link.ip,
+                        &p.link.name,
+                        "reach",
+                        &format!("edit {d:.1} m from the eyes (#{n})"),
+                    );
+                }
+            }
+        }
+        // Broadcast the changes, and apply them to the simulation's blocks.
+        for ((cx, cy, cz), (lsn, list)) in changes {
+            world.blocks([cx, cy, cz], lsn, &list);
+            let col = wrap_column(cx, cz);
+            for p in players.values() {
+                if p.link
+                    .subs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&col)
+                {
+                    let _ = p.link.out.send(ServerMsg::Blocks {
+                        chunk: [cx, cy, cz],
+                        lsn,
+                        changes: list.clone(),
+                    });
+                }
+            }
+        }
+        (edits, refused, changed)
+    }
+
+    /// Moves every body; returns steps from commands, steps without, deaths.
+    fn movement(
+        &self,
+        tick: u32,
+        players: &mut BTreeMap<u32, Player>,
+        world: &mut WorldView,
+        rules: &Rules,
+        changed: &[([i32; 3], f64)],
     ) -> (u64, u64, u64) {
-        // The entities are the players (by id: `players` is ordered).
+        let (mut steps, mut filled, mut deaths) = (0, 0, 0);
+        for p in players.values_mut() {
+            let b = &mut p.body;
+            let pos = b.state.pos;
+            // The cells a step may reach (2 m at 120 m/s), asked ahead.
+            world.want_around(pos[0], pos[2], 2.5);
+            let mut died = None;
+            // Shut in by a block changed this tick.
+            if !b.dead
+                && !b.settle
+                && changed
+                    .iter()
+                    .any(|(c, top)| b.overlaps_cell(&self.player, *c, *top))
+            {
+                match b.unstuck(rules, &*world) {
+                    Ok(d) => died = d,
+                    Err(_) => b.settle = true,
+                }
+            }
+            let mut q = p.link.inputs.lock().unwrap_or_else(|e| e.into_inner());
+            if died.is_none() {
+                let a = b.advance(&mut q, rules, &*world);
+                steps += u64::from(a.applied);
+                filled += u64::from(a.filled);
+                died = a.died;
+            }
+            if let Some(cause) = died {
+                b.dead = true;
+                b.state.vel = [0.0; 3];
+                deaths += 1;
+                let _ = p.link.out.send(ServerMsg::Died { cause });
+                crate::say!(
+                    "{} died ({})",
+                    p.link.name,
+                    match cause {
+                        DeathCause::Suffocation => "suffocation",
+                        DeathCause::Magma => "magma",
+                    }
+                );
+            }
+            let state = PlayerState {
+                tick,
+                ack: q.applied(),
+                state: b.state,
+            };
+            drop(q);
+            p.link.view.lock().unwrap_or_else(|e| e.into_inner()).pos = b.state.pos;
+            // Sent with the entities (same budget, same skipping when the link is full).
+            p.state = state.encode().ok();
+        }
+        (steps, filled, deaths)
+    }
+
+    /// Sends every player its state, then the entities around it; returns datagrams and
+    /// bytes of entities sent, and the players skipped.
+    fn replicate(&self, tick: u32, players: &mut BTreeMap<u32, Player>) -> (u64, u64, u64) {
+        // The entities are the players (by id: `players` is ordered); the dead are not seen.
         let entities: Vec<Entity> = players
             .values()
             .map(|p| {
-                let v = *p.view.lock().unwrap_or_else(|e| e.into_inner());
+                let v = *p.link.view.lock().unwrap_or_else(|e| e.into_inner());
                 Entity {
-                    id: p.id,
+                    id: p.link.id,
                     pos: v.pos,
                     q: QState::quantize(v.pos, v.yaw, v.pitch),
                 }
             })
             .collect();
-        let grid = Grid::new(&entities);
-        // One client per task: each one's datagrams depend on its own state only, so the
-        // result does not depend on the order (determinism).
-        let mut work: Vec<(&Entity, &Arc<PlayerLink>, &mut Replicator)> = entities
+        let alive: Vec<Entity> = entities
             .iter()
             .zip(players.values())
-            .zip(repl.values_mut())
-            .map(|((e, p), r)| (e, p, r))
+            .filter(|(_, p)| !p.body.dead)
+            .map(|(e, _)| *e)
             .collect();
-        debug_assert!(work.iter().all(|(e, p, _)| e.id == p.id));
+        let grid = Grid::new(&alive);
+        // One client per task: each one's datagrams depend on its own state only, so the
+        // result does not depend on the order (determinism).
+        let mut work: Vec<(&Entity, &mut Player)> =
+            entities.iter().zip(players.values_mut()).collect();
+        debug_assert!(work.iter().all(|(e, p)| e.id == p.link.id));
         self.pool.install(|| {
             work.par_iter_mut()
-                .map(|(e, p, r)| {
+                .map(|(e, p)| {
                     let mut cfg = self.repl;
-                    let m = p.max_datagram.load(Ordering::Relaxed);
+                    let link = &p.link;
+                    let m = link.max_datagram.load(Ordering::Relaxed);
                     if m > 0 {
                         cfg.max_datagram = cfg.max_datagram.min(m);
                     }
+                    let state = p.state.take();
                     // The link is not keeping up (datagrams still queued from earlier ticks):
                     // skip this client for a tick rather than queue stale states.
                     let per_tick = cfg.bytes_per_tick.max(cfg.max_datagram);
-                    if p.queued.load(Ordering::Relaxed) > 2 * per_tick
-                        || p.send_space.load(Ordering::Relaxed) < 2 * per_tick
+                    if link.queued.load(Ordering::Relaxed) > 2 * per_tick
+                        || link.send_space.load(Ordering::Relaxed) < 2 * per_tick
                     {
                         return (0, 0, 1);
                     }
-                    let near = grid.near(e.pos, cfg.radius_m, p.id);
-                    let (mut n, mut sent) = (0u64, 0u64);
-                    for d in r.tick(tick, &near, &cfg) {
-                        sent += d.len() as u64;
-                        n += 1;
-                        if let Some(tx) = &p.datagrams {
-                            p.queued.fetch_add(d.len(), Ordering::Relaxed);
+                    let send = |d: Vec<u8>| {
+                        if let Some(tx) = &link.datagrams {
+                            link.queued.fetch_add(d.len(), Ordering::Relaxed);
                             let _ = tx.send(d);
                         }
+                    };
+                    // The player's own state first, out of the same budget.
+                    if let Some(s) = state {
+                        debug_assert_eq!(s[0], ServerDatagram::PlayerState as u8);
+                        cfg.bytes_per_tick = cfg.bytes_per_tick.saturating_sub(s.len());
+                        send(s);
                     }
-                    p.entity_bytes.fetch_add(sent, Ordering::Relaxed);
+                    let near = grid.near(e.pos, cfg.radius_m, link.id);
+                    let (mut n, mut sent) = (0u64, 0u64);
+                    for d in p.repl.tick(tick, &near, &cfg) {
+                        sent += d.len() as u64;
+                        n += 1;
+                        send(d);
+                    }
+                    link.entity_bytes.fetch_add(sent, Ordering::Relaxed);
                     (n, sent, 0)
                 })
                 .reduce(|| (0, 0, 0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2))

@@ -371,11 +371,17 @@ fn print_stats(server: &RunningServer) {
     let sh = &server.shared;
     let load = |a: &std::sync::atomic::AtomicU64| a.load(std::sync::atomic::Ordering::Relaxed);
     say!(
-        "players {} · tick p50 {:.2} ms p99 {:.2} ms (replication p99 {:.2} ms) · edits {} (refused {}) · columns built {} sent {} ({:.1} MB) · entities {} datagrams ({:.1} MB, {} skipped) · abuse events {}",
+        "players {} · tick p50 {:.2} ms p99 {:.2} ms (movement p99 {:.2} ms, replication p99 {:.2} ms) · steps {} (without commands {}) · deaths {} · sim columns {} ({:.1} MB) · edits {} (refused {}) · columns built {} sent {} ({:.1} MB) · entities {} datagrams ({:.1} MB, {} skipped) · abuse events {}",
         s.players,
         s.tick_ms(0.5),
         s.tick_ms(0.99),
+        s.move_ms(0.99),
         s.repl_ms(0.99),
+        s.steps,
+        s.filled_steps,
+        s.deaths,
+        s.sim_columns,
+        s.sim_column_bytes as f64 / 1e6,
         s.edits,
         s.refused,
         load(&sh.cache.built),
@@ -443,6 +449,12 @@ const COMMANDS: &[(&str, &str, &str, &str)] = &[
         "<name> on|off",
         "makes an account an administrator, or not",
         "Administrators may log in with their secret when secret_login = \"admin\" (the default), for instance while the site is down.",
+    ),
+    (
+        "fly",
+        "<name> on|off",
+        "flight on or off for a player online",
+        "In flight there is no gravity and blocks still collide; up to fly_max_speed. Administrators may also switch it from their client. Back to walking at each login.",
     ),
     (
         "seed",
@@ -573,6 +585,16 @@ fn command(server: &RunningServer, line: &str) -> bool {
                 }
             }
             _ => say!("admin <name> on|off"),
+        },
+        Some("fly") => match (words.next(), words.next()) {
+            (Some(name), Some(flag @ ("on" | "off"))) => {
+                if sh.fly(name, flag == "on") {
+                    say!("{name}: flight {flag}");
+                } else {
+                    say!("{name} is not online");
+                }
+            }
+            _ => say!("fly <name> on|off"),
         },
         Some("stats") => print_stats(server),
         Some("seed") => say!("seed {}", sh.seed),

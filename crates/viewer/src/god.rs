@@ -222,9 +222,11 @@ pub fn god_input(
     if let Some(remote) = remote {
         // Network mode: the server decides; its change comes back and the column is meshed
         // again then.
+        // TODO(5.5): the number of the newest command sent, once the player is simulated.
         remote.send(nascio_protocol::messages::ClientMsg::SetBlock {
             pos: [q.x, q.y, q.z],
             block: id,
+            cmd: None,
         });
         let refused = std::mem::take(&mut *remote.status.lock().unwrap_or_else(|e| e.into_inner()));
         god.status = if refused.is_empty() {

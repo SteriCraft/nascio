@@ -279,6 +279,8 @@ pub struct InputQueue {
     end: u64,
     applied: Option<u32>,
     cap: usize,
+    /// Datagrams pushed, useful or not (the client is still sending).
+    pushes: u64,
 }
 
 /// What [`InputQueue::push`] did.
@@ -300,10 +302,12 @@ impl InputQueue {
             end: 0,
             applied: None,
             cap,
+            pushes: 0,
         }
     }
 
     pub fn push(&mut self, c: &Commands) -> Received {
+        self.pushes += 1;
         let mut r = Received::default();
         for (n, input) in c.numbered() {
             let n64 = u64::from(n);
@@ -322,11 +326,45 @@ impl InputQueue {
         r
     }
 
+    /// The next command to apply, left in the queue.
+    pub fn peek(&self) -> Option<(u32, Input)> {
+        self.queue.front().copied()
+    }
+
     /// The next command to apply, which becomes the last applied.
     pub fn pop(&mut self) -> Option<(u32, Input)> {
         let c = self.queue.pop_front()?;
         self.applied = Some(c.0);
         Some(c)
+    }
+
+    /// Stands in for `k` commands that did not come (the server moved the player without
+    /// them): their numbers count as applied, and the real ones are ignored if they come
+    /// later. A client seeing an acknowledgement beyond its newest command numbers its next
+    /// one after the acknowledgement (otherwise its commands would stay behind for ever). Only on an empty queue; returns how many were filled (0 at the end of the
+    /// numbers).
+    pub fn fill(&mut self, k: u32) -> u32 {
+        if !self.queue.is_empty() {
+            return 0;
+        }
+        let k = u64::from(k).min((1u64 << 32) - self.end);
+        if k == 0 {
+            return 0;
+        }
+        self.end += k;
+        self.applied = Some((self.end - 1) as u32);
+        k as u32
+    }
+
+    /// Datagrams pushed since the start, even those that brought nothing new: the server
+    /// moves a player without commands only when its client stopped sending.
+    pub fn pushes(&self) -> u64 {
+        self.pushes
+    }
+
+    /// Whether a command was ever received or filled.
+    pub fn started(&self) -> bool {
+        self.end > 0
     }
 
     /// Number of the last command popped (the acknowledgement sent to the client).
@@ -701,6 +739,33 @@ mod tests {
         let (applied, skipped) = run(101, |t| t % 5 == 4, |t| t % 5 == 3);
         assert_eq!(skipped, 0);
         assert_eq!(applied, (0..303).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn filled_commands_are_acknowledged_and_ignored_later() {
+        let mut q = InputQueue::new(64);
+        assert!(!q.started());
+        let c = |last, n| Commands {
+            last,
+            pitch: 0,
+            inputs: vec![Input::default(); n],
+        };
+        q.push(&c(2, 3));
+        assert_eq!(q.fill(5), 0, "not while commands wait");
+        while q.pop().is_some() {}
+        assert_eq!(q.fill(5), 5);
+        assert_eq!(q.applied(), Some(7));
+        // Commands 3 to 9 come late: 3 to 7 were filled, 8 and 9 are new.
+        let r = q.push(&c(9, 7));
+        assert_eq!((r.new, r.skipped), (2, 0));
+        assert_eq!(q.pop().map(|c| c.0), Some(8));
+        // The end of the numbers.
+        let mut q = InputQueue::new(4);
+        q.push(&c(u32::MAX - 1, 1));
+        q.pop();
+        assert_eq!(q.fill(5), 1);
+        assert_eq!(q.applied(), Some(u32::MAX));
+        assert_eq!(q.fill(5), 0);
     }
 
     #[test]

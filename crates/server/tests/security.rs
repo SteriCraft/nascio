@@ -101,9 +101,30 @@ async fn abuses_are_refused_and_logged() {
     // Edits: out of reach, then too many at once.
     let spawn = alice.hello.spawn;
     let base = [spawn[0] as i32, spawn[1] as i32 + 3, spawn[2] as i32];
+    // The edits are checked by the simulation once the target's column is the player's.
+    let target = nascio_core::coords::BlockPos::new(base[0] + 20, base[1], base[2]).chunk();
+    let end = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let left = end.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!left.is_zero(), "the column never came");
+        match alice.next(left).await {
+            Some(Event::Column(c))
+                if (c.cx, c.cz)
+                    == (
+                        target.cx.rem_euclid(nascio_core::consts::CHUNKS_PER_AXIS),
+                        target.cz.rem_euclid(nascio_core::consts::CHUNKS_PER_AXIS),
+                    ) =>
+            {
+                break;
+            }
+            Some(Event::Closed(r)) => panic!("closed: {r}"),
+            _ => {}
+        }
+    }
     alice.send(ClientMsg::SetBlock {
-        pos: [base[0] + 100, base[1], base[2]],
+        pos: [base[0] + 20, base[1], base[2]],
         block: 1,
+        cmd: None,
     });
     let m = wait_for(&mut alice, 20, |m| {
         matches!(m, ServerMsg::EditRefused { .. })
@@ -114,6 +135,7 @@ async fn abuses_are_refused_and_logged() {
         alice.send(ClientMsg::SetBlock {
             pos: [base[0] + k % 4, base[1], base[2]],
             block: 0,
+            cmd: None,
         });
     }
     let m = wait_for(

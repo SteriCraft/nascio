@@ -98,9 +98,12 @@ pub struct ServerConfig {
     /// burst (more are dropped; the next ones repeat their commands).
     pub input_datagrams_per_s: f64,
     pub input_datagrams_burst: f64,
-    /// Farthest block a player may edit from their position, m (0: not checked). A
-    /// gameplay value, to be set by the author.
+    /// Farthest cell a player may edit, from its eyes after the command it clicked at to
+    /// the nearest point of the cell, m (0: not checked).
     pub edit_reach_m: f64,
+    /// Columns the simulation keeps decoded to move the players (about; each holds tens to
+    /// hundreds of KB).
+    pub sim_columns: usize,
     /// Journal size above which the modified regions are written to their files, bytes.
     pub checkpoint_bytes: u64,
     /// The physics of the players (`[player]`), sent to the clients at the handshake.
@@ -152,7 +155,8 @@ impl Default for ServerConfig {
             overrun_kick_after_s: 10.0,
             input_datagrams_per_s: 40.0,
             input_datagrams_burst: 40.0,
-            edit_reach_m: 160.0,
+            edit_reach_m: 5.0,
+            sim_columns: 2_048,
             player: PlayerParams::default(),
         }
     }

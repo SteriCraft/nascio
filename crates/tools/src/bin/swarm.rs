@@ -95,6 +95,10 @@ struct Counters {
     errors: AtomicU64,
     /// Authoritative states of the bot received.
     states: AtomicU64,
+    /// Command datagrams sent (20 a second when the bot keeps up).
+    commands: AtomicU64,
+    /// Longest gap between two command datagrams, ms.
+    command_gap_ms: AtomicU64,
 }
 
 #[tokio::main]
@@ -212,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
         println!("bots seeing no entity: {}", blind.join(", "));
     }
     println!(
-        "entities seen per bot: min {}, mean {:.0}, max {}; columns received in all {}; edits {} (refused {}); player states {}; errors {}",
+        "entities seen per bot: min {}, mean {:.0}, max {}; columns received in all {}; edits {} (refused {}); player states {}; errors {}; command datagrams {} (longest gap of a bot: max {} ms)",
         seen.iter().min().unwrap_or(&0),
         seen.iter().sum::<usize>() as f64 / n,
         seen.iter().max().unwrap_or(&0),
@@ -233,6 +237,15 @@ async fn main() -> anyhow::Result<()> {
             .iter()
             .map(|c| c.errors.load(Ordering::Relaxed))
             .sum::<u64>(),
+        counters
+            .iter()
+            .map(|c| c.commands.load(Ordering::Relaxed))
+            .sum::<u64>(),
+        counters
+            .iter()
+            .map(|c| c.command_gap_ms.load(Ordering::Relaxed))
+            .max()
+            .unwrap_or(0),
     );
     for t in tasks {
         let _ = t.await;
@@ -274,6 +287,7 @@ async fn bot(
     // towards a goal wandering in the disc.
     let mut at = conn.hello.spawn;
     let mut last_command: Option<u32> = None;
+    let mut last_sent: Option<Instant> = None;
     let mut every = tokio::time::interval(Duration::from_millis(50));
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     while Instant::now() < until {
@@ -302,13 +316,19 @@ async fn bot(
                 let last = last_command.map_or(2, |n| n + 3);
                 last_command = Some(last);
                 conn.send_commands(&Commands { last, pitch: quantize_pitch(0.0), inputs: vec![step; 3] });
+                c.commands.fetch_add(1, Ordering::Relaxed);
+                if let Some(t) = last_sent {
+                    let gap = t.elapsed().as_millis() as u64;
+                    c.command_gap_ms.fetch_max(gap, Ordering::Relaxed);
+                }
+                last_sent = Some(Instant::now());
                 let pos = at;
                 let t = begin.elapsed().as_secs_f64();
                 if t >= next_edit && t > 5.0 {
                     next_edit += edit_every;
                     // Place a block three metres overhead, take it away the next time.
                     let at = [pos[0].floor() as i32, pos[1] as i32 + 3, pos[2].floor() as i32];
-                    conn.send(ClientMsg::SetBlock { pos: at, block: if placed { 0 } else { granite } });
+                    conn.send(ClientMsg::SetBlock { pos: at, block: if placed { 0 } else { granite }, cmd: last_command });
                     placed = !placed;
                     c.edits.fetch_add(1, Ordering::Relaxed);
                 }
@@ -330,6 +350,11 @@ async fn bot(
                 }
                 Some(Event::Player(p)) => {
                     at = p.state.pos;
+                    // Steps the server took without commands (a stall) are numbered after
+                    // ours: the next commands follow its acknowledgement.
+                    if p.ack > last_command {
+                        last_command = p.ack;
+                    }
                     c.states.fetch_add(1, Ordering::Relaxed);
                 }
                 Some(Event::Msg(ServerMsg::EditRefused { .. })) => {

@@ -10,12 +10,14 @@ pub mod columns;
 pub mod config;
 pub mod console;
 pub mod horizon;
+pub mod movement;
 pub mod net;
 pub mod replicate;
 pub mod security;
 pub mod sim;
 pub mod spawn;
 pub mod token;
+pub mod world_view;
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -185,11 +187,23 @@ impl RunningServer {
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Mutex::new(SimStats::default()));
         let (tx, rx) = std::sync::mpsc::channel();
+        // The simulation logs refused edits too (`reach`).
+        let abuse = Arc::new(security::AbuseLog::open(
+            &data_dir.join("server").join("abuse.log"),
+        )?);
         let sim = Sim {
+            abuse: abuse.clone(),
             deltas: deltas.clone(),
             cache: cache.clone(),
             blocks: blocks.len(),
             tick: Duration::from_secs_f64(1.0 / f64::from(cfg.tick_hz.max(1))),
+            tick_hz: cfg.tick_hz.max(1),
+            player: cfg.player.clone(),
+            shapes: nascio_physics::Shapes::new(blocks.table()),
+            magma: blocks.table().id("magma"),
+            edit_reach_m: cfg.edit_reach_m,
+            sim_columns: cfg.sim_columns,
+            rt: tokio::runtime::Handle::current(),
             stats: stats.clone(),
             repl: replicate::ReplConfig {
                 radius_m: cfg.entity_radius_m,
@@ -231,7 +245,6 @@ impl RunningServer {
             argon2::Params::new(cfg.account_hash_kib, cfg.account_hash_passes, 1, Some(32))
                 .map_err(|e| anyhow::anyhow!("argon2 parameters: {e}"))?,
         )?;
-        let abuse = security::AbuseLog::open(&server_dir.join("abuse.log"))?;
         let hash_permits = match cfg.account_hash_concurrency {
             0 => (std::thread::available_parallelism().map_or(2, |n| n.get()) / 2).max(1),
             n => n,

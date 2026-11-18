@@ -61,9 +61,14 @@ pub enum ClientMsg {
         client_ms: i64,
     },
     /// Asks to set a block (destroy: air). The server answers with the change or a refusal.
+    ///
+    /// `cmd` is the number of the newest movement command sent when the player clicked
+    /// (`None`: none sent yet): the server measures the reach from the eyes as they were
+    /// after that command, whatever the latency.
     SetBlock {
         pos: [i32; 3],
         block: u16,
+        cmd: Option<u32>,
     },
     /// Entity datagrams received (their `seq`): their states can serve as baselines.
     Ack {
@@ -86,6 +91,10 @@ pub enum ClientMsg {
     /// skips it when its disk cache holds them for the world's fingerprint.
     Sky,
     Bye,
+    /// Back to life after [`ServerMsg::Died`], at the account's spawn point.
+    Respawn,
+    /// Asks to fly or to walk again; administrators only (others are refused and logged).
+    Fly(bool),
 }
 
 /// Messages from the server.
@@ -125,6 +134,23 @@ pub enum ServerMsg {
     },
     /// A line of the chat.
     Chat(Chat),
+    /// The player died: it no longer moves until it asks [`ClientMsg::Respawn`].
+    Died {
+        cause: DeathCause,
+    },
+    /// The player is alive again at `pos` (its state follows in a `PlayerState`).
+    Respawned {
+        pos: [f64; 3],
+    },
+}
+
+/// Why a player died; the client words it in its own language.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeathCause {
+    /// Shut in blocks under a solid block (an edit or a fall of blocks on it).
+    Suffocation,
+    /// Touched the mantle's magma.
+    Magma,
 }
 
 /// Longest chat line, characters (longer ones are cut by the server).
@@ -200,6 +226,12 @@ mod tests {
                 text: "salut".into(),
             }),
             ServerMsg::Chat(Chat::Admin("redémarrage".into())),
+            ServerMsg::Died {
+                cause: DeathCause::Suffocation,
+            },
+            ServerMsg::Respawned {
+                pos: [0.5, -12.25, 99_999.75],
+            },
         ];
         for m in msgs {
             let b = to_bytes(&m).unwrap();
@@ -209,9 +241,13 @@ mod tests {
         let edit = to_bytes(&ClientMsg::SetBlock {
             pos: [99_999, 70, 5],
             block: 12,
+            cmd: Some(1_000_000),
         })
         .unwrap();
-        assert!(edit.len() <= 9, "{} bytes", edit.len());
+        assert!(edit.len() <= 13, "{} bytes", edit.len());
+        for m in [ClientMsg::Respawn, ClientMsg::Fly(true)] {
+            assert_eq!(from_bytes::<ClientMsg>(&to_bytes(&m).unwrap()).unwrap(), m);
+        }
         let mut b = to_bytes(&ClientMsg::Bye).unwrap();
         b.push(0);
         assert!(from_bytes::<ClientMsg>(&b).is_err());
