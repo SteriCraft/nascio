@@ -57,7 +57,7 @@ async fn motion_is_smooth_through_150_ms_of_latency() {
         bind: "127.0.0.1:0".parse().unwrap(),
         chunk_radius_m: 64,
         generation_threads: 2,
-        spawn_xz: [0.0, 0.0],
+        spawn_xz: Some([0.0, 0.0]),
         // The mover jumps from the spawn onto its circle.
         max_speed_m_s: 0.0,
         open_registration: true,

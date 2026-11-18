@@ -23,6 +23,8 @@ rayon.workspace = true
 argon2.workspace = true
 ring.workspace = true
 postcard.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
 socket2.workspace = true
 
 [dev-dependencies]

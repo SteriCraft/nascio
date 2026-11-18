@@ -37,8 +37,17 @@ pub struct ServerConfig {
     pub generation_threads: usize,
     /// Players at once.
     pub max_players: usize,
-    /// Spawn point (x, z in metres); y is the surface plus two blocks.
-    pub spawn_xz: [f64; 2],
+    /// One spawn point for every player (x, z in metres; tests, events), standing on the
+    /// surface. Absent: each account gets its own point near a spawn site.
+    pub spawn_xz: Option<[f64; 2]>,
+    /// Spawn sites of the world, drawn from its seed at the first start
+    /// (`<data>/server/spawn_sites.toml`).
+    pub spawn_sites: usize,
+    /// A new account's point lies within this distance of a site drawn at random (m).
+    pub spawn_radius_m: f64,
+    /// Sites and points stand lower than this (m); they are on dry land, outside the polar
+    /// band.
+    pub spawn_max_elevation_m: f64,
     /// An unknown name creates its account at login (otherwise accounts are made with the
     /// console's `adduser`). For development and tests; off by default.
     pub open_registration: bool,
@@ -102,7 +111,10 @@ impl Default for ServerConfig {
             cache_columns: 32_768,
             generation_threads: 0,
             max_players: 1_000,
-            spawn_xz: [50_000.0, 50_000.0],
+            spawn_xz: None,
+            spawn_sites: 10,
+            spawn_radius_m: 300.0,
+            spawn_max_elevation_m: 1_000.0,
             checkpoint_bytes: 16 << 20,
             open_registration: false,
             secret_login: SecretLogin::Admin,
@@ -152,6 +164,14 @@ impl ServerConfig {
             self.server_id != DEV_SERVER_ID || self.bind.ip().is_loopback(),
             "server_id \"{DEV_SERVER_ID}\" is for local servers: give this server its own server_id (or --server-id) to listen on {}",
             self.bind
+        );
+        anyhow::ensure!(
+            (1..=1_000).contains(&self.spawn_sites),
+            "spawn_sites is between 1 and 1000"
+        );
+        anyhow::ensure!(
+            self.spawn_radius_m >= 0.0 && self.spawn_radius_m <= 10_000.0,
+            "spawn_radius_m is between 0 and 10000"
         );
         Ok(())
     }

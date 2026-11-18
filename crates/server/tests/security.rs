@@ -32,6 +32,8 @@ fn cfg() -> ServerConfig {
         edit_reach_m: 16.0,
         open_registration: true,
         secret_login: SecretLogin::All,
+        // Every player at one point (the spawn sites have their own test).
+        spawn_xz: Some([50_000.0, 50_000.0]),
         ..ServerConfig::default()
     }
 }

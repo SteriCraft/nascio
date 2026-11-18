@@ -4449,6 +4449,8 @@ dependencies = [
  "nascio-worldgen",
  "postcard",
  "quinn",
+ "rand",
+ "rand_chacha",
  "rayon",
  "rcgen",
  "ring",

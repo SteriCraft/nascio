@@ -25,13 +25,13 @@ Chantiers décidés par l'auteur (`decisions.md`, décisions du 2026-11-18), dan
 1. ~~crate `nascio-chunk` séparée de la génération (définitions des blocs envoyées à la connexion, protocole v5)~~ fait (`chantier-1.md`) ; texte proposé pour `CLAUDE.md` dans le rapport ;
 2. ~~comptes : bannissement, inscription fermée, jetons Ed25519 émis par le site (protocole v6)~~ fait, validé et poussé (`chantier-2.md`) ; ajouts après revue : format du jeton et vecteurs fixes dans la spec §7.2, refus de `server_id = "dev"` hors local (`bind` local par défaut), console `>_` et `help <commande>` ;
 2bis. **Gisements de surface et nucléaires** (prompt de l'auteur, intercalé avant le chantier 3) : plan validé le 2026-11-18 ; G1 (`host_rock`, craie, v20), G2 (`above`, `probability`) et G3 (huit types, monde `out/gisements/world-42`, mesures, carte `out/gisements/new-types.png` et coupes) validés ; version 20 figée avec le contexte `land` et `replaces_soil` (fer des marais sous le gazon). Monde de référence `out/server/world-42`, servi par `out/server/run_server.bat` (données `out/server/data`). **Non poussé.** `out/s3-data` et `out/m7/world-42` (v19) supprimés avec l'accord de l'auteur. Le plan, les réponses et les sous-étapes G1 à G3 sont dans `docs/reports/gisements-surface.md`. `bdd5c44` est poussé (format du jeton, `server_id`, console) ;
-3. sites d'apparition et point par compte (calculés au démarrage du serveur, sans toucher `generator_version`) ;
+3. ~~sites d'apparition et point par compte~~ fait (module `crates/server/src/spawn.rs`, spec §8.6, test `crates/server/tests/spawn.rs`) ; en attente de la validation de l'auteur ;
 4. horizon en tuiles et climat réduit envoyés par le serveur ;
 5. mouvement autoritaire, avec prédiction et réconciliation.
 
 À faire au prochain changement de format du monde (décision de l'auteur, 2026-11-18) : le feuillage devient une propriété de `blocks.toml` (aujourd'hui déduit du nom, `nascio_chunk::block::FOLIAGE`).
 
-Questions encore ouvertes pour l'auteur : la définition exacte des classes de terrain des sites ; la physique du joueur, et si le vol libre reste un droit d'administrateur .
+Questions encore ouvertes pour l'auteur : la physique du joueur, et si le vol libre reste un droit d'administrateur .
 
 Ancienne note de la nuit (la synthèse a été faite) : Le matin, il demandera une synthèse de tous les rapports (`serveur-C0.md` … `serveur-S7.md`, `spec-proposee.md`) : ce qui est fait, mesures clés, décisions, et la liste regroupée des questions ouvertes (hébergement, budget, rayons, gameplay : point d'apparition, mouvement/collision, vitesse/portée ; invariant 5 : ciel/horizon du client, types de chunk ; inscription, bannissement ; seconde machine pour S6). Rien n’est poussé : 10 commits locaux de la phase (C0 à S7, S4 en deux).
 

@@ -395,7 +395,7 @@ Le client envoie la version du protocole, son nom de compte et une preuve d'iden
   Un jeton valide crée le compte s'il n'existe pas ;
 - **un secret**, réservé par défaut aux comptes administrateurs (`secret_login` = `admin`, `all` ou `none`). Le serveur le vérifie avec Argon2id et un sel par compte.
 
-Ensuite, le serveur refuse un compte banni (bannissement par compte, temporaire ou permanent, avec sa raison, signalé seulement après une preuve valide) et une deuxième session. Il bloque une adresse après trop d'échecs. Enfin, il répond avec `generator_version`, l'empreinte de génération, la table des blocs (leurs définitions : identifiant, nom, couleur, matière, densité) et son heure UTC. Le client mesure le décalage de son horloge (aller-retour, à la manière de NTP) et dérive le temps du jeu de l'UTC corrigée : aucune horloge interne.
+Ensuite, le serveur refuse un compte banni (bannissement par compte, temporaire ou permanent, avec sa raison, signalé seulement après une preuve valide) et une deuxième session. Il bloque une adresse après trop d'échecs. Enfin, il répond avec `generator_version`, l'empreinte de génération, la table des blocs (leurs définitions : identifiant, nom, couleur, matière, densité), le point d'apparition du joueur (§8.6) et son heure UTC. Le client mesure le décalage de son horloge (aller-retour, à la manière de NTP) et dérive le temps du jeu de l'UTC corrigée : aucune horloge interne.
 
 #### Format du jeton, octet par octet
 Un jeton est la chaîne `base64url(charge ‖ signature)` : alphabet URL de la RFC 4648 §5 (`A–Z a–z 0–9 - _`), **sans** remplissage `=`, au plus 512 caractères. Le serveur refuse une forme non canonique, c'est-à-dire des bits de fin non nuls.
@@ -470,3 +470,12 @@ AQVhbGljZQRldS0xgMDiheNowI-HhuNooKGio6SlpqeoqaqrrK2ur9zCfTtKfbYxKgHRP-9y63mdbTG9
 - Un déplacement plus rapide que la vitesse maximale est refusé et le joueur est remis à sa dernière position acceptée (`Correct`) ; une édition hors de portée est refusée. Les valeurs (vitesse, portée) relèvent du gameplay.
 - Les refus sont consignés dans `<data>/server/abuse.log` (heure, adresse, compte, type, détail), sans jamais de secret ; le premier événement de chaque type est écrit, puis un sur cent.
 - Le serveur refuse de démarrer avec `server_id = "dev"` (ou vide) sur une adresse non locale ; il écoute par défaut sur `127.0.0.1:7777`.
+
+### 8.6 Apparition
+- Un monde a **10 sites d'apparition** (`spawn_sites`). Le serveur les tire de la graine du monde à son premier démarrage (flux `spawn/sites`, colonnes tirées uniformément sur le tore jusqu'à en trouver 10 valides) et les garde dans `<data>/server/spawn_sites.toml`, avec l'empreinte de génération : ils ne bougent plus, même si les règles changent. Un même monde donne toujours les mêmes sites.
+- Une colonne valide, pour un site comme pour un joueur :
+  - est **sur la terre ferme** : aucune eau (mer, lac, rivière) au-dessus de son bloc de surface ;
+  - a son bloc de surface **sous 1 000 m** (`spawn_max_elevation_m`) ;
+  - est **hors de la bande polaire** : `s > S_CLEAR` (3 000 m), là où finit le couvert nuageux forcé (§2.7).
+- À sa première connexion, un compte reçoit un point tiré au hasard (aléa du système) à **moins de 300 m** (`spawn_radius_m`) d'un site lui aussi tiré au hasard, uniformément dans le disque, et qui suit les mêmes règles ; après 256 essais sans colonne valide, le site lui-même. Le point est gardé dans le compte (`accounts.toml`) : le joueur y réapparaît à chaque connexion, jusqu'à ce qu'un objet ou une mécanique de jeu permette de le changer.
+- Le joueur apparaît au centre de la colonne, debout sur son bloc de surface. `spawn_xz` (configuration, ou `--spawn-xz`) remplace tout cela par un point unique pour tous, pour les tests de charge.

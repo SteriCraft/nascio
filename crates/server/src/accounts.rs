@@ -13,6 +13,8 @@ use nascio_voxel::delta::write_durable;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 
+use crate::spawn::AccountSpawn;
+
 /// One account as stored.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
@@ -32,6 +34,9 @@ pub struct Account {
     /// The account is banned (an expired ban is kept but ignored).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ban: Option<Ban>,
+    /// Where the player comes back at each login, drawn at the first one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn: Option<AccountSpawn>,
 }
 
 /// A ban of an account, temporary or permanent.
@@ -227,6 +232,7 @@ impl Accounts {
                 created_unix_ms: now_unix_ms,
                 admin: false,
                 ban: None,
+                spawn: None,
             },
         );
         self.save(&accounts)
@@ -275,6 +281,7 @@ impl Accounts {
                 created_unix_ms: now_unix_ms,
                 admin: false,
                 ban: None,
+                spawn: None,
             },
         );
         self.save(&accounts)?;
@@ -332,6 +339,32 @@ impl Accounts {
                 Some((a.name.clone(), b.clone()))
             })
             .collect()
+    }
+
+    /// The spawn point of `name`, if drawn.
+    pub fn spawn(&self, name: &str) -> Option<AccountSpawn> {
+        self.lock().get(name).and_then(|a| a.spawn)
+    }
+
+    /// Keeps the spawn point of `name` (unknown accounts are refused).
+    pub fn set_spawn(&self, name: &str, spawn: AccountSpawn) -> anyhow::Result<()> {
+        let mut accounts = self.lock();
+        let Some(a) = accounts.get_mut(name) else {
+            bail!("no account {name}");
+        };
+        a.spawn = Some(spawn);
+        self.save(&accounts)
+    }
+
+    /// Accounts per spawn site (`n` sites).
+    pub fn per_site(&self, n: usize) -> Vec<usize> {
+        let mut count = vec![0; n];
+        for a in self.lock().values() {
+            if let Some(c) = a.spawn.and_then(|s| count.get_mut(s.site as usize)) {
+                *c += 1;
+            }
+        }
+        count
     }
 
     pub fn is_admin(&self, name: &str) -> bool {

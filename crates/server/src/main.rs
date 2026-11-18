@@ -34,6 +34,10 @@ struct Cli {
     /// account (`swarm`, the viewer without a token).
     #[arg(long)]
     open_registration: bool,
+    /// One spawn point x,z for every player (load tests with `swarm`), instead of a point per
+    /// account near the world's spawn sites.
+    #[arg(long, value_delimiter = ',')]
+    spawn_xz: Option<Vec<f64>>,
 }
 
 #[tokio::main]
@@ -52,6 +56,10 @@ async fn main() -> anyhow::Result<()> {
     if cli.open_registration {
         cfg.open_registration = true;
         cfg.secret_login = nascio_server::config::SecretLogin::All;
+    }
+    if let Some(v) = &cli.spawn_xz {
+        anyhow::ensure!(v.len() == 2, "--spawn-xz takes x,z");
+        cfg.spawn_xz = Some([v[0], v[1]]);
     }
     let world = World::load(&cli.world)?;
     let data = cli.data.clone().unwrap_or_else(|| cli.world.clone());
@@ -75,6 +83,15 @@ async fn main() -> anyhow::Result<()> {
             ""
         }
     );
+    let sp = &server.shared.spawns;
+    match sp.fixed {
+        Some(p) => println!("every player spawns at {}, {}", p.x, p.z),
+        None => println!(
+            "{} spawn sites (console: spawns), points within {} m",
+            sp.sites.len(),
+            c.spawn_radius_m
+        ),
+    }
     // Administration console: one command per line on the standard input.
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     std::thread::Builder::new()
@@ -257,6 +274,12 @@ const COMMANDS: &[(&str, &str, &str, &str)] = &[
         "Administrators may log in with their secret when secret_login = \"admin\" (the default), for instance while the site is down.",
     ),
     (
+        "spawns",
+        "",
+        "spawn sites",
+        "Lists the world's spawn sites (x, z; drawn from the seed at the first start, kept in server/spawn_sites.toml) and the accounts whose point lies near each. A new account gets a point drawn at random within spawn_radius_m of a site drawn at random, kept for good.",
+    ),
+    (
         "stop",
         "",
         "stops the server",
@@ -363,6 +386,17 @@ fn command(server: &RunningServer, line: &str) -> bool {
             _ => println!("admin <name> on|off"),
         },
         Some("stats") => print_stats(server),
+        Some("spawns") => {
+            let sp = &sh.spawns;
+            if let Some(p) = sp.fixed {
+                println!("every player spawns at {}, {} (spawn_xz)", p.x, p.z);
+            } else {
+                let count = sh.accounts.per_site(sp.sites.len());
+                for (i, (p, n)) in sp.sites.iter().zip(count).enumerate() {
+                    println!("  site {i}: {}, {} ({n} accounts)", p.x, p.z);
+                }
+            }
+        }
         Some("adduser") => match (words.next(), words.next(), words.next()) {
             (Some(name), Some(secret), flag @ (None | Some("admin"))) => {
                 let admin = flag.is_some();

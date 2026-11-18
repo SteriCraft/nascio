@@ -43,6 +43,8 @@ pub struct Shared {
     pub tokens: Option<crate::token::Verifier>,
     /// Players online, by account name.
     pub sessions: Mutex<BTreeMap<String, Session>>,
+    /// Spawn sites and the points of the accounts.
+    pub spawns: crate::spawn::Spawns,
 }
 
 /// A player online.
@@ -184,6 +186,17 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         Some(r) => Some(r),
         None => login(&shared, ip, &hello.name, &hello.auth).await.err(),
     };
+    // The player's point (drawn at the first login).
+    let (spawn, refuse) = match refuse {
+        Some(r) => ([0.0; 3], Some(r)),
+        None => match shared.spawns.of(&shared.accounts, &hello.name) {
+            Ok(p) => (p, None),
+            Err(e) => {
+                eprintln!("spawn point of {}: {e:#}", hello.name);
+                ([0.0; 3], Some("no spawn point: try again later".to_owned()))
+            }
+        },
+    };
     if let Some(reason) = refuse {
         send.write_all(&frame(&to_bytes(&ServerMsg::Refused {
             reason: reason.clone(),
@@ -199,6 +212,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     let mut sh = shared.hello.clone();
     sh.player = id;
     sh.server_unix_ms = unix_ms();
+    sh.spawn = spawn;
     send.write_all(&frame(&to_bytes(&ServerMsg::Hello(sh.clone()))?))
         .await?;
     let (out, mut out_rx) = mpsc::unbounded_channel::<ServerMsg>();

@@ -42,7 +42,7 @@ async fn site(world: &World, terrain: &Terrain, k: usize, scx: i32, scz: i32) {
         chunk_radius_m: 160,
         client_budget_bytes_per_s: 4 << 20,
         generation_threads: 4,
-        spawn_xz: [f64::from(scx) * 32.0 + 10.0, f64::from(scz) * 32.0 + 22.0],
+        spawn_xz: Some([f64::from(scx) * 32.0 + 10.0, f64::from(scz) * 32.0 + 22.0]),
         open_registration: true,
         secret_login: SecretLogin::All,
         ..ServerConfig::default()

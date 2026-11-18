@@ -12,6 +12,7 @@ pub mod net;
 pub mod replicate;
 pub mod security;
 pub mod sim;
+pub mod spawn;
 pub mod token;
 
 use std::net::SocketAddr;
@@ -22,10 +23,9 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::Context;
-use nascio_core::torus;
 use nascio_protocol::messages::ServerHello;
 use nascio_voxel::delta::write_durable;
-use nascio_voxel::{ColumnSet, DeltaConfig, DeltaStore, GenConfig, Terrain};
+use nascio_voxel::{DeltaConfig, DeltaStore, GenConfig, Terrain};
 use nascio_world::config::GENERATOR_VERSION;
 use nascio_world::world_io::World;
 use quinn::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -120,13 +120,16 @@ impl RunningServer {
             cfg.cache_columns,
             threads_n,
         ));
-        // Spawn on the surface of the spawn column.
-        let (sx, sz) = (
-            torus::wrap_f64(cfg.spawn_xz[0]),
-            torus::wrap_f64(cfg.spawn_xz[1]),
-        );
-        let col = ColumnSet::new(&terrain, (sx / 32.0) as i32, (sz / 32.0) as i32);
-        let sy = f64::from(col.top_range().1.max(0) + 2);
+        let spawns = spawn::Spawns::new(
+            terrain.clone(),
+            world,
+            &fingerprint,
+            &cfg,
+            &data_dir.join("server"),
+        )?;
+        // Each login replaces it with the player's point.
+        let first = spawns.fixed.or(spawns.sites.first().copied());
+        let spawn_pos = first.map_or([0.0; 3], |p| spawn::standing(&terrain, p));
         let blocks = terrain.blocks();
         let hello = ServerHello {
             protocol: nascio_protocol::PROTOCOL_VERSION,
@@ -135,7 +138,7 @@ impl RunningServer {
             blocks: blocks.registry().blocks.clone(),
             server_unix_ms: 0,
             player: 0,
-            spawn: [sx, sy, sz],
+            spawn: spawn_pos,
             chunk_radius_m: cfg.chunk_radius_m,
         };
 
@@ -232,6 +235,7 @@ impl RunningServer {
             abuse,
             logins: Default::default(),
             sessions: Default::default(),
+            spawns,
             cfg,
             hello,
             cache,
