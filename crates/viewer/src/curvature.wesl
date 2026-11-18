@@ -56,6 +56,10 @@ struct Curved {
 // Colour of the world's surface (repeat sampler), for the ground beyond the relief.
 @group(constants::MATERIAL_BIND_GROUP) @binding(103) var ground_tex: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(104) var ground_smp: sampler;
+// Block textures, one layer per image (`crate::textures`): repeat sampler, crisp up close,
+// mipmapped far away.
+@group(constants::MATERIAL_BIND_GROUP) @binding(105) var block_tex: texture_2d_array<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(106) var block_smp: sampler;
 
 const WORLD: f32 = 100000.0;
 const LIGHT_FADE: f32 = 0.17453292; // 10°
@@ -114,9 +118,9 @@ fn vertex(vertex_in: Vertex) -> VertexOutput {
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
-    // Material channel (UV0, `nascio_voxel::mesh::MeshData::material`): kind and albedo factor
-    // of water. Meshes without it are ground.
-    var material = vec2<f32>(MATERIAL_GROUND, 1.0);
+    // Material channel (UV0, `nascio_voxel::mesh::MeshData::material`): kind and texture layer
+    // (`y`, -1: none). Meshes without it are ground.
+    var material = vec2<f32>(MATERIAL_GROUND, -1.0);
 @if(VERTEX_UVS_A)
     material = in.uv;
     let is_water = abs(material.x - MATERIAL_WATER) < 0.5;
@@ -129,11 +133,16 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     );
     var albedo = pbr_input.material.base_color.rgb;
     var alpha = pbr_input.material.base_color.a;
+    // Textured faces: the vertex colour (tint and occlusion) times the texture of their layer,
+    // repeated once per block (UV_1 in blocks). Sampled everywhere (uniform control flow for
+    // the mip derivatives), used where the layer is >= 0.
+    var tex_uv = vec2<f32>(0.0, 0.0);
+@if(VERTEX_UVS_B)
+    tex_uv = in.uv_b;
+    let layer = i32(max(material.y, 0.0) + 0.5);
+    let texel = textureSample(block_tex, block_smp, tex_uv, layer).rgb;
+    albedo *= select(vec3<f32>(1.0), texel, material.y >= 0.0);
     let n = pbr_input.N;
-    // Water darkens with the depth of its column (`nascio_voxel::mesh::water_shade`).
-    if is_water {
-        albedo *= material.y;
-    }
 
     // World position of the fragment (camera-relative offsets are exact across the seam).
     let rel = in.world_position.xz - curved.drop.yw;

@@ -355,7 +355,7 @@ impl Streamer {
 #[derive(Clone)]
 enum ColumnSource {
     /// Generated here, with the local deltas (local flight).
-    Local(Arc<Terrain>, Arc<DeltaStore>),
+    Local(Arc<Terrain>, Arc<DeltaStore>, Arc<nascio_chunk::Blocks>),
     /// Sent by the server.
     Remote(Remote),
 }
@@ -370,7 +370,7 @@ fn spawn_column(
     request: u64,
 ) {
     workers.pool.spawn(move || {
-        let (terrain, deltas) = match source {
+        let (terrain, deltas, blocks) = match source {
             ColumnSource::Remote(remote) => {
                 let meshes = remote.mesh_column(key);
                 let _ = tx.send(ColumnResult {
@@ -380,7 +380,7 @@ fn spawn_column(
                 });
                 return;
             }
-            ColumnSource::Local(t, d) => (t, d),
+            ColumnSource::Local(t, d, b) => (t, d, b),
         };
         let underground = terrain.config().underground_chunks;
         let col = ColumnSet::new(&terrain, key.0, key.1);
@@ -396,7 +396,7 @@ fn spawn_column(
             .map(|cy| {
                 let mut p = col.padded_chunk(&terrain, cy);
                 deltas.apply_padded(ChunkPos::new(key.0, cy, key.1), &mut p);
-                (cy, mesh_chunk(&p, terrain.blocks(), &tint))
+                (cy, mesh_chunk(&p, &blocks, &tint))
             })
             .filter(|(_, m)| !m.is_empty())
             .collect();
@@ -462,15 +462,20 @@ fn spawn_meshes(
 }
 
 pub fn to_bevy_mesh(m: MeshData) -> Mesh {
-    Mesh::new(
+    let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, m.positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, m.normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, m.colors)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, m.material)
-    .with_inserted_indices(Indices::U32(m.indices))
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, m.material);
+    // Chunks carry their texture coordinates (UV_1); the horizon has none.
+    if !m.uv.is_empty() {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, m.uv);
+    }
+    mesh.insert_indices(Indices::U32(m.indices));
+    mesh
 }
 
 /// Receives finished columns and requests missing ones, nearest first.
@@ -487,12 +492,16 @@ pub fn stream_chunks(
     materials: Res<TerrainMaterials>,
     mut meshes: ResMut<Assets<Mesh>>,
     remote: Option<Res<Remote>>,
+    render: Option<Res<crate::textures::RenderBlocks>>,
 ) {
     let remote = remote.map(|r| r.clone());
     // Connected: the server's columns; else the local world (none: nothing to show yet).
     let source = match (&remote, &terrain, &deltas) {
         (Some(r), _, _) => ColumnSource::Remote(r.clone()),
-        (None, Some(t), Some(d)) => ColumnSource::Local(t.0.clone(), d.snapshot()),
+        (None, Some(t), Some(d)) => match &render {
+            Some(b) => ColumnSource::Local(t.0.clone(), d.snapshot(), b.0.clone()),
+            None => return,
+        },
         _ => return,
     };
     let s = &mut *streamer;

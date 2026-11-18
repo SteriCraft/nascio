@@ -26,6 +26,7 @@ mod remote;
 mod settings;
 mod sky;
 mod stars;
+mod textures;
 mod tiles;
 
 use std::path::PathBuf;
@@ -142,6 +143,10 @@ struct Args {
     /// With `--generate`: TOML file overriding generation parameters.
     #[arg(long)]
     world_config: Option<PathBuf>,
+    /// Folder of the block textures (`<block>.png`, `_top`, `_bottom`); missing: the block
+    /// colours.
+    #[arg(long, default_value = textures::DEFAULT_DIR)]
+    textures: PathBuf,
     /// With `--generate`: deposit catalogue (default: config/deposits.toml, else built in).
     #[arg(long)]
     deposits: Option<PathBuf>,
@@ -286,7 +291,9 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             // Only the columns the server sends can be shown, and a column is meshed once its
             // neighbours arrived: keep one column inside the radius.
             settings.view_distance_m = settings.view_distance_m.min(r.radius_m as f32 - 64.0);
-            cam.pos = WorldPos::new(r.spawn[0], r.spawn[1], r.spawn[2]);
+            // The server gives the feet; the camera is at the eyes.
+            let eyes = nascio_physics::PlayerParams::default().eye_height;
+            cam.pos = WorldPos::new(r.spawn[0], r.spawn[1] + eyes, r.spawn[2]);
             info!("connected to {addr}, columns within {} m", r.radius_m);
             Some(r)
         }
@@ -361,6 +368,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         ),
     ))
     .insert_resource(RenderOrigin(BlockPos::new(0, 0, 0)))
+    .insert_resource(textures::TextureDir(args.textures.clone()))
     .insert_resource(ClearColor(Color::srgb(0.45, 0.64, 0.9)))
     .init_resource::<fly::UiCapture>()
     // The debug panel (F3) is open at once in local flight (development).
@@ -412,7 +420,8 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     )
     .add_systems(
         Update,
-        adopt_remote
+        (textures::adopt_remote_textures, adopt_remote)
+            .chain()
             .run_if(resource_added::<remote::Remote>)
             .before(pause::pause_input),
     )
@@ -602,7 +611,19 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
     mut buffers: ResMut<Assets<bevy::render::storage::ShaderBuffer>>,
     mut materials: ResMut<Assets<curvature::CurvedMaterial>>,
+    texture_dir: Res<textures::TextureDir>,
+    terrain: Option<Res<fly::SharedTerrain>>,
 ) {
+    // Local flight textures the world's blocks now; connected, the server's table gets them
+    // (`textures::adopt_remote_textures`).
+    let mut array = None;
+    if let Some(t) = &terrain {
+        let (blocks, image) = textures::textured(&texture_dir.0, t.0.blocks().table());
+        commands.insert_resource(textures::RenderBlocks(Arc::new(blocks)));
+        array = image;
+    }
+    let block_array = images.add(array.unwrap_or_else(textures::placeholder));
+    commands.insert_resource(textures::BlockArray(block_array.clone()));
     let (maps, ground) = match &source.0 {
         Some((world, terrain)) => (
             sky::ClimateMaps::new(sky::ClimateParts::from_world(world), &mut images),
@@ -661,6 +682,7 @@ fn setup(
         frame_handle.clone(),
         climate.clone(),
         ground_handle.clone(),
+        block_array.clone(),
     ));
     let water = materials.add(curvature::material(
         StandardMaterial {
@@ -674,6 +696,7 @@ fn setup(
         frame_handle.clone(),
         climate.clone(),
         ground_handle.clone(),
+        block_array.clone(),
     ));
     commands.insert_resource(fly::TerrainMaterials { opaque, water });
     let horizon = materials.add(curvature::material(
@@ -689,6 +712,7 @@ fn setup(
         frame_handle.clone(),
         climate.clone(),
         ground_handle.clone(),
+        block_array.clone(),
     ));
     commands.insert_resource(horizon::HorizonMaterial(horizon));
 }

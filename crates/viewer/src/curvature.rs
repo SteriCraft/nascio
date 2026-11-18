@@ -156,6 +156,11 @@ pub struct Curvature {
     #[texture(103)]
     #[sampler(104)]
     pub ground: Handle<Image>,
+    /// Block textures, one layer per image (see [`crate::textures`]), sampled at the chunk
+    /// vertices' UV_1 when their material channel names a layer.
+    #[texture(105, dimension = "2d_array")]
+    #[sampler(106)]
+    pub blocks: Handle<Image>,
 }
 
 impl MaterialExtension for Curvature {
@@ -180,12 +185,14 @@ impl MaterialExtension for Curvature {
     }
 }
 
-/// A curved material for `base`, reading `frame` and sampling `climate` and `ground`.
+/// A curved material for `base`, reading `frame` and sampling `climate`, `ground` and the
+/// block texture array `blocks`.
 pub fn material(
     base: StandardMaterial,
     frame: Handle<ShaderBuffer>,
     climate: Handle<Image>,
     ground: Handle<Image>,
+    blocks: Handle<Image>,
 ) -> CurvedMaterial {
     CurvedMaterial {
         base,
@@ -193,6 +200,7 @@ pub fn material(
             frame,
             climate,
             ground,
+            blocks,
         },
     }
 }

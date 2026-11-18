@@ -21,7 +21,7 @@ use bevy::prelude::*;
 use nascio_chunk::horizon::{BASE_SPACING_M, HorizonVertex, Surface, TileKey, water_shade};
 use nascio_core::consts::{CHUNK_SIZE, CHUNKS_PER_AXIS, WORLD_SIZE_F64};
 use nascio_core::torus::wrap_f64;
-use nascio_voxel::mesh::{MATERIAL_GROUND, MATERIAL_WATER, MeshData};
+use nascio_voxel::mesh::{MATERIAL_GROUND, MATERIAL_WATER, MeshData, NO_TEXTURE};
 
 use crate::curvature::{CurvedMaterial, visible_range};
 use crate::fly::{Anchor, FlyCam, FlySettings, Streamer, Workers, to_bevy_mesh};
@@ -372,13 +372,13 @@ fn build_level(
             let dz = f64::from(h.surf(i, j + 1) - h.surf(i, j - 1)) / (2.0 * s);
             let len = (dx * dx + 1.0 + dz * dz).sqrt();
             let normal = [(-dx / len) as f32, (1.0 / len) as f32, (-dz / len) as f32];
-            let mut material = [MATERIAL_GROUND, 1.0];
+            let mut material = [MATERIAL_GROUND, NO_TEXTURE];
             let color = match vx.surface {
                 Surface::Ice => [colors.ice[0], colors.ice[1], colors.ice[2], 1.0],
                 Surface::Water => {
                     let k = water_shade(f64::from(vx.water - vx.height));
                     // Opaque water: the colour above already darkens it with the depth.
-                    material = [MATERIAL_WATER, 1.0];
+                    material = [MATERIAL_WATER, NO_TEXTURE];
                     [water[0] * k, water[1] * k, water[2] * k, 1.0]
                 }
                 Surface::Ground => {

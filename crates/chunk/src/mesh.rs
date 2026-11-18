@@ -3,8 +3,13 @@
 //! Engine-agnostic output: plain vertex arrays, positions relative to the chunk origin.
 //! Faces are merged when they share block and corner occlusion (the classic "greedy" pass), and
 //! quads are split along the diagonal that keeps occlusion gradients isotropic.
+//!
+//! Faces may carry a block texture (a layer of a texture array, see `Blocks::face_texture`):
+//! the layer goes in the material channel and the texture coordinates, in blocks, in `uv`, so
+//! that a repeating sampler tiles the image over merged quads. Without textures, faces keep
+//! the block colours.
 
-use crate::block::{AIR, BlockId, Blocks, Matter};
+use crate::block::{AIR, BlockId, Blocks, FaceTint, Matter};
 use crate::chunk::{N, NP, PaddedChunk};
 use crate::tint::ChunkTint;
 
@@ -25,7 +30,7 @@ pub fn water_alpha(depth: u8) -> f32 {
 
 /// Albedo factor of chunk water of opacity `alpha`: from 0.95 over light rivers to 0.5 over a
 /// nearly opaque sea whose floor may not be loaded, towards the deep-water tone of the horizon
-/// (material channel `y`, [`MeshData::material`]).
+/// (applied to the vertex colour of water quads).
 pub fn water_shade(alpha: f32) -> f32 {
     let deep = ((alpha - WATER_ALPHA) / (WATER_ALPHA_DEEP - WATER_ALPHA)).clamp(0.0, 1.0);
     0.95 + (0.5 - 0.95) * deep
@@ -34,10 +39,12 @@ pub fn water_shade(alpha: f32) -> f32 {
 /// Kinds of surface in the material channel (`x` of [`MeshData::material`]); `curvature.wesl`
 /// has the same constants (checked by a test in the viewer). Vertex alphas are true opacities.
 pub const MATERIAL_GROUND: f32 = 0.0;
-/// Water: sun glint, no snow, albedo times `y`.
+/// Water: sun glint, no snow.
 pub const MATERIAL_WATER: f32 = 1.0;
 /// Foliage: opaque, its sides keep their green under the seasonal snow.
 pub const MATERIAL_FOLIAGE: f32 = 2.0;
+/// `y` of [`MeshData::material`] on a face without texture.
+pub const NO_TEXTURE: f32 = -1.0;
 
 /// Vertex arrays of one mesh.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -47,9 +54,12 @@ pub struct MeshData {
     /// Linear RGBA.
     pub colors: Vec<[f32; 4]>,
     /// Material channel (UV0 for the renderer): `x` the kind ([`MATERIAL_WATER`]…), `y` the
-    /// albedo factor of water ([`water_shade`]), 1 elsewhere (audit R3, F4: no tags in the
-    /// alpha).
+    /// layer of the face texture in the block texture array as `f32`, or [`NO_TEXTURE`] (audit
+    /// R3, F4: no tags in the alpha).
     pub material: Vec<[f32; 2]>,
+    /// UV_1 for the renderer: texture coordinates in blocks (the texture repeats once per
+    /// block), local to the chunk.
+    pub uv: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
 }
 
@@ -68,6 +78,7 @@ impl MeshData {
         normal: [f32; 3],
         colors: [[f32; 4]; 4],
         material: [f32; 2],
+        uv: [[f32; 2]; 4],
         flip: bool,
     ) {
         let base = self.positions.len() as u32;
@@ -75,6 +86,7 @@ impl MeshData {
         self.normals.extend_from_slice(&[normal; 4]);
         self.colors.extend_from_slice(&colors);
         self.material.extend_from_slice(&[material; 4]);
+        self.uv.extend_from_slice(&uv);
         if flip {
             self.indices.extend_from_slice(&[
                 base + 1,
@@ -316,8 +328,8 @@ fn mesh_into(
                         }
                         emit(
                             out,
-                            blocks.linear(f.block),
-                            (tint.grass == Some(f.block)).then_some(tint),
+                            blocks,
+                            tint,
                             f,
                             d,
                             u,
@@ -357,8 +369,8 @@ fn corner_ao(p: &PaddedChunk, blocks: &Blocks, nb: [i32; 3], u: usize, v: usize)
 #[allow(clippy::too_many_arguments)]
 fn emit(
     out: &mut ChunkMesh,
-    rgb: [f32; 3],
-    tint: Option<&ChunkTint>,
+    blocks: &Blocks,
+    tint: &ChunkTint,
     f: Face,
     d: usize,
     u: usize,
@@ -392,16 +404,29 @@ fn emit(
         }
     }
     let alpha = if f.water { water_alpha(f.depth) } else { 1.0 };
-    let material = if f.water {
-        [MATERIAL_WATER, water_shade(alpha)]
+    let texture = blocks.face_texture(f.block, d, sign);
+    let kind = if f.water {
+        MATERIAL_WATER
     } else if f.foliage {
-        [MATERIAL_FOLIAGE, 1.0]
+        MATERIAL_FOLIAGE
     } else {
-        [MATERIAL_GROUND, 1.0]
+        MATERIAL_GROUND
     };
+    let material = [kind, texture.map_or(NO_TEXTURE, |t| f32::from(t.layer))];
+    let shade = if f.water { water_shade(alpha) } else { 1.0 };
+    let tinted = tint.grass == Some(f.block);
+    let block_rgb = blocks.linear(f.block);
     let mut colors = [0usize, 1, 2, 3].map(|k| {
-        let rgb = tint.map_or(rgb, |t| t.at(corners[k][0], corners[k][2]));
-        let a = AO_CURVE[usize::from(f.ao[k])];
+        let (x, z) = (corners[k][0], corners[k][2]);
+        let rgb = match texture.map(|t| t.tint) {
+            Some(FaceTint::None) => [1.0; 3],
+            Some(FaceTint::Climate(k)) if tinted => tint.at(x, z).map(|c| c * k),
+            Some(FaceTint::Climate(_)) => [1.0; 3],
+            Some(FaceTint::Fixed(c)) => c,
+            None if tinted => tint.at(x, z),
+            None => block_rgb,
+        };
+        let a = AO_CURVE[usize::from(f.ao[k])] * shade;
         [rgb[0] * a, rgb[1] * a, rgb[2] * a, alpha]
     });
     // Anisotropy fix: split along the diagonal joining the brighter pair.
@@ -412,12 +437,27 @@ fn emit(
         colors.swap(1, 3);
         // Swapping corners 1 and 3 keeps the 0–2 diagonal, so `flip` is unchanged.
     }
+    // Texture coordinates from the final corners: the top edge of a block is the top of the
+    // image; `right` is the horizontal direction to the right of a viewer facing the face.
+    let uv = corners.map(|c| {
+        if d == 1 {
+            [c[0], c[2]]
+        } else {
+            let u = match (d, sign > 0) {
+                (0, true) => -c[2],
+                (0, false) => c[2],
+                (_, true) => c[0],
+                (_, false) => -c[0],
+            };
+            [u, -c[1]]
+        }
+    });
     let target = if f.water {
         &mut out.water
     } else {
         &mut out.opaque
     };
-    target.push_quad(corners, normal, colors, material, flip);
+    target.push_quad(corners, normal, colors, material, uv, flip);
 }
 
 /// The per-cell definition (the pre-M7 implementation), reference of the bit-mask mesher in
@@ -498,8 +538,8 @@ pub fn mesh_reference(p: &PaddedChunk, blocks: &Blocks, tint: &ChunkTint) -> Chu
                         }
                         emit(
                             &mut out,
-                            blocks.linear(f.block),
-                            (tint.grass == Some(f.block)).then_some(tint),
+                            blocks,
+                            tint,
                             f,
                             d,
                             u,
@@ -603,7 +643,29 @@ mod tests {
             seed in any::<u64>(),
             density in 1u64..16,
         ) {
-            let b = Blocks::builtin();
+            let mut b = Blocks::builtin();
+            let (grass, water, snow) = (
+                b.id("grass").unwrap(),
+                b.id("water").unwrap(),
+                b.id("snow_layer").unwrap(),
+            );
+            let mut t = vec![BlockTextures::default(); b.len()];
+            t[usize::from(grass)] = BlockTextures {
+                top: tex(1, FaceTint::Climate(1.0)),
+                side: None,
+                bottom: tex(2, FaceTint::None),
+            };
+            t[usize::from(water)] = BlockTextures {
+                top: tex(3, FaceTint::Fixed([0.3, 0.5, 0.9])),
+                side: tex(3, FaceTint::None),
+                bottom: None,
+            };
+            t[usize::from(snow)] = BlockTextures {
+                top: None,
+                side: tex(4, FaceTint::None),
+                bottom: None,
+            };
+            b.set_textures(t).unwrap();
             let id = |name: &str| b.id(name).expect(name);
             let palette = [
                 AIR,
@@ -633,6 +695,187 @@ mod tests {
             }
             prop_assert_eq!(mesh_chunk(&p, &b, &tint), mesh_reference(&p, &b, &tint));
         }
+    }
+
+    use crate::block::{BlockTextures, FaceTexture};
+
+    fn tex(layer: u16, tint: FaceTint) -> Option<FaceTexture> {
+        Some(FaceTexture { layer, tint })
+    }
+
+    fn with_textures(b: &mut Blocks, set: &[(BlockId, BlockTextures)]) {
+        let mut t = vec![BlockTextures::default(); b.len()];
+        for &(id, bt) in set {
+            t[usize::from(id)] = bt;
+        }
+        b.set_textures(t).unwrap();
+    }
+
+    #[test]
+    fn without_textures_the_material_has_no_layer_and_water_is_shaded_in_the_colour() {
+        let (b, stone, water) = ids();
+        let p = padded(|_, y, _| match y {
+            ..3 => stone,
+            3..20 => water,
+            _ => AIR,
+        });
+        let mut tint = ChunkTint::NONE;
+        tint.water_depth.fill(4);
+        let m = mesh_chunk(&p, &b, &tint);
+        for d in [&m.opaque, &m.water] {
+            assert_eq!(d.uv.len(), d.positions.len());
+            assert!(d.material.iter().all(|m| m[1] == NO_TEXTURE));
+        }
+        let alpha = water_alpha(4);
+        let w = b.linear(water);
+        let k = water_shade(alpha);
+        assert!(!m.water.colors.is_empty());
+        assert!(
+            m.water
+                .colors
+                .iter()
+                .all(|c| *c == [w[0] * k, w[1] * k, w[2] * k, alpha])
+        );
+    }
+
+    #[test]
+    fn textured_flat_ground_is_one_quad_with_layer_and_uvs() {
+        let (mut b, stone, _) = ids();
+        let bt = BlockTextures {
+            top: tex(3, FaceTint::None),
+            ..Default::default()
+        };
+        with_textures(&mut b, &[(stone, bt)]);
+        let p = padded(|_, y, _| if y < 10 { stone } else { AIR });
+        let m = mesh_chunk(&p, &b, &ChunkTint::NONE).opaque;
+        assert_eq!(m.quad_count(), 1);
+        assert!(m.material.iter().all(|m| *m == [MATERIAL_GROUND, 3.0]));
+        let mut uvs = m.uv.clone();
+        uvs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(uvs, [[0.0, 0.0], [0.0, 32.0], [32.0, 0.0], [32.0, 32.0]]);
+        for i in 0..m.positions.len() {
+            assert_eq!(m.uv[i], [m.positions[i][0], m.positions[i][2]]);
+        }
+        assert!(m.colors.iter().all(|c| *c == [1.0, 1.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn side_uvs_are_upright_and_face_right() {
+        let (mut b, stone, _) = ids();
+        let bt = BlockTextures {
+            top: tex(1, FaceTint::None),
+            side: tex(2, FaceTint::None),
+            bottom: tex(3, FaceTint::None),
+        };
+        with_textures(&mut b, &[(stone, bt)]);
+        let p = padded(|x, y, z| if (x, y, z) == (4, 5, 6) { stone } else { AIR });
+        let m = mesh_chunk(&p, &b, &ChunkTint::NONE).opaque;
+        assert_eq!(m.quad_count(), 6);
+        for q in 0..6 {
+            let vs = 4 * q..4 * q + 4;
+            let n = m.normals[4 * q];
+            let layer = m.material[4 * q][1];
+            if n[1] > 0.0 {
+                assert_eq!(layer, 1.0);
+            } else if n[1] < 0.0 {
+                assert_eq!(layer, 3.0);
+            } else {
+                assert_eq!(layer, 2.0);
+                // Right of a viewer facing the face: +x -> -z, -x -> +z, +z -> +x, -z -> -x.
+                let right = [n[2], 0.0, -n[0]];
+                let dotr = |p: [f32; 3]| p[0] * right[0] + p[2] * right[2];
+                for i in vs.clone() {
+                    assert_eq!(m.uv[i][1], -m.positions[i][1]);
+                    for j in vs.clone() {
+                        let (pi, pj) = (m.positions[i], m.positions[j]);
+                        assert_eq!(m.uv[j][0] - m.uv[i][0], dotr(pj) - dotr(pi));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn face_tints() {
+        let b0 = Blocks::builtin();
+        let (grass, stone) = (b0.id("grass").unwrap(), b0.id("granite").unwrap());
+        let mut tint = ChunkTint::NONE;
+        tint.grass = Some(grass);
+        tint.corners = [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.5, 0.5, 0.0],
+        ];
+        let single = |b: &Blocks, id| {
+            let p = padded(|x, y, z| if (x, y, z) == (4, 5, 6) { id } else { AIR });
+            mesh_chunk(&p, b, &tint).opaque
+        };
+        let top_vertices = |m: &MeshData| {
+            (0..m.positions.len())
+                .filter(|&i| m.normals[i] == [0.0, 1.0, 0.0])
+                .collect::<Vec<_>>()
+        };
+        // Climate on the tinted block.
+        let mut b = b0.clone();
+        let bt = BlockTextures {
+            top: tex(1, FaceTint::Climate(1.0)),
+            ..Default::default()
+        };
+        with_textures(&mut b, &[(grass, bt), (stone, bt)]);
+        let m = single(&b, grass);
+        let tops = top_vertices(&m);
+        assert_eq!(tops.len(), 4);
+        for i in tops {
+            let at = tint.at(m.positions[i][0], m.positions[i][2]);
+            let ao = AO_CURVE[3];
+            assert_eq!(m.colors[i], [at[0] * ao, at[1] * ao, at[2] * ao, 1.0]);
+        }
+        // Climate on a block that is not the tinted one: white.
+        let m = single(&b, stone);
+        for i in top_vertices(&m) {
+            assert_eq!(m.colors[i], [1.0, 1.0, 1.0, 1.0]);
+        }
+        // Fixed colour.
+        let c = [0.2, 0.4, 0.6];
+        let bt = BlockTextures {
+            top: tex(1, FaceTint::Fixed(c)),
+            ..Default::default()
+        };
+        with_textures(&mut b, &[(grass, bt)]);
+        let m = single(&b, grass);
+        for i in top_vertices(&m) {
+            assert_eq!(m.colors[i], [c[0], c[1], c[2], 1.0]);
+        }
+    }
+
+    #[test]
+    fn snow_layer_side_shows_the_bottom_eighth_of_the_texture() {
+        let mut b = Blocks::builtin();
+        let (stone, snow) = (b.id("granite").unwrap(), b.id("snow_layer").unwrap());
+        let bt = BlockTextures {
+            side: tex(5, FaceTint::None),
+            ..Default::default()
+        };
+        with_textures(&mut b, &[(snow, bt)]);
+        let p = padded(|x, y, z| match (x, y, z) {
+            (4, 4, 6) => stone,
+            (4, 5, 6) => snow,
+            _ => AIR,
+        });
+        let m = mesh_chunk(&p, &b, &ChunkTint::NONE).opaque;
+        let mut sides = 0;
+        for q in 0..m.quad_count() {
+            if m.material[4 * q][1] != 5.0 {
+                continue;
+            }
+            sides += 1;
+            let v = (4 * q..4 * q + 4).map(|i| m.uv[i][1]);
+            let lo = v.clone().fold(f32::MAX, f32::min);
+            let hi = v.fold(f32::MIN, f32::max);
+            assert_eq!(hi - lo, LAYER_H);
+        }
+        assert_eq!(sides, 4);
     }
 
     #[test]
