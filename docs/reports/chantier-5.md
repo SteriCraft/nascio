@@ -109,8 +109,54 @@ Limites connues :
 - Dans une reconnexion plus rapide qu'un tick, le `Hello.spawn` peut être l'ancien point ; la simulation, elle, place le joueur au bon endroit, et le client se cale sur le premier état.
 - Le nouveau tirage d'un point obstrué n'est couvert que par les tests de `spawn` (impossible d'obstruer 10 m autour d'un point par le jeu dans un test).
 
+## 5.4 — Prédiction et réconciliation du client
+Plan validé par l'auteur. `crates/client/src/player.rs` ; le client dépend de `nascio-physics` et toujours d'aucune crate de génération (`tests/no_generation.rs`).
+
+- **API** :
+  - `Player::new(hello, shapes, now)` ;
+  - `update(now, &Controls, &Mirror) -> Option<Commands>`, `on_state(&PlayerState, &Mirror)`, `on_msg(&ServerMsg)` ;
+  - `state()`, `display_pos()`, `eye()`, `running()`, `last_cmd()`, `set_auto_jump(bool)`, `set_rtt(Duration)` ;
+  - `events()` (`Died`, `Respawned`, `Mode`, `Snapped`) et `stats()` (corrections, commandes rejouées, renumérotations, états périmés).
+- **Horloge** : pas fixes de 1/60 s sur l'`Instant` de l'appelant. Elle fait 0 à 4 pas par mise à jour, et 3 après un gel (le reste est jeté). Sa cadence varie de ±2 % pour garder la file estimée du serveur entre 2 et 6 commandes ; cette file est le minimum sur 2 s de (non acquittées − RTT × 60).
+- **Réconciliation** :
+  - un état n'est accepté qu'à tick croissant ; la prédiction repart toujours de l'état du serveur et rejoue toutes les commandes non acquittées ;
+  - une correction est un changement au bit près de l'état prédit présent ;
+  - un acquittement au-delà de la dernière commande vide la file, et la commande suivante prend `ack + 1`.
+- **Cellules inconnues** : la prédiction s'arrête sur la première commande qui en lit une et la retente à chaque pas. Le joueur est figé tant qu'elle est arrêtée, ou au-delà de 60 commandes non acquittées ; les répétitions continuent de partir.
+- **Lissage** : affiché = prédit + décalage ; une correction ajoute (ancienne − nouvelle prédiction, sur le tore) ; décroissance τ = 100 ms, nulle sous 1 mm.
+  - Recalage immédiat au-delà de 2 m, à la mort, à la réapparition, au changement de mode et à la renumérotation.
+- **Commandes** :
+  - envoi tous les 3 pas des 32 dernières commandes non acquittées ;
+  - course : deux appuis sur Z en 300 ms, arrêt au relâchement ; accroupi = `CROUCH` ;
+  - le saut automatique ajoute `JUMP` à la commande, que le serveur reçoit.
+- **Mort** : le client continue de créer des commandes sans touche, sans prédire. Le serveur les acquitte sans effet et ne comble donc pas à la réapparition.
+- **Protocole v11** : `ClientMsg::Resend { column }`.
+  - Le `Mirror` oublie une colonne qu'une édition atteint sous sa plage (ses lots attendent ; une colonne plus ancienne arrivée entre-temps n'est pas gardée) et la redemande une fois (`take_resends`).
+  - Le serveur la retire de `subs` et relance le parcours de l'anneau (`rescan`) ; elle repart sur le budget du client. Une colonne absente de `subs` est ignorée.
+- **Tests** :
+  - unitaires du client (7 nouveaux) : double appui, lissage et seuil de 2 m, état périmé ignoré, arrêt sur cellule inconnue puis reprise, rejeu sans correction et renumérotation, mort puis réapparition, gel (3 pas, le reste jeté), oubli et nouvelle demande d'une colonne dans `Mirror` ;
+  - `tests/prediction.rs` : 150 ms de latence dans chaque sens, 30 ms de gigue, 5 % de pertes dans les deux sens.
+
+| Scénario | Résultat |
+|---|---|
+| 8 s en cercle, en sautant, sans édition | **0 correction**, ≈ 4 400 commandes rejouées, aucun état périmé, cadence 1,00 |
+| Mur posé 1,2 m devant, en marchant dessus | 1 correction, 0 dans les 1,5 dernières secondes, arrêté à 0,3 m du mur (au mm près) |
+| Gel du client de 500 ms | 12 à 15 pas comblés par le serveur, 0 renumérotation, 4 à 5 corrections, 0 dans les 2 dernières secondes |
+| Gel du client de 1 s | 42 à 45 pas comblés, 7 à 8 renumérotations (un aller simple), 11 à 15 corrections, 0 dans les 2 dernières secondes |
+| Mort (enterré) puis `Respawn` | `Died` puis `Snapped` ; `Respawned` puis `Snapped` ; 0 correction ensuite |
+
+- **Renumérotation en rafale** : après un gel plus long que 2 × latence + 300 ms, le serveur comble au-delà de la dernière commande du client. Le client se renumérote à chaque état jusqu'à ce que ses nouvelles commandes atteignent le serveur, puis tout se stabilise.
+  - Sous ce seuil (500 ms à 150 ms de latence), les pas comblés restent derrière la numérotation du client : quelques corrections, sans renumérotation.
+  - **À proposer à l'auteur** : renuméroter à `ack + 1 + RTT × 60`, pour un seul recalage.
+
+Limites connues :
+- Le visualiseur n'est pas encore branché sur `Player` (5.5). Il ne vide pas `take_resends` : la liste reste vide sauf après un creusement sous la plage d'une colonne.
+- `Respawned` arrive par le flux de contrôle, les états par datagrammes : un état d'avant la réapparition reçu après elle peut ramener la vue une fraction de seconde au lieu de la mort (rare, recalé par l'état suivant).
+- La mesure à 500 bots avec de vraies commandes (bots sur une autre machine) reste à faire.
+
 Texte proposé pour la spec (§8.1, §8.4 et §8.5), mis à jour en 5.3, à intégrer en 5.6 :
-- §8.1 : `PROTOCOL_VERSION` vaut 10 ; datagrammes non fiables pour les états des entités, les commandes du joueur et son état autoritaire, chacun précédé d'un octet de type. Le client dépend aussi de `nascio-physics`.
+- §8.1 : `PROTOCOL_VERSION` vaut 11 ; datagrammes non fiables pour les états des entités, les commandes du joueur et son état autoritaire, chacun précédé d'un octet de type. Le client dépend aussi de `nascio-physics`.
 - §8.4 (nouveau point, **le mouvement**) : le client envoie à 20 Hz ses commandes numérotées, une par pas de 1/60 s, en répétant les 32 dernières non acquittées. Le serveur simule chaque joueur avec `nascio-physics`, contre les blocs mêmes qu'il envoie aux clients (air au-dessus d'une colonne, inconnu au-dessous) : chaque tick, au plus 3 pas plus un de rattrapage, dans un crédit de 3 pas par tick gardé jusqu'à 9 ; une commande dont une cellule est inconnue attend. Sans aucun datagramme de commandes pendant 250 ms, le serveur avance le joueur sans touche, numérote ces pas à la suite et les acquitte (les vraies commandes de ces numéros sont ignorées ; un client qui reçoit un acquittement au-delà de sa dernière commande numérote la suivante après l'acquittement). Il renvoie à chaque tick, avant les entités et dans le même budget, l'état du joueur (position et vitesse exactes, n° de la dernière commande appliquée), sur lequel le client rejoue ses commandes suivantes.
 - §8.4 (suite, **arrivée, mort et vol**) : un joueur revient à sa dernière position (gardée avec son compte au départ, à l'arrêt du serveur et toutes les 60 s ; un joueur mort au départ revient à son point). À l'arrivée et à la réapparition, un joueur dans des blocs va à la place libre la plus proche à 10 m au plus ; sans place, il meurt d'étouffement à sa dernière position, ou reçoit un autre point près du même site s'il était à son point. Un joueur qu'une édition enferme est posé sur les blocs, sauf si la rangée au-dessus de sa tête est solide : il meurt d'étouffement. Toucher le magma tue. `Died { cause }` prévient le client ; un mort ne bouge plus et n'est plus vu des autres ; `Respawn` le ramène au point de son compte (`Respawned`). Le vol est réservé aux administrateurs (`Fly`, ou la commande de console `fly`), sans gravité, sans traverser les blocs.
+- §8.4 (suite, **prédiction**) : le client prédit son joueur avec la même physique sur les blocs de son miroir, rejoue ses commandes non acquittées sur chaque état du serveur et lisse les corrections (τ = 100 ms, recalage au-delà de 2 m). Une édition sous la plage d'une colonne lui fait oublier la colonne, qu'il redemande (`ClientMsg::Resend`).
 - §8.5 : « les positions (`Move`) et » disparaît ; le point « Un déplacement plus rapide… (`Correct`) » est remplacé par : le serveur simule lui-même le joueur, et un seau de jetons limite les datagrammes de commandes (`input_datagrams_per_s`). La portée d'édition (`edit_reach_m`, 5 m) se mesure des yeux, tels qu'ils étaient après la commande que porte `SetBlock.cmd`, au point le plus proche de la cellule ; une édition qui précède sa commande attend au plus une seconde ; un bloc qui fait obstacle ne se pose pas dans un joueur.

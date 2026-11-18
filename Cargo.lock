@@ -4405,6 +4405,7 @@ dependencies = [
  "anyhow",
  "nascio-chunk",
  "nascio-core",
+ "nascio-physics",
  "nascio-protocol",
  "quinn",
  "tokio",

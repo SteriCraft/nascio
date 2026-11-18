@@ -11,6 +11,7 @@ repository.workspace = true
 nascio-core.workspace = true
 nascio-chunk.workspace = true
 nascio-protocol.workspace = true
+nascio-physics.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 quinn.workspace = true

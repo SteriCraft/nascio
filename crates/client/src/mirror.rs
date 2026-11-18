@@ -5,8 +5,13 @@
 //! of its last edit. A batch is applied to a column of lower version (values are absolute,
 //! so edits already in the column are replayed harmlessly) and kept while its column is on
 //! its way (columns and control messages travel on different streams).
+//!
+//! A batch below the chunks of a column (digging deeper than the server's range) cannot be
+//! applied: what lies under the column is unknown, not air. The column is forgotten (its
+//! cells become unknown, the batches wait) and asked again ([`Mirror::take_resends`]:
+//! `ClientMsg::Resend`); the server's new column covers the edited chunk.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nascio_chunk::block::AIR;
 use nascio_chunk::{Chunk, PaddedChunk};
@@ -27,6 +32,15 @@ struct Batch {
 pub struct Mirror {
     columns: BTreeMap<(i32, i32), Column>,
     waiting: BTreeMap<(i32, i32), Vec<Batch>>,
+    /// Columns asked again and not received yet.
+    asked: BTreeSet<(i32, i32)>,
+    /// Columns to ask again (taken by the caller).
+    resend: Vec<[i32; 2]>,
+}
+
+/// A batch newer than the column falls below its chunks.
+fn below(c: &Column, b: &Batch) -> bool {
+    b.lsn > c.version && b.cy < c.cy_min
 }
 
 fn key(cx: i32, cz: i32) -> (i32, i32) {
@@ -38,14 +52,33 @@ fn key(cx: i32, cz: i32) -> (i32, i32) {
 
 impl Mirror {
     /// A column arrived: replaces the one held and applies the batches newer than it.
+    /// A column older than a batch below its chunks is not kept: the batches wait, and the
+    /// column is asked again (unless it already is).
     pub fn column(&mut self, mut c: Column) {
         let k = key(c.cx, c.cz);
-        if let Some(batches) = self.waiting.remove(&k) {
-            for b in batches {
+        if let Some(batches) = self.waiting.get(&k) {
+            if batches.iter().any(|b| below(&c, b)) {
+                self.columns.remove(&k);
+                self.ask(k);
+                return;
+            }
+            for b in self.waiting.remove(&k).unwrap_or_default() {
                 apply(&mut c, &b);
             }
         }
+        self.asked.remove(&k);
         self.columns.insert(k, c);
+    }
+
+    fn ask(&mut self, k: (i32, i32)) {
+        if self.asked.insert(k) {
+            self.resend.push([k.0, k.1]);
+        }
+    }
+
+    /// Columns to ask the server again (`ClientMsg::Resend`), since the last call.
+    pub fn take_resends(&mut self) -> Vec<[i32; 2]> {
+        std::mem::take(&mut self.resend)
     }
 
     /// Blocks changed in chunk `chunk` (from a `ServerMsg::Blocks`).
@@ -57,6 +90,11 @@ impl Mirror {
             changes,
         };
         match self.columns.get_mut(&k) {
+            Some(c) if below(c, &b) => {
+                self.columns.remove(&k);
+                self.waiting.entry(k).or_default().push(b);
+                self.ask(k);
+            }
             Some(c) => apply(c, &b),
             None => self.waiting.entry(k).or_default().push(b),
         }
@@ -68,6 +106,7 @@ impl Mirror {
             let k = key(c[0], c[1]);
             self.columns.remove(&k);
             self.waiting.remove(&k);
+            self.asked.remove(&k);
         }
     }
 
@@ -168,16 +207,13 @@ impl Mirror {
     }
 }
 
-/// Applies a batch to a column of lower version; chunks outside the column are added as air.
+/// Applies a batch to a column of lower version; chunks above the column are added as air
+/// (a batch below it never comes here: see [`below`]).
 fn apply(c: &mut Column, b: &Batch) {
     if b.lsn <= c.version {
         return;
     }
-    // Grow the column to the batch's chunk (the server sends the full column again later).
-    while b.cy < c.cy_min {
-        c.chunks.insert(0, Chunk::filled(0));
-        c.cy_min -= 1;
-    }
+    debug_assert!(b.cy >= c.cy_min, "a batch below its column");
     while b.cy >= c.cy_min + c.chunks.len() as i32 {
         c.chunks.push(Chunk::filled(0));
     }
@@ -233,5 +269,39 @@ mod tests {
         assert_eq!(m.block(BlockPos::new(0, 0, 0)), Some(1));
         m.forget(&[[CHUNKS_PER_AXIS - 1, 0]]);
         assert!(!m.has(-1, 0));
+    }
+
+    #[test]
+    fn an_edit_below_a_column_forgets_it_and_asks_it_again() {
+        let mut m = Mirror::default();
+        m.column(col(0, 5));
+        assert_eq!(m.block(BlockPos::new(3, 40, 3)), Some(AIR), "air above");
+        // Dug below the column (chunk −1): its cells are unknown, the column asked again.
+        m.blocks([0, -1, 0], 6, vec![(0, 0)]);
+        assert!(!m.has(0, 0));
+        assert_eq!(m.block(BlockPos::new(3, 40, 3)), None);
+        assert_eq!(m.take_resends(), vec![[0, 0]]);
+        // Another batch waits; the column already on its way (older) is not kept, and not
+        // asked twice.
+        m.blocks([0, 0, 0], 7, vec![(1, 2)]);
+        m.column(col(0, 5));
+        assert!(!m.has(0, 0));
+        assert!(m.take_resends().is_empty());
+        // The server's new column covers the edited chunk.
+        let mut fresh = col(0, 6);
+        fresh.cy_min = -1;
+        fresh.chunks.insert(0, Chunk::filled(0));
+        m.column(fresh);
+        assert!(m.has(0, 0));
+        assert_eq!(m.block(BlockPos::new(0, -32, 0)), Some(0));
+        assert_eq!(
+            m.block(BlockPos::new(1, 0, 0)),
+            Some(2),
+            "the later batch applied"
+        );
+        // An edit at or above the column's chunks is applied as before.
+        m.blocks([0, 3, 0], 8, vec![(0, 2)]);
+        assert!(m.has(0, 0) && m.take_resends().is_empty());
+        assert_eq!(m.block(BlockPos::new(0, 96, 0)), Some(2));
     }
 }

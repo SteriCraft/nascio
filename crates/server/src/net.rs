@@ -322,6 +322,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         entity_bytes: Default::default(),
         tiles: Default::default(),
         inputs: Mutex::new(InputQueue::new(MAX_QUEUED_COMMANDS)),
+        rescan: AtomicBool::new(false),
     });
     {
         let mut sessions = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -580,6 +581,19 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
                         }
                     });
                 }
+                ClientMsg::Resend { column } => {
+                    // Sent again under the client's budget, once the streamer sees it missing.
+                    // Not held (forgotten meanwhile by the server, or never sent): ignored.
+                    let k = wrap_column(column[0], column[1]);
+                    if link
+                        .subs
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&k)
+                    {
+                        link.rescan.store(true, Ordering::Relaxed);
+                    }
+                }
                 ClientMsg::Bye => break,
                 ClientMsg::Hello(_) => bail!("second hello"),
                 m => shared.input(Input::Msg(id, m)),
@@ -745,6 +759,9 @@ async fn stream_columns(conn: quinn::Connection, link: Arc<PlayerLink>, shared: 
         let now = Instant::now();
         tokens = (tokens + budget * (now - last).as_secs_f64()).min(budget);
         last = now;
+        if link.rescan.swap(false, Ordering::Relaxed) {
+            complete = None;
+        }
         let pos = link.view.lock().unwrap_or_else(|e| e.into_inner()).pos;
         let cs = f64::from(CHUNK_SIZE);
         let (pcx, pcz) = wrap_column(

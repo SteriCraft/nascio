@@ -23,11 +23,12 @@ pub mod varint;
 /// every unidirectional stream. v9: authoritative movement: numbered commands and the player's
 /// state in datagrams ([`player`]), a [`ServerDatagram`] or [`ClientDatagram`] byte before every
 /// datagram, `PlayerParams` in `ServerHello`; `Move` and `Correct` removed. v10: the server simulates the players:
-/// `ServerMsg::Died` / `Respawned`, `ClientMsg::Respawn` and `Fly`, `SetBlock.cmd`.
+/// `ServerMsg::Died` / `Respawned`, `ClientMsg::Respawn` and `Fly`, `SetBlock.cmd`. v11:
+/// `ClientMsg::Resend` (the client's prediction, chantier 5.4).
 ///
 /// [`ClientMsg::Tiles`]: messages::ClientMsg::Tiles
 /// [`ClientMsg::Sky`]: messages::ClientMsg::Sky
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// First byte of a unidirectional stream from the server: what follows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

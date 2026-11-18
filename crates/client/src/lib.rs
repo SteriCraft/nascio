@@ -9,8 +9,10 @@ pub mod discovery;
 pub mod entities;
 pub mod mirror;
 pub mod net;
+pub mod player;
 
 pub use entities::{Entities, Pose};
 pub use mirror::Mirror;
 pub use nascio_protocol::messages::Auth;
 pub use net::{Connection, Event, connect, connect_with};
+pub use player::{Controls, Player, PlayerEvent, PlayerStats};

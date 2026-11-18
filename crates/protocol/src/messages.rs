@@ -95,6 +95,11 @@ pub enum ClientMsg {
     Respawn,
     /// Asks to fly or to walk again; administrators only (others are refused and logged).
     Fly(bool),
+    /// Asks a column again (an edit fell below its chunks: the client forgot it). Ignored for
+    /// a column the server is not sending to the client.
+    Resend {
+        column: [i32; 2],
+    },
 }
 
 /// Messages from the server.

@@ -72,6 +72,8 @@ pub struct PlayerLink {
     pub tiles: Mutex<VecDeque<nascio_chunk::horizon::TileKey>>,
     /// Movement commands received and not applied yet.
     pub inputs: Mutex<InputQueue>,
+    /// A column was asked again (`Resend`): the column streamer scans the ring again.
+    pub rescan: AtomicBool,
 }
 
 /// Commands a player may have waiting: one second of steps.
