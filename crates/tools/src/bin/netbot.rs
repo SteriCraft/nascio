@@ -39,7 +39,12 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let cert = std::fs::read(&cli.cert)?;
+    let cert = std::fs::read(&cli.cert).map_err(|e| {
+        anyhow::anyhow!(
+            "server certificate {}: {e} (copy the server's <data>/server/cert.der here)",
+            cli.cert.display()
+        )
+    })?;
     anyhow::ensure!(
         cli.walk.as_ref().is_none_or(|w| w.len() == 3),
         "--walk takes x,y,z"

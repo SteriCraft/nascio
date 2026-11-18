@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
         cli.centre.as_ref().is_none_or(|c| c.len() == 3),
         "--centre takes x,y,z"
     );
-    let cert = Arc::new(std::fs::read(&cli.cert)?);
+    let cert = Arc::new(read_cert(&cli.cert)?);
     let counters: Arc<Vec<Counters>> =
         Arc::new((0..cli.bots).map(|_| Counters::default()).collect());
     let start = Instant::now();
@@ -282,4 +282,14 @@ async fn bot(k: usize, cli: &Cli, cert: &[u8], c: &Counters, until: Instant) -> 
     }
     conn.close();
     Ok(())
+}
+
+/// The server's certificate, with a hint when it is missing.
+fn read_cert(path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+    std::fs::read(path).map_err(|e| {
+        anyhow::anyhow!(
+            "server certificate {}: {e} (copy the server's <data>/server/cert.der here)",
+            path.display()
+        )
+    })
 }
