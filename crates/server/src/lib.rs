@@ -302,6 +302,13 @@ impl RunningServer {
     }
 
     /// Closes the connections, stops the threads and makes every edit durable.
+    /// Tells every client the server stops and gives the closing frames time to leave (at most
+    /// 2 s), so that the clients see a closed connection at once, not a timeout.
+    pub async fn close_connections(&self) {
+        self.endpoint.close(0u32.into(), b"server stopped");
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.endpoint.wait_idle()).await;
+    }
+
     pub fn shutdown(self) -> anyhow::Result<()> {
         if let Some(d) = &self.discovery {
             d.abort();

@@ -294,6 +294,7 @@ async fn console(
     }
     term.end();
     say!("stopping");
+    server.close_connections().await;
     let r = server.shutdown();
     done.store(true, Ordering::Relaxed);
     r
