@@ -4508,6 +4508,7 @@ dependencies = [
  "nascio-chunk",
  "nascio-client",
  "nascio-core",
+ "nascio-physics",
  "nascio-protocol",
  "nascio-server",
  "nascio-voxel",

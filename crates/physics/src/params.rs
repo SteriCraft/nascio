@@ -44,7 +44,7 @@ impl Default for PlayerParams {
             step_hz: 60,
             width: 0.6,
             height: 1.8,
-            eye_height: 1.62,
+            eye_height: 1.75,
             walk_speed: 4.3,
             run_speed: 5.6,
             crouch_speed: 1.3,

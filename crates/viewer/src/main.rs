@@ -291,7 +291,9 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             // Only the columns the server sends can be shown, and a column is meshed once its
             // neighbours arrived: keep one column inside the radius.
             settings.view_distance_m = settings.view_distance_m.min(r.radius_m as f32 - 64.0);
-            cam.pos = WorldPos::new(r.spawn[0], r.spawn[1], r.spawn[2]);
+            // The server gives the feet; the camera is at the eyes.
+            let eyes = nascio_physics::PlayerParams::default().eye_height;
+            cam.pos = WorldPos::new(r.spawn[0], r.spawn[1] + eyes, r.spawn[2]);
             info!("connected to {addr}, columns within {} m", r.radius_m);
             Some(r)
         }
