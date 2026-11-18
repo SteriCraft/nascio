@@ -9,7 +9,11 @@
 //! ```text
 //! cargo run -p nascio-tools --release --bin netbench -- codecs out/m7/world-42
 //! cargo run -p nascio-tools --release --bin netbench -- fsync out/netbench
+//! cargo run -p nascio-tools --release --bin netbench -- horizon out/server/world-42
 //! ```
+//!
+//! Horizon (chantier 4): compressed size of the horizon tiles a client needs at sites spread
+//! over the world, then after a move of 512 m, and of `WorldSky` (reduced climate, far ground).
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -18,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::ensure;
 use clap::{Parser, Subcommand};
+use nascio_chunk::horizon::{TileKey, spacing};
 use nascio_core::consts::CHUNKS_PER_AXIS;
 use nascio_voxel::block::BlockId;
 use nascio_voxel::chunk::{N, VOLUME};
@@ -56,6 +61,14 @@ enum Cmd {
         /// Edits per second asked for (0: as fast as possible).
         #[arg(long, default_value_t = 0)]
         rate: u64,
+    },
+    /// Horizon tiles and `WorldSky`: what the server sends for the far view.
+    Horizon {
+        world: PathBuf,
+        #[arg(long, default_value_t = 8)]
+        sites: u64,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
     },
     /// Cost of `fsync` for one record and for groups of records, in `dir`.
     Fsync {
@@ -609,6 +622,110 @@ fn wal(dir: PathBuf, seconds: f64, interval_ms: u64, rate: u64) -> anyhow::Resul
     Ok(())
 }
 
+/// Tiles of the client's horizon around `center` (the viewer's layout: 5 levels of 192 cells
+/// from 16 m, centre a multiple of 512 m; see `crates/viewer/src/horizon.rs`).
+fn horizon_tiles(center: (i64, i64)) -> std::collections::BTreeSet<TileKey> {
+    let mut set = std::collections::BTreeSet::new();
+    for level in 0..5u8 {
+        let s = spacing(level) as i64;
+        let half = 96 * s;
+        let (oi, oj) = ((center.0 - half) / s, (center.1 - half) / s);
+        let (a, _) = TileKey::containing(level, oi - 1, oj - 1);
+        let (b, _) = TileKey::containing(level, oi + 193, oj + 193);
+        for j in a.j..=b.j {
+            for i in a.i..=b.i {
+                set.insert(TileKey { level, i, j });
+            }
+        }
+    }
+    set
+}
+
+fn horizon(dir: PathBuf, sites: u64, seed: u64) -> anyhow::Result<()> {
+    let world = World::load(&dir)?;
+    let terrain = Terrain::from_world(&world, GenConfig::standard().voxel)?;
+    println!(
+        "world {} (generator {})",
+        dir.display(),
+        world.config.generator_version
+    );
+    let t = Instant::now();
+    let sky = nascio_server::horizon::world_sky(&world, &terrain)?;
+    let sky_s = t.elapsed().as_secs_f64();
+    let climate = nascio_server::horizon::reduced_climate(&world)?;
+    let climate_z = zstd::bulk::compress(&postcard::to_stdvec(&climate)?, 9)?;
+    println!(
+        "WorldSky: {} KB compressed ({:.1} s to build); reduced climate alone {} KB, far ground about {} KB",
+        sky.len() >> 10,
+        sky_s,
+        climate_z.len() >> 10,
+        (sky.len() - climate_z.len().min(sky.len())) >> 10
+    );
+    let snap = 512i64;
+    let (mut all_tiles, mut all_bytes, mut all_raw) = (0usize, 0usize, 0usize);
+    let (mut move_tiles, mut move_bytes) = (0usize, 0usize);
+    let mut build_s = 0.0;
+    for k in 0..sites {
+        let h = mix64(seed ^ k.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let size = nascio_core::consts::WORLD_SIZE as i64;
+        let c = (
+            ((h % size as u64) as i64 / snap) * snap,
+            (((h >> 32) % size as u64) as i64 / snap) * snap,
+        );
+        let here = horizon_tiles(c);
+        let there = horizon_tiles((c.0 + snap, c.1));
+        let encode = |key: TileKey| -> anyhow::Result<(usize, usize)> {
+            let tile = nascio_voxel::horizon::horizon_tile(&terrain, key);
+            let bytes = nascio_protocol::horizon::encode_tile(&tile)?;
+            let raw = zstd::bulk::decompress(&bytes, 1 << 20)?.len();
+            Ok((bytes.len(), raw))
+        };
+        let t = Instant::now();
+        let sizes: Vec<(usize, usize)> = here
+            .par_iter()
+            .map(|&key| encode(key))
+            .collect::<anyhow::Result<_>>()?;
+        build_s += t.elapsed().as_secs_f64();
+        let bytes: usize = sizes.iter().map(|s| s.0).sum();
+        let raw: usize = sizes.iter().map(|s| s.1).sum();
+        let new: Vec<TileKey> = there.difference(&here).copied().collect();
+        let moved: usize = new
+            .par_iter()
+            .map(|&key| encode(key).map(|s| s.0))
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .iter()
+            .sum();
+        println!(
+            "site {k} ({:>6}, {:>6}): {} tiles, {} KB ({} KB before zstd); +512 m east: {} tiles, {} KB",
+            c.0,
+            c.1,
+            here.len(),
+            bytes >> 10,
+            raw >> 10,
+            new.len(),
+            moved >> 10
+        );
+        all_tiles += here.len();
+        all_bytes += bytes;
+        all_raw += raw;
+        move_tiles += new.len();
+        move_bytes += moved;
+    }
+    let n = sites.max(1) as usize;
+    println!(
+        "mean: horizon {} tiles, {} KB ({:.0} B per tile, {} KB before zstd), built in {:.2} s on {} threads; move of 512 m: {} tiles, {} KB",
+        all_tiles / n,
+        (all_bytes / n) >> 10,
+        all_bytes as f64 / all_tiles.max(1) as f64,
+        (all_raw / n) >> 10,
+        build_s / n as f64,
+        rayon::current_num_threads(),
+        move_tiles / n,
+        (move_bytes / n) >> 10
+    );
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
         Cmd::Codecs {
@@ -618,6 +735,7 @@ fn main() -> anyhow::Result<()> {
             seed,
         } => codecs(world, sites, side, seed),
         Cmd::Fsync { dir, rounds } => fsync(dir, rounds),
+        Cmd::Horizon { world, sites, seed } => horizon(world, sites, seed),
         Cmd::Wal {
             dir,
             seconds,

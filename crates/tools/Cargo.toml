@@ -9,6 +9,8 @@ repository.workspace = true
 
 [dependencies]
 nascio-core.workspace = true
+nascio-chunk.workspace = true
+postcard.workspace = true
 nascio-world.workspace = true
 nascio-worldgen.workspace = true
 nascio-voxel.workspace = true

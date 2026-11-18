@@ -167,7 +167,8 @@ impl Remote {
                                     lock(&cl).get_or_insert(reason);
                                     break;
                                 }
-                                Some(Event::Msg(_)) => {}
+                                // Used from step 4 of chantier 4 (horizon and sky from the server).
+                                Some(Event::Msg(_) | Event::Tile(_) | Event::Sky(..)) => {}
                                 None => {
                                     lock(&cl).get_or_insert_with(|| "connection lost".into());
                                     break;

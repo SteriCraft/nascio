@@ -15,6 +15,7 @@ gui = ["dep:bevy", "dep:bevy_egui", "dep:nascio-worldgen"]
 
 [dependencies]
 nascio-core.workspace = true
+nascio-chunk.workspace = true
 nascio-world.workspace = true
 nascio-voxel.workspace = true
 nascio-protocol.workspace = true

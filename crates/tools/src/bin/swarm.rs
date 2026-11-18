@@ -338,7 +338,7 @@ async fn bot(
                     c.refused.fetch_add(1, Ordering::Relaxed);
                 }
                 Some(Event::Closed(r)) => anyhow::bail!("closed: {r}"),
-                Some(Event::Msg(_)) => {}
+                Some(Event::Msg(_) | Event::Tile(_) | Event::Sky(..)) => {}
                 None => anyhow::bail!("connection ended"),
             }
         }

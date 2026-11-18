@@ -10,9 +10,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
+use nascio_chunk::horizon::MAX_LEVELS;
 use nascio_core::consts::{CHUNK_SIZE, WORLD_SIZE_F64};
 use nascio_core::torus;
+use nascio_protocol::UniKind;
 use nascio_protocol::frame::{Deframer, MAX_CONTROL_FRAME, frame};
+use nascio_protocol::horizon::MAX_TILES_PER_REQUEST;
 use nascio_protocol::messages::{
     Auth, Chat, ClientMsg, MAX_CHAT_CHARS, ServerHello, ServerMsg, from_bytes, to_bytes,
 };
@@ -32,6 +35,10 @@ pub struct Shared {
     pub seed: u64,
     pub hello: ServerHello,
     pub cache: Arc<ColumnCache>,
+    /// Horizon tiles, shared by every client.
+    pub tiles: Arc<crate::horizon::TileCache>,
+    /// `WorldSky`, compressed, built at start.
+    pub sky: Arc<[u8]>,
     pub inputs: Mutex<Sender<Input>>,
     pub next_id: AtomicU32,
     pub online: AtomicU32,
@@ -287,6 +294,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         max_datagram: conn.max_datagram_size().unwrap_or(0).into(),
         send_space: usize::MAX.into(),
         entity_bytes: Default::default(),
+        tiles: Default::default(),
     });
     {
         let mut sessions = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -355,6 +363,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     let mut overrun = Overrun::default();
     // Last accepted position, and when.
     let mut last_move = (sh.spawn, now);
+    let mut sky_asked = false;
     // Events by kind: the first of each kind is logged, then every hundredth.
     let counts: Mutex<BTreeMap<String, u64>> = Mutex::default();
     let abuse = |kind: &str, detail: &str| {
@@ -471,6 +480,48 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
                         from: name.clone(),
                         text,
                     }));
+                }
+                ClientMsg::Tiles { keys } => {
+                    let bad = keys.len() > MAX_TILES_PER_REQUEST
+                        || keys.iter().any(|k| k.level >= MAX_LEVELS);
+                    if bad {
+                        violations += 1;
+                        abuse("tiles", &format!("{} tiles asked", keys.len()));
+                        continue;
+                    }
+                    let mut q = link.tiles.lock().unwrap_or_else(|e| e.into_inner());
+                    for k in keys {
+                        if q.len() >= cfg.max_queued_tiles {
+                            abuse("tiles", "tile queue full, request dropped");
+                            break;
+                        }
+                        if !q.contains(&k) {
+                            q.push_back(k);
+                        }
+                    }
+                }
+                ClientMsg::Sky => {
+                    // Once per connection: the client keeps it in its disk cache.
+                    if std::mem::replace(&mut sky_asked, true) {
+                        abuse("sky", "sky asked twice");
+                        continue;
+                    }
+                    let (conn, shared) = (conn.clone(), shared.clone());
+                    tokio::spawn(async move {
+                        let sent: anyhow::Result<()> = async {
+                            let mut s = conn.open_uni().await?;
+                            s.write_all(&[UniKind::Sky as u8]).await?;
+                            s.write_all(&shared.sky).await?;
+                            s.finish()?;
+                            Ok(())
+                        }
+                        .await;
+                        if sent.is_ok() {
+                            shared
+                                .sent_bytes
+                                .fetch_add(shared.sky.len() as u64, Ordering::Relaxed);
+                        }
+                    });
                 }
                 ClientMsg::Bye => break,
                 ClientMsg::Hello(_) => bail!("second hello"),
@@ -604,8 +655,12 @@ fn offsets(radius: i32) -> Vec<(i32, i32)> {
     v
 }
 
+/// Bytes reserved for a tile until it is sent (about its compressed size).
+const TILE_RESERVE: f64 = 3_000.0;
+
 /// Sends the columns around the player, closest first, under the byte budget; forgets the
-/// columns that went out of range.
+/// columns that went out of range. Once the columns in range are all sent, sends the horizon
+/// tiles the client asked, out of the same budget.
 async fn stream_columns(conn: quinn::Connection, link: Arc<PlayerLink>, shared: Arc<Shared>) {
     let cfg = &shared.cfg;
     let radius = (cfg.chunk_radius_m as i32 + CHUNK_SIZE - 1) / CHUNK_SIZE;
@@ -643,6 +698,33 @@ async fn stream_columns(conn: quinn::Connection, link: Arc<PlayerLink>, shared: 
             (pos[2].rem_euclid(WORLD_SIZE_F64) / cs).floor() as i32,
         );
         if complete == Some((pcx, pcz)) {
+            // The near columns are all sent: the horizon tiles asked, oldest first.
+            while tokens > 0.0 && flight.len() < cfg.columns_in_flight {
+                let Some(key) = link
+                    .tiles
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pop_front()
+                else {
+                    break;
+                };
+                tokens -= TILE_RESERVE;
+                let conn = conn.clone();
+                let shared = shared.clone();
+                flight.spawn(async move {
+                    let bytes = shared.tiles.get(key).await?;
+                    let mut s = conn.open_uni().await?;
+                    // Below the columns: a column asked later still goes first.
+                    s.set_priority(-1)?;
+                    s.write_all(&[UniKind::Tile as u8]).await?;
+                    s.write_all(&bytes).await?;
+                    s.finish()?;
+                    shared
+                        .sent_bytes
+                        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    Ok((bytes.len() as f64 - TILE_RESERVE).max(0.0) as usize)
+                });
+            }
             continue;
         }
         // Forget what went out of range.
@@ -689,6 +771,7 @@ async fn stream_columns(conn: quinn::Connection, link: Arc<PlayerLink>, shared: 
             flight.spawn(async move {
                 let bytes = shared.cache.get(cx, cz).await?;
                 let mut s = conn.open_uni().await?;
+                s.write_all(&[UniKind::Column as u8]).await?;
                 s.write_all(&bytes).await?;
                 s.finish()?;
                 shared.sent_columns.fetch_add(1, Ordering::Relaxed);

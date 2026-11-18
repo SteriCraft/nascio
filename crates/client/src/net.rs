@@ -1,5 +1,6 @@
 //! Connection to a server over QUIC: a control stream (framed `postcard` messages) and one
-//! unidirectional stream per column sent by the server.
+//! unidirectional stream per column, horizon tile or `WorldSky` sent by the server (a
+//! [`UniKind`] byte first).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -7,12 +8,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use nascio_chunk::horizon::HorizonTile;
 use nascio_chunk::{BlockRegistry, Blocks};
+use nascio_protocol::UniKind;
 use nascio_protocol::chunk::{Column, MAX_COLUMN_BYTES};
 use nascio_protocol::frame::{Deframer, MAX_CONTROL_FRAME, frame};
+use nascio_protocol::horizon::{MAX_TILE_BYTES, decode_tile};
 use nascio_protocol::messages::{
     Auth, ClientHello, ClientMsg, ServerHello, ServerMsg, from_bytes, to_bytes,
 };
+use nascio_protocol::sky::{MAX_SKY_BYTES, WorldSky};
 use quinn::rustls::RootCertStore;
 use quinn::rustls::pki_types::CertificateDer;
 use tokio::sync::mpsc;
@@ -22,6 +27,11 @@ use tokio::sync::mpsc;
 pub enum Event {
     Msg(ServerMsg),
     Column(Box<Column>),
+    /// A horizon tile asked with `ClientMsg::Tiles`.
+    Tile(Box<HorizonTile>),
+    /// The sky and far ground asked with `ClientMsg::Sky`, with its compressed bytes (for the
+    /// disk cache).
+    Sky(Box<WorldSky>, Vec<u8>),
     /// An entity datagram (decode with [`crate::Entities`], then acknowledge its seq).
     Entities(Vec<u8>),
     /// The connection ended (reason).
@@ -178,7 +188,7 @@ pub async fn connect_with(
             }
         }
     });
-    // Columns, one unidirectional stream each.
+    // Columns, tiles and the sky, one unidirectional stream each.
     let c2 = conn.clone();
     let column_bytes = Arc::new(AtomicU64::new(0));
     let cb = column_bytes.clone();
@@ -186,18 +196,35 @@ pub async fn connect_with(
         while let Ok(mut s) = c2.accept_uni().await {
             let (ev, cb) = (ev.clone(), cb.clone());
             tokio::spawn(async move {
-                let Ok(bytes) = s.read_to_end(MAX_COLUMN_BYTES).await else {
+                let mut kind = [0u8; 1];
+                if s.read_exact(&mut kind).await.is_err() {
+                    return;
+                }
+                let Some(kind) = UniKind::from_u8(kind[0]) else {
+                    let _ = ev.send(Event::Closed(format!("unknown stream kind {}", kind[0])));
                     return;
                 };
-                cb.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                match Column::decompress(&bytes, max_id) {
-                    Ok(c) => {
-                        let _ = ev.send(Event::Column(Box::new(c)));
-                    }
-                    Err(e) => {
-                        let _ = ev.send(Event::Closed(format!("bad column: {e:#}")));
-                    }
-                }
+                let limit = match kind {
+                    UniKind::Column => MAX_COLUMN_BYTES,
+                    UniKind::Tile => MAX_TILE_BYTES,
+                    UniKind::Sky => MAX_SKY_BYTES,
+                };
+                let Ok(bytes) = s.read_to_end(limit).await else {
+                    return;
+                };
+                cb.fetch_add(bytes.len() as u64 + 1, Ordering::Relaxed);
+                let event = match kind {
+                    UniKind::Column => Column::decompress(&bytes, max_id)
+                        .map(|c| Event::Column(Box::new(c)))
+                        .map_err(|e| format!("bad column: {e:#}")),
+                    UniKind::Tile => decode_tile(&bytes)
+                        .map(|t| Event::Tile(Box::new(t)))
+                        .map_err(|e| format!("bad horizon tile: {e:#}")),
+                    UniKind::Sky => WorldSky::decompress(&bytes)
+                        .map(|s| Event::Sky(Box::new(s), bytes))
+                        .map_err(|e| format!("bad sky: {e:#}")),
+                };
+                let _ = ev.send(event.unwrap_or_else(Event::Closed));
             });
         }
     });

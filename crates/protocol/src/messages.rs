@@ -79,6 +79,14 @@ pub enum ClientMsg {
     Chat {
         text: String,
     },
+    /// Asks horizon tiles (at most [`crate::horizon::MAX_TILES_PER_REQUEST`]); each comes on
+    /// a unidirectional stream ([`crate::UniKind::Tile`]), after the columns near the player.
+    Tiles {
+        keys: Vec<nascio_chunk::horizon::TileKey>,
+    },
+    /// Asks the sky and far ground ([`crate::sky::WorldSky`]), once per connection; the client
+    /// skips it when its disk cache holds them for the world's fingerprint.
+    Sky,
     Bye,
 }
 

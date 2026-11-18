@@ -9,6 +9,7 @@ pub mod accounts;
 pub mod columns;
 pub mod config;
 pub mod console;
+pub mod horizon;
 pub mod net;
 pub mod replicate;
 pub mod security;
@@ -123,6 +124,18 @@ impl RunningServer {
             cfg.cache_columns,
             threads_n,
         ));
+        let tiles = Arc::new(horizon::TileCache::new(
+            terrain.clone(),
+            cfg.cache_tiles,
+            threads_n,
+        ));
+        let started = std::time::Instant::now();
+        let sky: Arc<[u8]> = horizon::world_sky(world, &terrain)?.into();
+        crate::say!(
+            "sky and far ground ready: {} KB in {:.1} s",
+            sky.len() >> 10,
+            started.elapsed().as_secs_f64()
+        );
         let spawns = spawn::Spawns::new(
             terrain.clone(),
             world,
@@ -243,6 +256,8 @@ impl RunningServer {
             cfg,
             hello,
             cache,
+            tiles,
+            sky,
             inputs: Mutex::new(tx),
             next_id: AtomicU32::new(1),
             online: AtomicU32::new(0),

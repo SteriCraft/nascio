@@ -33,6 +33,10 @@ pub struct ServerConfig {
     pub columns_in_flight: usize,
     /// Compressed columns kept in memory.
     pub cache_columns: usize,
+    /// Compressed horizon tiles kept in memory (about 3 KB each).
+    pub cache_tiles: usize,
+    /// Horizon tiles a client may have waiting; more requests are dropped.
+    pub max_queued_tiles: usize,
     /// Threads generating columns (0: all cores but two).
     pub generation_threads: usize,
     /// Players at once.
@@ -115,6 +119,8 @@ impl Default for ServerConfig {
             replication_threads: 4,
             columns_in_flight: 16,
             cache_columns: 32_768,
+            cache_tiles: 8_192,
+            max_queued_tiles: 1_024,
             generation_threads: 0,
             max_players: 1_000,
             spawn_xz: None,

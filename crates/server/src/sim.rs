@@ -51,6 +51,8 @@ pub struct PlayerLink {
     pub send_space: AtomicUsize,
     /// Entity bytes sent since the column streamer last looked (shared budget).
     pub entity_bytes: AtomicU64,
+    /// Horizon tiles asked and not sent yet, oldest first (sent after the near columns).
+    pub tiles: Mutex<std::collections::VecDeque<nascio_chunk::horizon::TileKey>>,
 }
 
 pub enum Input {
