@@ -299,6 +299,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     sh.player = id;
     sh.server_unix_ms = unix_ms();
     sh.spawn = last.unwrap_or(home.pos);
+    sh.admin = shared.accounts.is_admin(&name);
     send.write_all(&frame(&to_bytes(&ServerMsg::Hello(sh.clone()))?))
         .await?;
     let (out, mut out_rx) = mpsc::unbounded_channel::<ServerMsg>();

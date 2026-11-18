@@ -24,11 +24,12 @@ pub mod varint;
 /// state in datagrams ([`player`]), a [`ServerDatagram`] or [`ClientDatagram`] byte before every
 /// datagram, `PlayerParams` in `ServerHello`; `Move` and `Correct` removed. v10: the server simulates the players:
 /// `ServerMsg::Died` / `Respawned`, `ClientMsg::Respawn` and `Fly`, `SetBlock.cmd`. v11:
-/// `ClientMsg::Resend` (the client's prediction, chantier 5.4).
+/// `ClientMsg::Resend` (the client's prediction, chantier 5.4). v12: `ServerHello.admin` (only
+/// administrators ask to fly).
 ///
 /// [`ClientMsg::Tiles`]: messages::ClientMsg::Tiles
 /// [`ClientMsg::Sky`]: messages::ClientMsg::Sky
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// First byte of a unidirectional stream from the server: what follows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

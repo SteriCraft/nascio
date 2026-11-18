@@ -60,6 +60,8 @@ pub struct Remote {
     pub closed: Arc<Mutex<Option<String>>>,
     /// The player's spawn position from the server (world metres).
     pub spawn: [f64; 3],
+    /// The account is an administrator (it may ask to fly).
+    pub admin: bool,
     epoch: Instant,
     /// Radius of the columns the server sends, metres.
     pub radius_m: u32,
@@ -156,6 +158,7 @@ impl Remote {
             Arc<WorldSky>,
             Option<std::path::PathBuf>,
             Arc<Mutex<Player>>,
+            bool,
         );
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<anyhow::Result<Ready>>();
         let (m, d, st, en) = (
@@ -184,6 +187,7 @@ impl Remote {
                     let spawn = c.hello.spawn;
                     let cache = cache_dir(&root, c.hello.generator_version, &c.hello.fingerprint);
                     let (radius, blocks) = (c.hello.chunk_radius_m, c.blocks.clone());
+                    let admin = c.hello.admin;
                     let pl = Arc::new(Mutex::new(Player::new(
                         &c.hello,
                         Shapes::new(&c.blocks),
@@ -197,6 +201,7 @@ impl Remote {
                             Arc::new(sky),
                             cache.clone(),
                             pl.clone(),
+                            admin,
                         ))
                     };
                     // The sky: from the disk cache, else asked (ready once it arrives).
@@ -310,7 +315,7 @@ impl Remote {
                 });
             })?;
         // The sky may have to come first (about 400 KB once per world).
-        let (radius_m, blocks, spawn, sky, cache, player) = ready_rx
+        let (radius_m, blocks, spawn, sky, cache, player, admin) = ready_rx
             .recv_timeout(Duration::from_secs(60))
             .context("no answer from the server")??;
         ensure!(radius_m >= 64, "server radius {radius_m} m too small");
@@ -324,6 +329,7 @@ impl Remote {
             chat,
             closed,
             spawn,
+            admin,
             epoch,
             radius_m,
             blocks: Arc::new(blocks),

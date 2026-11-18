@@ -5,7 +5,8 @@
 //! - ZQSD (physical WASD) moves, Space jumps (swims up, flies up), Shift crouches (swims and
 //!   flies down). Two presses of Z within 300 ms run; the view then widens from 42° to 60°.
 //! - The mouse turns the view (captured while playing; Échap, the chat and death free it).
-//! - F asks to fly or to walk again (administrators only: the server refuses the others).
+//! - Administrators: two presses of Space within 300 ms ask to fly, or to walk again; the view
+//!   is at 60° while flying (author's decision). Other players never ask.
 //! - Death: a grey veil with its cause and a "Réapparaître" button.
 //!
 //! The network thread gives the player the server's states, its death and respawn and the
@@ -30,8 +31,8 @@ pub const FOV_RUN_DEG: f32 = 60.0;
 const FOV_TAU_S: f32 = 0.15;
 /// Reach of the edits from the eyes, m (the server's `edit_reach_m`).
 pub const EDIT_REACH_M: f64 = 5.0;
-/// Asks to fly or to walk.
-const FLY_KEY: KeyCode = KeyCode::KeyF;
+/// Two presses of Space within this time ask to fly or to walk (as running, s).
+const FLY_TAP_S: f64 = 0.3;
 /// A request to fly not followed by the mode within this time was refused, s.
 const FLY_ANSWER_S: f64 = 2.0;
 /// A message of the player stays this long, s.
@@ -48,6 +49,8 @@ pub struct Life {
     pub flying: bool,
     /// Mode asked and when (s), until the server's states show it.
     fly_asked: Option<(bool, f64)>,
+    /// Last press of Space (s).
+    space_tap: Option<f64>,
     /// A short message and when it came (s).
     notice: Option<(String, f64)>,
 }
@@ -128,29 +131,34 @@ pub fn walk(
     cam.pos = WorldPos::new(eye[0], eye[1], eye[2]);
     life.running = running;
     life.flying = flying;
-    // Flight: asked with F, granted by the server to administrators only.
-    if free && life.died.is_none() && keys.just_pressed(FLY_KEY) {
-        remote.send(ClientMsg::Fly(!flying));
-        life.fly_asked = Some((!flying, now_s));
+    // Flight: two presses of Space, administrators only (the server checks again).
+    if free && remote.admin && life.died.is_none() && keys.just_pressed(KeyCode::Space) {
+        if life.space_tap.is_some_and(|t| now_s - t <= FLY_TAP_S) {
+            remote.send(ClientMsg::Fly(!flying));
+            life.fly_asked = Some((!flying, now_s));
+            life.space_tap = None;
+        } else {
+            life.space_tap = Some(now_s);
+        }
     }
     if let Some((want, at)) = life.fly_asked {
         if want == flying {
             life.fly_asked = None;
         } else if now_s - at > FLY_ANSWER_S {
             life.fly_asked = None;
-            life.notice = Some(("Vol refusé (administrateurs seulement)".into(), now_s));
+            life.notice = Some(("Vol refusé par le serveur".into(), now_s));
         }
     }
 }
 
-/// The field of view follows the running: 60° running, 42° otherwise, smoothly.
+/// The field of view: 60° running or flying, 42° otherwise, smoothly.
 pub fn field_of_view(
     life: Res<Life>,
     remote: Option<Res<Remote>>,
     time: Res<Time<Real>>,
     mut cameras: Query<&mut Projection, With<FlyCamera>>,
 ) {
-    let deg = if remote.is_some() && life.running {
+    let deg = if remote.is_some() && (life.running || life.flying) {
         FOV_RUN_DEG
     } else {
         FOV_WALK_DEG

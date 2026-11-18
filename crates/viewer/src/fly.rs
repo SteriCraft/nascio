@@ -1016,7 +1016,7 @@ pub fn hud(
                 }
             }));
             ui.small(if remote.is_some() {
-                "ZQSD: walk · Z twice: run · Space: jump · Shift: crouch · F: fly (administrators) · G: edit · F3: this panel · Esc: menu".to_owned()
+                "ZQSD: walk · Z twice: run · Space: jump · Shift: crouch · Space twice: fly (administrators) · G: edit · F3: this panel · Esc: menu".to_owned()
             } else {
                 format!(
                     "Right drag: look · WASD/ZQSD: move · Space/Shift: up/down · F3: this panel · Esc: menu{}",

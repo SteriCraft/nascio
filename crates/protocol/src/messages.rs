@@ -50,6 +50,8 @@ pub struct ServerHello {
     pub physics: PlayerParams,
     /// How the player moves at first.
     pub mode: Mode,
+    /// The account is an administrator at login: it may ask to fly (`ClientMsg::Fly`).
+    pub admin: bool,
 }
 
 /// Messages from the client.
@@ -205,6 +207,7 @@ mod tests {
             chunk_radius_m: 512,
             physics: PlayerParams::default(),
             mode: Mode::Walk,
+            admin: true,
         });
         let client = ClientMsg::Hello(ClientHello {
             protocol: crate::PROTOCOL_VERSION,
