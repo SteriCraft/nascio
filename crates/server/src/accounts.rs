@@ -398,6 +398,17 @@ impl Accounts {
             .collect()
     }
 
+    /// Every account as (name, is administrator), sorted by name.
+    pub fn users(&self) -> Vec<(String, bool)> {
+        let mut users: Vec<(String, bool)> = self
+            .lock()
+            .values()
+            .map(|a| (a.name.clone(), a.admin))
+            .collect();
+        users.sort();
+        users
+    }
+
     /// The spawn point of `name`, if drawn.
     pub fn spawn(&self, name: &str) -> Option<AccountSpawn> {
         self.lock().get(name).and_then(|a| a.spawn)

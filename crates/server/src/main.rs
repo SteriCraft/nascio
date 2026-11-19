@@ -409,6 +409,12 @@ const COMMANDS: &[(&str, &str, &str, &str)] = &[
         "Prints each player online: account name, entity number and position (x, y, z in metres).",
     ),
     (
+        "users",
+        "",
+        "registered accounts",
+        "Lists every account registered on the server, sorted by name, with (admin) after the administrators.",
+    ),
+    (
         "stats",
         "",
         "server measurements",
@@ -454,7 +460,7 @@ const COMMANDS: &[(&str, &str, &str, &str)] = &[
         "fly",
         "<name> on|off",
         "flight on or off for a player online",
-        "In flight there is no gravity and blocks still collide; up to fly_max_speed. Administrators may also switch it from their client. Back to walking at each login.",
+        "In flight there is no gravity and blocks still collide; up to fly_max_speed. Coming down onto a block walks again. Administrators may also switch it from their client. Back to walking at each login.",
     ),
     (
         "seed",
@@ -519,6 +525,17 @@ fn command(server: &RunningServer, line: &str) -> bool {
             say!("{} players online", players.len());
             for (name, id, p) in players {
                 say!("  {name} (#{id}) at {:.0}, {:.0}, {:.0}", p[0], p[1], p[2]);
+            }
+        }
+        Some("users") => {
+            let users = sh.accounts.users();
+            say!("{} registered users", users.len());
+            for (name, admin) in users {
+                if admin {
+                    say!("  {name} (admin)");
+                } else {
+                    say!("  {name}");
+                }
             }
         }
         Some("kick") => match words.next() {
