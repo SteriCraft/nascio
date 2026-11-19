@@ -187,9 +187,9 @@ Limites connues :
   - `write_cost_500_accounts` : `accounts.toml` de 99 Ko, sauvegarde complète 3,3 ms en médiane (2,8 à 4,0), sérialisation 1,4 ms.
   - `replication_cost_of_500_players_within_200_m` : 17,3 à 19,3 ms par tick en moyenne, meilleur tick 14,9 ms sur un fil, 2 133 o par client et par tick (inchangé).
 - **Mesure à 500 bots avec de vraies commandes** : non faite, elle demande une seconde machine pour `swarm` (voir plus bas, « Reste à faire »).
-- **Spec** : la proposition est ci-dessous ; elle n'est **pas encore intégrée** à `world-spec.md` (consigne : la soumettre à l'auteur d'abord).
+- **Spec** : la proposition ci-dessous, validée par l'auteur, est **intégrée** à `world-spec.md` le 2026-11-19 (nouvelle §8.4bis Mouvement ; aussi `fly` dans la console §8.7 et les touches du jeu connecté dans la partie client).
 
-### Proposition de texte pour la spec (à valider)
+### Proposition de texte pour la spec (validée, intégrée)
 - **§8.1**, 2ᵉ point : « `PROTOCOL_VERSION` vaut **12** (…). Le client (`nascio-client`) ne dépend que de `nascio-core`, `nascio-chunk`, `nascio-physics` et `nascio-protocol`. » 3ᵉ point : « des datagrammes non fiables pour les états des entités, les commandes du joueur et son état autoritaire, chacun précédé d'un octet de type (serveur : 0 entités, 1 état du joueur ; client : 0 commandes). »
 - **§8.2**, fin : « Le `ServerHello` donne aussi le point d'arrivée, la physique des joueurs (`PlayerParams`), le mode (marche ou vol) et si le compte est administrateur (`admin`, lu à la connexion). »
 - **§8.4** (nouveaux points, après « Entités et débit », ou nouvelle section **8.4bis Mouvement**) :
