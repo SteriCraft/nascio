@@ -93,14 +93,34 @@ fn read_image(path: &Path) -> Option<image::RgbaImage> {
     }
 }
 
-/// Opaque RGBA8 level 0 (transparent pixels filled with the mean colour), then all mips.
-/// Mean linear luminance of a layer: its 1×1 mip (a linear-light average).
+/// Mean linear luminance of a layer: its 1×1 mip (a linear-light average, of the visible texels
+/// for a cut-out layer).
 fn mean_luminance(layer: &[u8]) -> f32 {
     let p = &layer[layer.len() - 4..];
     0.2126 * to_linear_u8(p[0]) + 0.7152 * to_linear_u8(p[1]) + 0.0722 * to_linear_u8(p[2])
 }
 
-fn build_layer(img: &image::RgbaImage) -> Vec<u8> {
+/// Share of the texels of an RGBA8 level whose alpha passes the foliage cutoff.
+fn coverage(level: &[u8], scale: f32) -> f32 {
+    let cut = crate::curvature::FOLIAGE_CUTOFF;
+    let n = level.len() / 4;
+    let kept = level
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|p| (f32::from(p[3]) / 255.0 * scale).min(1.0) >= cut)
+        .count();
+    kept as f32 / n as f32
+}
+
+/// RGBA8 level 0 then all mips of a layer.
+///
+/// Opaque layer (`cutout` false): transparent pixels are blended towards the mean colour and
+/// every alpha is 255. Cut-out layer (foliage): the alpha is kept, fully transparent pixels take
+/// the mean colour (no dark fringe when filtered), and each mip's alpha is scaled so that the
+/// share of texels above the cutoff stays the level 0's (the foliage does not thin out with
+/// the distance).
+fn build_layer(img: &image::RgbaImage, cutout: bool) -> Vec<u8> {
     let mut sum = [0.0f64; 3];
     let mut weight = 0.0f64;
     for p in img.pixels() {
@@ -120,11 +140,18 @@ fn build_layer(img: &image::RgbaImage) -> Vec<u8> {
     for p in img.pixels() {
         let a = f64::from(p[3]) / 255.0;
         for c in 0..3 {
-            let v = f64::from(p[c]) * a + mean[c] * (1.0 - a);
+            let v = if !cutout {
+                f64::from(p[c]) * a + mean[c] * (1.0 - a)
+            } else if p[3] > 0 {
+                f64::from(p[c])
+            } else {
+                mean[c]
+            };
             level.push(v.round().clamp(0.0, 255.0) as u8);
         }
-        level.push(255);
+        level.push(if cutout { p[3] } else { 255 });
     }
+    let target = coverage(&level, 1.0);
     let mut out = level.clone();
     let mut edge = size;
     while edge > 1 {
@@ -132,14 +159,47 @@ fn build_layer(img: &image::RgbaImage) -> Vec<u8> {
         let mut next = Vec::with_capacity(next_edge * next_edge * 4);
         for y in 0..next_edge {
             for x in 0..next_edge {
+                let texels = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                    .map(|(dx, dy)| ((2 * y + dy) * edge + 2 * x + dx) * 4);
+                // Colours weighted by their alpha (cut out: the visible texels' colour; all
+                // weights 1 when opaque), plain mean of the alphas.
+                let weights = texels.map(|i| f32::from(level[i + 3]) / 255.0);
+                let total: f32 = weights.iter().sum();
                 for c in 0..3 {
-                    let mut acc = 0.0f32;
-                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                        acc += to_linear_u8(level[((2 * y + dy) * edge + 2 * x + dx) * 4 + c]);
-                    }
-                    next.push(to_srgb_u8(acc / 4.0));
+                    let v = if total > 0.0 {
+                        texels
+                            .iter()
+                            .zip(weights)
+                            .map(|(&i, w)| to_linear_u8(level[i + c]) * w)
+                            .sum::<f32>()
+                            / total
+                    } else {
+                        texels
+                            .iter()
+                            .map(|&i| to_linear_u8(level[i + c]))
+                            .sum::<f32>()
+                            / 4.0
+                    };
+                    next.push(to_srgb_u8(v));
                 }
-                next.push(255);
+                next.push((total / 4.0 * 255.0).round() as u8);
+            }
+        }
+        if cutout {
+            // Alpha scale that brings the coverage back to the level 0's (bisection).
+            let (mut lo, mut hi) = (1.0f32, 64.0f32);
+            if coverage(&next, 1.0) < target {
+                for _ in 0..24 {
+                    let mid = 0.5 * (lo + hi);
+                    if coverage(&next, mid) < target {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                for p in next.as_chunks_mut::<4>().0 {
+                    p[3] = (f32::from(p[3]) * hi).min(255.0).round() as u8;
+                }
             }
         }
         out.extend_from_slice(&next);
@@ -172,12 +232,13 @@ pub fn load(dir: &Path, blocks: &Blocks) -> Option<BlockTextureSet> {
     let mut table = vec![BlockTextures::default(); blocks.len()];
     let mut textured = 0usize;
 
-    let mut face = |stem: &str| -> Option<FaceTexture> {
+    // `cutout`: the layer keeps its alpha (foliage; the first block to use an image decides).
+    let mut face = |stem: &str, cutout: bool| -> Option<FaceTexture> {
         let layer = match known.iter().find(|(s, _)| s == stem) {
             Some((_, l)) => *l,
             None => {
                 let layer = read_image(&dir.join(format!("{stem}.png"))).map(|img| {
-                    layers.push(build_layer(&img));
+                    layers.push(build_layer(&img, cutout));
                     names.push(stem.to_string());
                     (layers.len() - 1) as u16
                 });
@@ -225,10 +286,11 @@ pub fn load(dir: &Path, blocks: &Blocks) -> Option<BlockTextureSet> {
             Some((_, s)) => (*s).to_string(),
             None => pick(&["_bottom", "_end", "_side", ""]),
         };
+        let cutout = blocks.is_foliage(id as u16);
         let t = BlockTextures {
-            top: face(&top_stem),
-            side: face(&side_stem),
-            bottom: face(&bottom_stem),
+            top: face(&top_stem, cutout),
+            side: face(&side_stem, cutout),
+            bottom: face(&bottom_stem, cutout),
         };
         if t != BlockTextures::default() {
             textured += 1;
@@ -255,6 +317,36 @@ pub fn load(dir: &Path, blocks: &Blocks) -> Option<BlockTextureSet> {
         set.names.join(", ")
     );
     Some(set)
+}
+
+/// One icon per block id (inventory bar): its side face, tinted as in the world, 32×32 sRGB
+/// RGBA8 (foliage keeps its transparency); `None` for a block without a texture (the bar shows
+/// its colour).
+pub fn icons(dir: &Path, blocks: &Blocks) -> Vec<Option<Vec<u8>>> {
+    let Some(set) = load(dir, blocks) else {
+        return vec![None; blocks.len()];
+    };
+    let px = (TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize;
+    set.table
+        .iter()
+        .enumerate()
+        .map(|(id, t)| {
+            let f = t.side.or(t.top)?;
+            let level = &set.layers[usize::from(f.layer)][..px];
+            let tint = match f.tint {
+                FaceTint::None => [1.0; 3],
+                FaceTint::Fixed(c) => c,
+                FaceTint::Climate(k) => blocks.linear(id as u16).map(|c| c * k),
+            };
+            let mut out = level.to_vec();
+            for p in out.as_chunks_mut::<4>().0 {
+                for c in 0..3 {
+                    p[c] = to_srgb_u8(to_linear_u8(p[c]) * tint[c]);
+                }
+            }
+            Some(out)
+        })
+        .collect()
 }
 
 /// The texture array as a Bevy image (layer-major data, mips, `D2Array` view).
@@ -341,7 +433,12 @@ pub fn adopt_remote_textures(
     // did not always rebind it (connecting from the menu kept the one-layer placeholder, so the
     // faces showed their flat colours).
     let new = images.add(image.unwrap_or_else(placeholder));
-    for h in [&terrain.opaque, &terrain.water, &horizon.0] {
+    for h in [
+        &terrain.opaque,
+        &terrain.foliage,
+        &terrain.water,
+        &horizon.0,
+    ] {
         if let Some(mut m) = materials.get_mut(h) {
             m.extension.blocks = new.clone();
         }
@@ -550,6 +647,44 @@ mod tests {
         }
         let last = &set.layers[idx("podzol")][LAYER_BYTES - 4..];
         assert!((186..=190).contains(&last[0]), "got {}", last[0]);
+    }
+
+    #[test]
+    fn foliage_keeps_its_alpha_and_coverage() {
+        let blocks = Blocks::builtin();
+        let d = Dir::new("cutout");
+        // One texel in four opaque (a sparse leaf pattern), the rest transparent.
+        let mut leaves = image::RgbaImage::new(32, 32);
+        for (x, y, p) in leaves.enumerate_pixels_mut() {
+            *p = if x % 2 == 0 && y % 2 == 0 {
+                image::Rgba([60, 140, 60, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            };
+        }
+        leaves.save(d.0.join("spruce_leaves.png")).unwrap();
+        leaves.save(d.0.join("granite.png")).unwrap();
+        let set = load(&d.0, &blocks).unwrap();
+        let layer = |n: &str| &set.layers[set.names.iter().position(|x| x == n).unwrap()];
+
+        // Foliage: alpha kept at level 0, transparent texels filled with the visible colour.
+        let l = layer("spruce_leaves");
+        let px = 32 * 32 * 4;
+        assert_eq!(coverage(&l[..px], 1.0), 0.25);
+        for p in l[..px].chunks(4) {
+            assert_eq!(&p[..3], &[60, 140, 60]);
+        }
+        // Every mip keeps at least that share of texels above the cutoff, and its colour.
+        let mut start = 0;
+        for k in 0..MIP_LEVELS as usize {
+            let edge = 32 >> k;
+            let lvl = &l[start..start + edge * edge * 4];
+            assert!(coverage(lvl, 1.0) >= 0.25, "mip {k}");
+            assert!(lvl.chunks(4).all(|p| p[1].abs_diff(140) <= 1));
+            start += edge * edge * 4;
+        }
+        // An opaque block with the same image stays opaque.
+        assert!(layer("granite").chunks(4).all(|p| p[3] == 255));
     }
 
     #[test]

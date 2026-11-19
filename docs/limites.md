@@ -26,7 +26,7 @@ Quand une limite est levée, on retire son entrée et on note la levée dans `de
 
 ## Réseau et serveur
 
-**L9. Le statut d'administrateur n'est lu qu'à la connexion** (`ServerHello.admin`) : un `admin` donné en console ne vaut, pour le vol, qu'à la reconnexion.
+**L9. Le statut d'administrateur n'est lu qu'à la connexion** (`ServerHello.admin`) : un `admin` donné en console ne vaut, pour la touche G du mode dieu, qu'à la reconnexion (la console `god` agit tout de suite).
 
 **L10. Un client qui plante garde son compte 30 s.** Sans `Bye`, le serveur attend le délai d'inactivité de QUIC : « already connected » pour une reconnexion immédiate, et le serveur comble ses pas pendant ce temps.
 
@@ -41,6 +41,10 @@ Quand une limite est levée, on retire son entrée et on note la levée dans `de
 **L15. Le mot de passe est en clair dans `client-settings.toml`**, à côté de l'exécutable du client, enregistré après une connexion réussie. Les joueurs passeront par les jetons du site ; le secret reste surtout pour les administrateurs. Source : `reports/chantier-interfaces.md`.
 
 **L16. Le client ne garde pas les colonnes sur le disque.** Seuls le ciel et les tuiles d'horizon sont en cache (`client-cache/`) : chaque connexion retélécharge les colonnes. Source : spec §8.3.
+
+**L17. Le feuillage ajouré coûte surtout dans les ombres.** Sans ombres, son surcoût est négligeable. Avec ombres, sur un trajet en forêt, le rayon de découpe de 4 colonnes faisait tomber le visualiseur à 60 i/s (rayon 3 : à peine au-dessus de la référence), alors que la fréquence du GPU variait d'un essai à l'autre : mesure à refaire à fréquence fixe. Pour la lever : réduire le rayon (`[render] foliage_cutout_chunks`), ou projeter les ombres du feuillage sans découpe.
+
+**L18. Une édition remaille des colonnes entières**, pas seulement le chunk 32³ touché (et ses voisins de bord). Mesuré sur world-42 : 0,37 ms par chunk, 1 à 3 ms par colonne sur un cœur ; le gain ne valait pas de ranger les maillages d'une colonne par chunk et de fusionner les requêtes qui se remplacent. Pour la lever : `Slot::Ready` par `cy`, et des requêtes de remaillage qui portent leurs `cy`. Source : `decisions.md` (2026-11-19).
 
 ## À savoir pour lire les mesures et déployer
 

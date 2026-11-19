@@ -97,7 +97,7 @@ async fn site(world: &World, terrain: &Terrain, k: usize, scx: i32, scz: i32) {
             let remote = mesh_chunk(&p, &c.blocks, &got.tint);
             assert!(local == remote, "mesh of chunk ({cx}, {cy}, {cz})");
             compared += 1;
-            quads += local.opaque.quad_count() + local.water.quad_count();
+            quads += local.quad_count();
         }
     }
     eprintln!(

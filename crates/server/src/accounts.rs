@@ -15,6 +15,8 @@ use nascio_voxel::delta::write_durable;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 
+use nascio_protocol::inventory::{Inventory, STACK, Stack};
+
 use crate::spawn::AccountSpawn;
 
 /// One account as stored.
@@ -42,6 +44,51 @@ pub struct Account {
     /// Where the player was when it left (feet, metres, exact); `None`: never left alive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last: Option<[f64; 3]>,
+    /// The walk mode inventory, by block name (an unknown name is dropped at login).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inventory: Vec<SavedStack>,
+}
+
+/// One slot of an inventory as stored.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedStack {
+    pub slot: u8,
+    pub block: String,
+    pub count: u8,
+}
+
+/// An inventory as stored: its slots with blocks, by name.
+pub fn save_inventory(inv: &Inventory, names: &[String]) -> Vec<SavedStack> {
+    inv.slots
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let s = s.as_ref()?;
+            Some(SavedStack {
+                slot: i as u8,
+                block: names.get(usize::from(s.block))?.clone(),
+                count: s.count,
+            })
+        })
+        .collect()
+}
+
+/// An inventory read back; slots out of range, unknown names and empty counts are dropped,
+/// counts over a stack are cut.
+pub fn load_inventory(saved: &[SavedStack], names: &[String]) -> Inventory {
+    let mut inv = Inventory::default();
+    for s in saved {
+        let block = names.iter().position(|n| *n == s.block);
+        if let (Some(cell), Some(block)) = (inv.slots.get_mut(usize::from(s.slot)), block)
+            && s.count > 0
+        {
+            *cell = Some(Stack {
+                block: block as u16,
+                count: s.count.min(STACK),
+            });
+        }
+    }
+    inv
 }
 
 /// A ban of an account, temporary or permanent.
@@ -132,6 +179,8 @@ pub enum Change {
     Last(String, Option<[f64; 3]>),
     /// A new spawn point (the former one was blocked).
     Spawn(String, AccountSpawn),
+    /// The player's inventory.
+    Inventory(String, Vec<SavedStack>),
 }
 
 /// A name: 3 to 16 characters among ASCII letters, digits and `_`.
@@ -247,9 +296,25 @@ impl Accounts {
                         any = true;
                     }
                 }
+                Change::Inventory(name, inv) => {
+                    if let Some(a) = accounts.get_mut(name)
+                        && a.inventory != *inv
+                    {
+                        a.inventory = inv.clone();
+                        any = true;
+                    }
+                }
             }
         }
         any
+    }
+
+    /// The stored inventory of `name`.
+    pub fn inventory(&self, name: &str) -> Vec<SavedStack> {
+        self.lock()
+            .get(name)
+            .map(|a| a.inventory.clone())
+            .unwrap_or_default()
     }
 
     /// The last position of `name`, if it left alive.
@@ -285,6 +350,7 @@ impl Accounts {
                 ban: None,
                 spawn: None,
                 last: None,
+                inventory: Vec::new(),
             },
         );
         drop(accounts);
@@ -336,6 +402,7 @@ impl Accounts {
                 ban: None,
                 spawn: None,
                 last: None,
+                inventory: Vec::new(),
             },
         );
         drop(accounts);
@@ -589,6 +656,42 @@ mod tests {
             ms[ms.len() / 2],
             ms[ms.len() - 1]
         );
+    }
+
+    #[test]
+    fn inventories_are_kept_by_block_name() {
+        let dir = std::env::temp_dir().join(format!("nascio-accounts-inv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = Accounts::open_with(&dir, cheap()).unwrap();
+        a.token_login("alice", 0).unwrap();
+        let names: Vec<String> = ["air", "dirt", "sand"].map(String::from).to_vec();
+        let mut inv = Inventory::default();
+        inv.slots[0] = Some(Stack {
+            block: 2,
+            count: 32,
+        });
+        inv.slots[3] = Some(Stack { block: 1, count: 5 });
+        let saved = save_inventory(&inv, &names);
+        assert!(a.apply(&[Change::Inventory("alice".into(), saved.clone())]));
+        assert!(
+            !a.apply(&[Change::Inventory("alice".into(), saved)]),
+            "unchanged"
+        );
+        a.save().unwrap();
+        let b = Accounts::open_with(&dir, cheap()).unwrap();
+        assert_eq!(load_inventory(&b.inventory("alice"), &names), inv);
+        // Another table: ids follow the names, an unknown name is dropped.
+        let other: Vec<String> = ["air", "sand"].map(String::from).to_vec();
+        let back = load_inventory(&b.inventory("alice"), &other);
+        assert_eq!(
+            back.slots[0],
+            Some(Stack {
+                block: 1,
+                count: 32
+            })
+        );
+        assert_eq!(back.slots[3], None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

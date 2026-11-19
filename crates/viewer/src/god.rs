@@ -1,58 +1,103 @@
-//! God mode (future server tool): destroy and place blocks in the 3D view. In local flight,
-//! edits go to the world's [`DeltaStore`] (`world-<seed>/deltas/`, journal forced to the disk
-//! at each edit), and the touched columns are meshed again; connected, they go to the server
-//! and the ray reads the blocks it sent: it starts at the player's eyes and reaches 5 m (the
-//! server's reach), and each edit names the newest command the view includes (`cmd`), from
-//! which the server measures the reach.
+//! Edits and the inventory bar. A cross marks the centre of the screen; left click destroys
+//! the block under it, right click places the block of the selected slot against it, the
+//! wheel moves the cursor over the [`SLOTS`] slots of the bar, and the block's name shows for
+//! [`NAME_S`] above the bar when the cursor moves (author's decisions: no other message).
 //!
-//! G toggles the mode. The mouse then turns the view (cursor captured) and a cross marks the
-//! centre of the screen: left click destroys the block under it, right click places the
-//! selected block against it, the wheel picks the block. G or Escape leaves.
+//! Connected, the server decides: in walk mode the bar is the inventory it sends (a destroyed
+//! block goes in it, a placed one comes from the slot, an empty slot places nothing); in god
+//! mode (G, administrators only, confirmed by the server) the slots hold [`GOD_BLOCKS`],
+//! unlimited, and the player may fly. The ray starts at the eyes and reaches 5 m (the
+//! server's reach); each edit names the newest command the view includes (`cmd`).
+//!
+//! In local flight, G toggles god mode (Escape leaves it): edits go to the world's
+//! [`DeltaStore`] (`world-<seed>/deltas/`, journal forced to the disk at each edit), and the
+//! touched columns are meshed again.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use nascio_core::consts::CHUNK_SIZE;
 use nascio_core::coords::BlockPos;
+use nascio_protocol::inventory::SLOTS;
+use nascio_protocol::messages::ClientMsg;
 use nascio_voxel::block::{AIR, BlockId};
 use nascio_voxel::{ColumnCache, DeltaStore, Terrain};
 
 use crate::fly::{FlyCam, RenderOrigin, SharedDeltas, SharedTerrain, Streamer};
 
+/// The slots in god mode, left to right (author's decision).
+pub const GOD_BLOCKS: [&str; SLOTS] = [
+    "dirt",
+    "grass",
+    "regolith",
+    "gravel",
+    "spruce_log",
+    "spruce_leaves",
+    "snow",
+    "sand",
+    "sandstone",
+    "magma",
+];
+/// The block's name stays this long after the cursor moves, s.
+pub const NAME_S: f64 = 5.0;
 /// Farthest block the cross reaches in local flight, m.
 const REACH: f64 = 20.0;
 /// Generated columns kept for block lookups.
 const CACHE: usize = 64;
 /// Deepest search for the floor under the camera, blocks.
 const FLOOR_SEARCH: i32 = 256;
+/// Edge of a slot of the bar, gap between slots and margin under the bar, points.
+const SLOT_PX: f32 = 46.0;
+const GAP_PX: f32 = 4.0;
+const MARGIN_PX: f32 = 14.0;
 
 /// The block table in use: the local world's, or the server's once connected.
 #[derive(Resource, Clone)]
 pub struct BlockTable(pub Arc<nascio_chunk::Blocks>);
 
+/// What a slot shows: a block, and how many (`None`: unlimited, god mode).
+pub type Slot = Option<(BlockId, Option<u8>)>;
+
 #[derive(Resource)]
 pub struct God {
+    /// God mode (connected: as the server confirmed it).
     pub on: bool,
-    /// Block placed by the tool.
-    pub block: BlockId,
+    /// Slot under the cursor.
+    pub cursor: usize,
+    /// When the cursor last moved (s): the block's name shows until [`NAME_S`] later.
+    moved_at: Option<f64>,
     /// Block under the cross and the free cell in front of it.
     target: Option<(BlockPos, BlockPos)>,
     columns: ColumnCache,
-    pub status: String,
+}
+
+impl Default for God {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl God {
-    pub fn new(block: BlockId) -> Self {
+    pub fn new() -> Self {
         Self {
             on: false,
-            block,
+            cursor: 0,
+            moved_at: None,
             target: None,
             columns: ColumnCache::new(CACHE),
-            status: String::new(),
         }
+    }
+
+    /// Back to the menu or to a new connection: walk mode, first slot.
+    pub fn reset(&mut self) {
+        self.on = false;
+        self.cursor = 0;
+        self.moved_at = None;
+        self.target = None;
     }
 
     /// The block at `p`, modifications included.
@@ -89,6 +134,27 @@ impl God {
             })
             .map(|k| f64::from(k + 1))
     }
+
+    /// The slots of the bar: god mode's blocks, the inventory connected, or nothing.
+    pub fn slots(
+        &self,
+        remote: Option<&crate::remote::Remote>,
+        blocks: &nascio_chunk::Blocks,
+    ) -> [Slot; SLOTS] {
+        if self.on {
+            GOD_BLOCKS.map(|n| blocks.id(n).map(|b| (b, None)))
+        } else if let Some(r) = remote {
+            let inv = r.inventory.lock().unwrap_or_else(|e| e.into_inner());
+            inv.slots.map(|s| s.map(|s| (s.block, Some(s.count))))
+        } else {
+            [None; SLOTS]
+        }
+    }
+}
+
+/// The bar and the cross show: connected, or in god mode in local flight.
+fn active(god: &God, remote: bool) -> bool {
+    remote || god.on
 }
 
 /// First solid block along the ray (voxel walk), with the cell crossed just before it.
@@ -137,22 +203,13 @@ fn raycast(
     None
 }
 
-/// Columns whose mesh shows block `p` (its own, and the neighbours whose border holds it).
-fn columns_of(p: BlockPos) -> BTreeSet<(i32, i32)> {
-    let mut v = BTreeSet::new();
-    for (dx, dz) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
-        let q = p.offset(dx, 0, dz);
-        v.insert((q.x.div_euclid(CHUNK_SIZE), q.z.div_euclid(CHUNK_SIZE)));
-    }
-    v
-}
-
-/// Toggle, centre ray, highlight, block choice and edits.
+/// God mode toggle, cursor, centre ray, highlight and edits.
 #[allow(clippy::too_many_arguments)]
 pub fn god_input(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     scroll: Res<AccumulatedMouseScroll>,
+    time: Res<Time<Real>>,
     cam: Res<FlyCam>,
     origin: Res<RenderOrigin>,
     terrain: Option<Res<SharedTerrain>>,
@@ -162,31 +219,49 @@ pub fn god_input(
     mut streamer: ResMut<Streamer>,
     mut gizmos: Gizmos,
     remote: Option<Res<crate::remote::Remote>>,
+    life: Res<crate::player::Life>,
     chat: Res<crate::chat::ChatBox>,
     pause: Res<crate::pause::Pause>,
 ) {
+    // Connected, god mode is the server's.
+    if let Some(r) = &remote {
+        god.on = r.god.load(Ordering::Relaxed);
+    }
     if cam.scripted || chat.open || pause.open {
         return;
     }
-    let escape = god.on && keys.just_pressed(KeyCode::Escape);
-    if keys.just_pressed(KeyCode::KeyG) || escape {
-        god.on = !god.on && !escape;
-        god.target = None;
+    match &remote {
+        Some(r) => {
+            if keys.just_pressed(KeyCode::KeyG) && r.admin && life.playing() {
+                r.send(ClientMsg::God(!god.on));
+            }
+            if !life.playing() {
+                god.target = None;
+                return;
+            }
+        }
+        None => {
+            let escape = god.on && keys.just_pressed(KeyCode::Escape);
+            if keys.just_pressed(KeyCode::KeyG) || escape {
+                god.on = !god.on && !escape;
+                god.target = None;
+            }
+        }
     }
-    if !god.on {
+    if !active(&god, remote.is_some()) {
         return;
     }
     let Some(table) = table else { return };
     let blocks = &*table.0;
-    // Wheel: next / previous block (air excluded).
+    // Wheel: the cursor moves one slot (up: to the left).
     if scroll.delta.y != 0.0 {
         let notches = match scroll.unit {
             MouseScrollUnit::Line => scroll.delta.y,
             MouseScrollUnit::Pixel => scroll.delta.y / 40.0,
         };
-        let n = blocks.len() as i32 - 1;
-        let step = if notches > 0.0 { -1 } else { 1 };
-        god.block = ((i32::from(god.block) - 1 + step).rem_euclid(n) + 1) as BlockId;
+        let step: i32 = if notches > 0.0 { -1 } else { 1 };
+        god.cursor = (god.cursor as i32 + step).rem_euclid(SLOTS as i32) as usize;
+        god.moved_at = Some(time.elapsed_secs_f64());
     }
     let p = cam.pos;
     let g = &mut *god;
@@ -217,93 +292,177 @@ pub fn god_input(
     );
     let edit = if buttons.just_pressed(MouseButton::Left) {
         Some((hit, AIR))
-    } else if buttons.just_pressed(MouseButton::Right) {
-        (front != hit).then_some((front, god.block))
+    } else if buttons.just_pressed(MouseButton::Right) && front != hit {
+        // An empty slot places nothing.
+        god.slots(remote.as_deref(), blocks)[god.cursor].map(|(b, _)| (front, b))
     } else {
         None
     };
     let Some((q, id)) = edit else {
         return;
     };
+    god.target = None;
     if let Some(remote) = remote {
-        // Network mode: the server decides; its change comes back and the column is meshed
-        // again then. It measures the reach from the eyes after the newest command the view
-        // includes. A dead player edits nothing.
-        let (dead, cmd) = {
-            let p = remote.lock_player();
-            (p.dead(), p.last_cmd())
-        };
-        if dead {
-            return;
-        }
-        remote.send(nascio_protocol::messages::ClientMsg::SetBlock {
+        // The server decides; its change (and the inventory) come back. It measures the reach
+        // from the eyes after the newest command the view includes.
+        let cmd = remote.lock_player().last_cmd();
+        // Shown at once; undone if the server refuses it or does not answer.
+        streamer.request_edit_remesh(remote.predict(q, id));
+        remote.send(ClientMsg::SetBlock {
             pos: [q.x, q.y, q.z],
             block: id,
             cmd,
+            slot: (id != AIR).then_some(god.cursor as u8),
         });
-        let refused = std::mem::take(&mut *remote.status.lock().unwrap_or_else(|e| e.into_inner()));
-        god.status = if refused.is_empty() {
-            format!(
-                "sent to the server: {} at {} {} {}",
-                blocks.def(id).name,
-                q.x,
-                q.y,
-                q.z
-            )
-        } else {
-            refused
-        };
-        god.target = None;
         return;
     }
     let Some(deltas) = deltas else { return };
     // Rare edits: each one is made durable at once (one `fsync`, under a millisecond).
-    let result = deltas.0.set(q, id).and_then(|_| deltas.0.flush());
-    god.status = match result {
-        Ok(_) if id == AIR => format!("removed at {} {} {}", q.x, q.y, q.z),
-        Ok(_) => format!("placed {} at {} {} {}", blocks.def(id).name, q.x, q.y, q.z),
-        Err(e) => format!("save failed: {e:#}"),
-    };
-    god.target = None;
-    streamer.request_remesh(columns_of(q));
+    if let Err(e) = deltas.0.set(q, id).and_then(|_| deltas.0.flush()) {
+        warn!("edit at {} {} {} not saved: {e:#}", q.x, q.y, q.z);
+    }
+    streamer.request_edit_remesh(nascio_client::columns_for_cell(q));
 }
 
-/// Cross at the centre of the screen and the tool panel while the mode is on.
+/// Icons of the blocks for the bar, made from the textures of the block table in use.
+#[derive(Resource, Default)]
+pub struct Icons {
+    /// The table they were made for.
+    table: Option<Arc<nascio_chunk::Blocks>>,
+    pixels: Vec<Option<Vec<u8>>>,
+    loaded: BTreeMap<BlockId, egui::TextureHandle>,
+}
+
+impl Icons {
+    fn get(&mut self, ctx: &egui::Context, id: BlockId) -> Option<egui::TextureId> {
+        if let Some(t) = self.loaded.get(&id) {
+            return Some(t.id());
+        }
+        let px = self.pixels.get(usize::from(id))?.as_ref()?;
+        let size = crate::textures::TEXTURE_SIZE as usize;
+        let image = egui::ColorImage::from_rgba_unmultiplied([size, size], px);
+        let t = ctx.load_texture(format!("block-{id}"), image, egui::TextureOptions::NEAREST);
+        let tid = t.id();
+        self.loaded.insert(id, t);
+        Some(tid)
+    }
+}
+
+/// The cross at the centre of the screen, the bar at the bottom and the name of the selected
+/// block for a few seconds.
+#[allow(clippy::too_many_arguments)]
 pub fn god_ui(
     mut contexts: EguiContexts,
     god: Res<God>,
     table: Option<Res<BlockTable>>,
-    deltas: Option<Res<SharedDeltas>>,
+    remote: Option<Res<crate::remote::Remote>>,
+    life: Res<crate::player::Life>,
+    dir: Res<crate::textures::TextureDir>,
+    time: Res<Time<Real>>,
+    mut icons: ResMut<Icons>,
 ) {
-    if !god.on {
+    if !active(&god, remote.is_some()) || !life.playing() {
         return;
     }
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let c = ctx.content_rect().center();
+    // Under the windows (pause menu, settings, chat…).
     let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
+        egui::Order::Background,
         egui::Id::new("god_cross"),
     ));
+    let screen = ctx.content_rect();
+    let c = screen.center();
     let stroke = egui::Stroke::new(2.0, egui::Color32::from_white_alpha(220));
-    painter.line_segment([c - egui::vec2(9.0, 0.0), c + egui::vec2(9.0, 0.0)], stroke);
-    painter.line_segment([c - egui::vec2(0.0, 9.0), c + egui::vec2(0.0, 9.0)], stroke);
+    painter.line_segment([c - egui::vec2(8.0, 0.0), c + egui::vec2(8.0, 0.0)], stroke);
+    painter.line_segment([c - egui::vec2(0.0, 8.0), c + egui::vec2(0.0, 8.0)], stroke);
     let Some(table) = table else { return };
-    let blocks = &*table.0;
-    let modified = deltas.map_or(String::new(), |d| {
-        format!(
-            "{} modified chunks (loaded regions) · ",
-            d.0.loaded_chunk_count()
-        )
-    });
-    egui::Window::new("God mode")
-        .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -12.0])
-        .resizable(false)
-        .collapsible(false)
-        .show(ctx, |ui| {
-            ui.label("Left click: destroy · right click: place · wheel: block · G / Esc: leave");
-            ui.heading(blocks.def(god.block).name.as_str());
-            ui.label(format!("{modified}{}", god.status));
-        });
+    let blocks = &table.0;
+    if !icons.table.as_ref().is_some_and(|t| Arc::ptr_eq(t, blocks)) {
+        *icons = Icons {
+            table: Some(blocks.clone()),
+            pixels: crate::textures::icons(&dir.0, blocks),
+            loaded: BTreeMap::new(),
+        };
+    }
+    let slots = god.slots(remote.as_deref(), blocks);
+    let width = SLOTS as f32 * SLOT_PX + (SLOTS - 1) as f32 * GAP_PX;
+    let left = c.x - width / 2.0;
+    let top = screen.bottom() - MARGIN_PX - SLOT_PX;
+    for (i, slot) in slots.iter().enumerate() {
+        let x = left + i as f32 * (SLOT_PX + GAP_PX);
+        let r = egui::Rect::from_min_size(egui::pos2(x, top), egui::vec2(SLOT_PX, SLOT_PX));
+        painter.rect_filled(r, 4.0, egui::Color32::from_black_alpha(140));
+        if let Some((b, count)) = *slot {
+            let inner = r.shrink(5.0);
+            match icons.get(ctx, b) {
+                Some(tex) => {
+                    painter.image(
+                        tex,
+                        inner,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
+                None => {
+                    let [r8, g8, b8] = blocks.def(b).color;
+                    painter.rect_filled(inner, 2.0, egui::Color32::from_rgb(r8, g8, b8));
+                }
+            }
+            if let Some(n) = count {
+                let at = r.right_bottom() - egui::vec2(4.0, 2.0);
+                let font = egui::FontId::proportional(14.0);
+                let text = n.to_string();
+                painter.text(
+                    at + egui::vec2(1.0, 1.0),
+                    egui::Align2::RIGHT_BOTTOM,
+                    &text,
+                    font.clone(),
+                    egui::Color32::BLACK,
+                );
+                painter.text(
+                    at,
+                    egui::Align2::RIGHT_BOTTOM,
+                    &text,
+                    font,
+                    egui::Color32::WHITE,
+                );
+            }
+        }
+        let (w, colour) = if i == god.cursor {
+            (3.0, egui::Color32::WHITE)
+        } else {
+            (1.0, egui::Color32::from_white_alpha(70))
+        };
+        painter.rect_stroke(
+            r,
+            4.0,
+            egui::Stroke::new(w, colour),
+            egui::StrokeKind::Inside,
+        );
+    }
+    // The name of the selected block, a few seconds after the cursor moved.
+    let recent = god
+        .moved_at
+        .is_some_and(|t| time.elapsed_secs_f64() - t < NAME_S);
+    if let (true, Some((b, _))) = (recent, slots[god.cursor]) {
+        let at = egui::pos2(c.x, top - 10.0);
+        let font = egui::FontId::proportional(18.0);
+        let name = blocks.def(b).name.as_str();
+        painter.text(
+            at + egui::vec2(1.0, 1.0),
+            egui::Align2::CENTER_BOTTOM,
+            name,
+            font.clone(),
+            egui::Color32::BLACK,
+        );
+        painter.text(
+            at,
+            egui::Align2::CENTER_BOTTOM,
+            name,
+            font,
+            egui::Color32::WHITE,
+        );
+    }
 }

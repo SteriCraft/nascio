@@ -94,7 +94,7 @@ fn column(terrain: &Terrain, cx: i32, cz: i32) -> Tally {
         t.chunks += 1;
         if !m.is_empty() {
             t.meshed += 1;
-            t.quads += (m.opaque.quad_count() + m.water.quad_count()) as u64;
+            t.quads += m.quad_count() as u64;
         }
     }
     t

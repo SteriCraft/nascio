@@ -1,9 +1,12 @@
-//! The in-game menu: Échap (chat closed, god mode off) opens "Reprendre / Paramètres /
+//! The in-game menu: Échap (chat closed, no local god mode) opens "Reprendre / Paramètres /
 //! Quitter"; Échap again, or "Reprendre", goes back to the game. While it is open the mouse is
-//! free and the keyboard does not move the camera.
+//! free and the keyboard does not move the camera. "Quitter" leaves the server for the main
+//! menu (in local flight, without a menu, it ends the program).
 
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
+
+use nascio_protocol::messages::ClientMsg;
 
 use crate::fly::FlySettings;
 use crate::settings::Saved;
@@ -25,16 +28,19 @@ impl Pause {
 }
 
 /// Échap toggles the menu. Runs before the god mode and the chat see the key: the chat open or
-/// the god mode on, Échap is theirs (closing the chat, leaving the god mode).
+/// the god mode on in local flight, Échap is theirs (closing the chat, leaving the god mode).
 pub fn pause_input(
     keys: Res<ButtonInput<KeyCode>>,
     chat: Res<crate::chat::ChatBox>,
     god: Res<crate::god::God>,
+    remote: Option<Res<crate::remote::Remote>>,
     cam: Res<crate::fly::FlyCam>,
     saved: Res<Saved>,
     mut pause: ResMut<Pause>,
 ) {
-    if cam.scripted || chat.open || god.on || !keys.just_pressed(KeyCode::Escape) {
+    // Connected, god mode is a way of playing: Échap opens the menu.
+    let god_escape = god.on && remote.is_none();
+    if cam.scripted || chat.open || god_escape || !keys.just_pressed(KeyCode::Escape) {
         return;
     }
     if pause.open {
@@ -44,11 +50,16 @@ pub fn pause_input(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn pause_ui(
     mut contexts: EguiContexts,
     mut pause: ResMut<Pause>,
     mut saved: ResMut<Saved>,
     mut settings: ResMut<FlySettings>,
+    remote: Option<Res<crate::remote::Remote>>,
+    mut god: ResMut<crate::god::God>,
+    mut menu: ResMut<crate::menu::Menu>,
+    mut next: ResMut<NextState<crate::Mode>>,
     mut exit: MessageWriter<AppExit>,
 ) -> Result {
     if !pause.open {
@@ -83,7 +94,19 @@ pub fn pause_ui(
                 pause.settings = true;
             }
             if ui.add(big("Quitter")).clicked() {
-                exit.write(AppExit::Success);
+                match &remote {
+                    Some(r) => {
+                        // The connection closes at once; the game's state goes on entering
+                        // the menu (`menu::leave_game`).
+                        r.send(ClientMsg::Bye);
+                        god.on = false;
+                        menu.back(String::new());
+                        next.set(crate::Mode::Menu);
+                    }
+                    None => {
+                        exit.write(AppExit::Success);
+                    }
+                }
             }
         });
     });

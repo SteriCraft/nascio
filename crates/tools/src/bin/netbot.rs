@@ -76,7 +76,9 @@ async fn main() -> anyhow::Result<()> {
                         chunk,
                         lsn,
                         changes,
-                    })) => m.blocks(chunk, lsn, changes),
+                    })) => {
+                        m.blocks(chunk, lsn, changes);
+                    }
                     Some(Event::Closed(r)) => anyhow::bail!("closed: {r}"),
                     _ => {}
                 }

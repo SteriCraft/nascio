@@ -240,6 +240,27 @@ impl Player {
         self.dead
     }
 
+    /// Whether `block` at `cell` would overlap the predicted player (as the server checks a
+    /// placement: such an edit is refused, so it is not predicted).
+    pub fn overlaps_cell(&self, cell: BlockPos, block: u16) -> bool {
+        const EPS: f64 = 1e-6;
+        let top = match self.shapes.get(block) {
+            nascio_physics::Shape::Full => 1.0,
+            nascio_physics::Shape::Layer => f64::from(nascio_chunk::mesh::LAYER_H),
+            nascio_physics::Shape::Empty | nascio_physics::Shape::Fluid => return false,
+        };
+        let s = &self.predicted;
+        let half = self.params.width * 0.5 + 0.5 - EPS;
+        let dx = torus::delta_f64(f64::from(cell.x) + 0.5, s.pos[0]);
+        let dz = torus::delta_f64(f64::from(cell.z) + 0.5, s.pos[2]);
+        let y = f64::from(cell.y);
+        !self.dead
+            && dx.abs() < half
+            && dz.abs() < half
+            && s.pos[1] < y + top - EPS
+            && s.pos[1] + self.params.height > y + EPS
+    }
+
     /// The prediction is stopped on a cell the mirror does not hold.
     pub fn blocked(&self) -> bool {
         self.applied < self.pending.len()

@@ -125,6 +125,7 @@ async fn abuses_are_refused_and_logged() {
         pos: [base[0] + 20, base[1], base[2]],
         block: 1,
         cmd: None,
+        slot: None,
     });
     let m = wait_for(&mut alice, 20, |m| {
         matches!(m, ServerMsg::EditRefused { .. })
@@ -136,6 +137,7 @@ async fn abuses_are_refused_and_logged() {
             pos: [base[0] + k % 4, base[1], base[2]],
             block: 0,
             cmd: None,
+            slot: None,
         });
     }
     let m = wait_for(

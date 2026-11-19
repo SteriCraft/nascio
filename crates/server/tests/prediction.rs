@@ -123,7 +123,9 @@ impl Client {
                     chunk,
                     lsn,
                     changes,
-                }) => self.mirror.blocks(chunk, lsn, changes),
+                }) => {
+                    self.mirror.blocks(chunk, lsn, changes);
+                }
                 Event::Msg(ServerMsg::Forget { columns }) => self.mirror.forget(&columns),
                 Event::Msg(m) => self.player.on_msg(&m),
                 Event::Closed(r) => panic!("closed: {r}"),
@@ -262,11 +264,13 @@ async fn prediction_through_latency() {
     );
     let from = a.now();
     let cmd = a.player.last_cmd();
+    assert!(server.shared.god("walker", true));
     for dy in 0..3 {
         a.send(ClientMsg::SetBlock {
             pos: [x, y + dy, z],
             block: granite,
             cmd,
+            slot: None,
         });
     }
     a.run(3_000, east(false)).await;

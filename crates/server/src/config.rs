@@ -14,7 +14,8 @@ pub struct ServerConfig {
     pub tick_hz: u32,
     /// The journal of the deltas is forced to the disk this often (group commit), ms.
     pub fsync_interval_ms: u64,
-    /// Radius of the chunk columns sent around each player, metres.
+    /// Largest radius of the chunk columns sent around each player, metres; a client asks
+    /// less with its view distance (`ClientMsg::ViewRadius`).
     pub chunk_radius_m: u32,
     /// Columns are dropped by a client beyond the radius plus this margin, metres.
     pub forget_margin_m: u32,
@@ -119,9 +120,9 @@ impl Default for ServerConfig {
             bind: "127.0.0.1:7777".parse().expect("address"),
             tick_hz: 20,
             fsync_interval_ms: 50,
-            chunk_radius_m: 512,
+            chunk_radius_m: 1_088,
             forget_margin_m: 64,
-            client_budget_bytes_per_s: 128 << 10,
+            client_budget_bytes_per_s: 512 << 10,
             entity_radius_m: 256.0,
             entity_fast: 64,
             entity_min_hz: 5,

@@ -38,7 +38,9 @@ async fn pump(c: &mut Connection, m: &mut Mirror, mut done: impl FnMut(&Mirror) 
                 chunk,
                 lsn,
                 changes,
-            })) => m.blocks(chunk, lsn, changes),
+            })) => {
+                m.blocks(chunk, lsn, changes);
+            }
             Some(Event::Msg(ServerMsg::Forget { columns })) => m.forget(&columns),
             Some(Event::Closed(r)) => panic!("closed: {r}"),
             _ => {}
@@ -73,10 +75,13 @@ async fn an_edit_is_seen_by_every_client_and_survives_a_restart() {
     pump(&mut b, &mut mb, |m| m.block(p).is_some()).await;
     assert_eq!(ma.block(p), Some(0), "air above the surface");
 
+    // God mode: blocks without an inventory.
+    assert!(server.shared.god("player_a", true));
     a.send(ClientMsg::SetBlock {
         pos: [p.x, p.y, p.z],
         block: granite,
         cmd: None,
+        slot: None,
     });
     pump(&mut a, &mut ma, |m| m.block(p) == Some(granite)).await;
     pump(&mut b, &mut mb, |m| m.block(p) == Some(granite)).await;
@@ -86,6 +91,7 @@ async fn an_edit_is_seen_by_every_client_and_survives_a_restart() {
         pos: [p.x + 20_000, p.y, p.z],
         block: granite,
         cmd: None,
+        slot: None,
     });
     let refused = loop {
         match a.next(Duration::from_secs(5)).await {
@@ -127,6 +133,96 @@ async fn an_edit_is_seen_by_every_client_and_survives_a_restart() {
     pump(&mut d, &mut md, |m| m.block(p).is_some()).await;
     assert_eq!(md.block(p), Some(granite));
     d.close();
+    server.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// First cell going down from `from_y` at `(x, z)` that the mirror knows and that is not air.
+/// (The test spawn is at sea level over water: the block found may be water, which the server
+/// edits like any other.)
+fn first_solid(m: &Mirror, x: i32, z: i32, from_y: i32) -> BlockPos {
+    (from_y - 80..=from_y)
+        .rev()
+        .map(|y| BlockPos::new(x, y, z))
+        .find(|&p| matches!(m.block(p), Some(b) if b != 0))
+        .expect("a solid block")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn predicted_edits_are_confirmed_or_undone() {
+    let world = generate_full(&WorldConfig::new(42, Scale::TwentyFifth))
+        .expect("world")
+        .world;
+    let dir = std::env::temp_dir().join(format!("nascio-server-predict-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // The default reach (5 m) applies here, unlike the config above.
+    let server = RunningServer::start(
+        &world,
+        ServerConfig {
+            edit_reach_m: 5.0,
+            ..cfg()
+        },
+        &dir,
+    )
+    .unwrap();
+    let mut a = connect(server.addr, &server.cert_der, "player_a", "test-secret")
+        .await
+        .unwrap();
+    let spawn = a.hello.spawn;
+    let (sx, sy, sz) = (spawn[0] as i32, spawn[1] as i32, spawn[2] as i32);
+    let mut m = Mirror::default();
+    pump(&mut a, &mut m, |m| {
+        m.block(BlockPos::new(sx, sy, sz)).is_some() && m.len() >= 29
+    })
+    .await;
+
+    // (a) A solid block in reach, broken: shown at once, then confirmed by the server.
+    let near = first_solid(&m, sx, sz, sy + 3);
+    assert!(m.predict(near, 0, Instant::now()));
+    assert_eq!(m.block(near), Some(0));
+    a.send(ClientMsg::SetBlock {
+        pos: [near.x, near.y, near.z],
+        block: 0,
+        cmd: None,
+        slot: None,
+    });
+    pump(&mut a, &mut m, |m| m.pending().is_empty()).await;
+    assert_eq!(m.block(near), Some(0));
+    assert_eq!(m.server_block(near), Some(0));
+
+    // (b) A solid block 20 m away: refused, and the block comes back.
+    let far = first_solid(&m, sx + 20, sz, sy + 40);
+    let original_far = m.block(far).unwrap();
+    assert!(m.predict(far, 0, Instant::now()));
+    assert_eq!(m.block(far), Some(0));
+    a.send(ClientMsg::SetBlock {
+        pos: [far.x, far.y, far.z],
+        block: 0,
+        cmd: None,
+        slot: None,
+    });
+    let start = Instant::now();
+    let pos = loop {
+        assert!(start.elapsed() < Duration::from_secs(30), "no refusal");
+        match a.next(Duration::from_millis(200)).await {
+            Some(Event::Msg(ServerMsg::EditRefused { pos, .. })) => break pos,
+            Some(Event::Column(col)) => m.column(*col),
+            Some(Event::Msg(ServerMsg::Blocks {
+                chunk,
+                lsn,
+                changes,
+            })) => {
+                m.blocks(chunk, lsn, changes);
+            }
+            Some(Event::Closed(r)) => panic!("closed: {r}"),
+            _ => {}
+        }
+    };
+    assert_eq!(pos, [far.x, far.y, far.z]);
+    assert!(m.refused(far));
+    assert_eq!(m.block(far), Some(original_far));
+    assert!(m.pending().is_empty());
+    a.close();
     server.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

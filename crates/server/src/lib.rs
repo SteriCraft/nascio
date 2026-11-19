@@ -206,6 +206,12 @@ impl RunningServer {
             deltas: deltas.clone(),
             cache: cache.clone(),
             blocks: blocks.len(),
+            block_names: blocks
+                .registry()
+                .blocks
+                .iter()
+                .map(|b| b.name.clone())
+                .collect(),
             tick: Duration::from_secs_f64(1.0 / f64::from(cfg.tick_hz.max(1))),
             tick_hz: cfg.tick_hz.max(1),
             player: cfg.player.clone(),

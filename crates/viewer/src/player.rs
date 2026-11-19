@@ -6,9 +6,9 @@
 //!   flies down). Two presses of Z within 300 ms run; the view then widens by 1.3 times the
 //!   player's field of view (a setting, 60° by default).
 //! - The mouse turns the view (captured while playing; Échap, the chat and death free it).
-//! - Administrators: two presses of Space within 300 ms ask to fly, or to walk again; the view
-//!   widens the same way while flying, at a fixed 20 m/s, and coming down onto a block walks again
-//!   (author's decisions). Other players never ask.
+//! - God mode (administrators, [`crate::god`]): two presses of Space within 300 ms ask to fly,
+//!   or to walk again; the view widens the same way while flying, at a fixed 20 m/s, and coming
+//!   down onto a block walks again (author's decisions). In walk mode they do nothing.
 //! - Death: a grey veil with its cause and a "Réapparaître" button.
 //!
 //! The network thread gives the player the server's states, its death and respawn and the
@@ -39,10 +39,6 @@ const FOV_TAU_S: f32 = 0.15;
 pub const EDIT_REACH_M: f64 = 5.0;
 /// Two presses of Space within this time ask to fly or to walk (as running, s).
 const FLY_TAP_S: f64 = 0.3;
-/// A request to fly not followed by the mode within this time was refused, s.
-const FLY_ANSWER_S: f64 = 2.0;
-/// A message of the player stays this long, s.
-const NOTICE_S: f64 = 4.0;
 /// Flight speed, m/s (author's decision: fixed, the wheel does nothing connected).
 pub const FLY_SPEED_MPS: f64 = 20.0;
 
@@ -55,12 +51,8 @@ pub struct Life {
     respawn_asked: bool,
     pub running: bool,
     pub flying: bool,
-    /// Mode asked and when (s), until the server's states show it.
-    fly_asked: Option<(bool, f64)>,
     /// Last press of Space (s).
     space_tap: Option<f64>,
-    /// A short message and when it came (s).
-    notice: Option<(String, f64)>,
 }
 
 impl Life {
@@ -85,6 +77,7 @@ pub fn walk(
     saved: Res<crate::settings::Saved>,
     chat: Res<crate::chat::ChatBox>,
     pause: Res<crate::pause::Pause>,
+    god: Res<crate::god::God>,
     mut cam: ResMut<FlyCam>,
     mut life: ResMut<Life>,
 ) {
@@ -133,22 +126,13 @@ pub fn walk(
     cam.pos = WorldPos::new(eye[0], eye[1], eye[2]);
     life.running = running;
     life.flying = flying;
-    // Flight: two presses of Space, administrators only (the server checks again).
-    if free && remote.admin && life.died.is_none() && keys.just_pressed(KeyCode::Space) {
+    // Flight: two presses of Space, in god mode only (the server checks again).
+    if free && god.on && life.died.is_none() && keys.just_pressed(KeyCode::Space) {
         if life.space_tap.is_some_and(|t| now_s - t <= FLY_TAP_S) {
             remote.send(ClientMsg::Fly(!flying));
-            life.fly_asked = Some((!flying, now_s));
             life.space_tap = None;
         } else {
             life.space_tap = Some(now_s);
-        }
-    }
-    if let Some((want, at)) = life.fly_asked {
-        if want == flying {
-            life.fly_asked = None;
-        } else if now_s - at > FLY_ANSWER_S {
-            life.fly_asked = None;
-            life.notice = Some(("Vol refusé par le serveur".into(), now_s));
         }
     }
 }
@@ -187,27 +171,14 @@ pub fn field_of_view(
     }
 }
 
-/// Death: a grey veil, its cause and the button to respawn. A short notice of the mode.
+/// Death: a grey veil, its cause and the button to respawn.
 pub fn life_ui(
     mut contexts: EguiContexts,
     remote: Option<Res<Remote>>,
-    time: Res<Time<Real>>,
     mut life: ResMut<Life>,
 ) -> Result {
     let Some(remote) = remote else { return Ok(()) };
     let ctx = contexts.ctx_mut()?;
-    let now_s = time.elapsed_secs_f64();
-    if let Some((text, at)) = &life.notice {
-        if now_s - at > NOTICE_S {
-            life.notice = None;
-        } else {
-            egui::Area::new(egui::Id::new("player-notice"))
-                .anchor(egui::Align2::CENTER_TOP, [0.0, 60.0])
-                .show(ctx, |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(text.as_str()));
-                });
-        }
-    }
     let Some(cause) = life.died else {
         return Ok(());
     };

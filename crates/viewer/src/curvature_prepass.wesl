@@ -1,6 +1,11 @@
-// Prepass and shadow-pass vertex shader of the curved materials: the same drop as the main
-// pass (`curvature.wesl`), measured from the camera given in the uniform (in the shadow pass
-// the view is the light), so shadows fall on the displayed, lowered geometry.
+// Prepass and shadow-pass shaders of the curved materials.
+//
+// Vertex: the same drop as the main pass (`curvature.wesl`), measured from the camera given in
+// the uniform (in the shadow pass the view is the light), so shadows fall on the displayed,
+// lowered geometry.
+//
+// Fragment (run for the alpha-mask foliage material, or when depth clipping is emulated): the
+// foliage is cut out by its texture's alpha as in the main pass, so its shadows are cut out too.
 
 import bevy_pbr::{
     prepass::io::{Vertex, VertexOutput, decompress_vertex},
@@ -9,6 +14,9 @@ import bevy_pbr::{
         view_transformations::position_world_to_clip,
     },
 };
+
+@if(PREPASS_FRAGMENT)
+import bevy_pbr::prepass::io::FragmentOutput;
 
 struct Curved {
     drop: vec4<f32>,
@@ -21,6 +29,12 @@ struct Curved {
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<storage, read> curved: Curved;
+@group(constants::MATERIAL_BIND_GROUP) @binding(105) var block_tex: texture_2d_array<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(106) var block_smp: sampler;
+
+// Same constants as `curvature.wesl` (checked by a test).
+const MATERIAL_FOLIAGE_CUT: f32 = 3.0;
+const FOLIAGE_CUTOFF: f32 = 0.5;
 
 @vertex
 fn vertex(vertex_in: Vertex) -> VertexOutput {
@@ -55,4 +69,38 @@ fn vertex(vertex_in: Vertex) -> VertexOutput {
         vertex_in.instance_index, world_from_local[3]);
 
     return out;
+}
+
+// Discards the transparent texels of foliage faces (material channel in UV0, texture
+// coordinates in UV1, as in the main pass).
+fn foliage_discard(in: VertexOutput) {
+    var material = vec2<f32>(0.0, -1.0);
+@if(VERTEX_UVS_A)
+    material = in.uv;
+    var tex_uv = vec2<f32>(0.0, 0.0);
+@if(VERTEX_UVS_B)
+    tex_uv = in.uv_b;
+    let layer = i32(max(material.y, 0.0) + 0.5);
+    let a = textureSample(block_tex, block_smp, tex_uv, layer).a;
+    let is_cut = abs(material.x - MATERIAL_FOLIAGE_CUT) < 0.5;
+    if is_cut && material.y >= 0.0 && a < FOLIAGE_CUTOFF {
+        discard;
+    }
+}
+
+@if(PREPASS_FRAGMENT)
+@fragment
+fn fragment(in: VertexOutput) -> FragmentOutput {
+    foliage_discard(in);
+    var out: FragmentOutput;
+@if(UNCLIPPED_DEPTH_ORTHO_EMULATION)
+    out.frag_depth = in.unclipped_depth;
+@if(NORMAL_PREPASS)
+    out.normal = vec4<f32>(normalize(in.world_normal) * 0.5 + vec3<f32>(0.5), 1.0);
+    return out;
+}
+@else
+@fragment
+fn fragment(in: VertexOutput) {
+    foliage_discard(in);
 }

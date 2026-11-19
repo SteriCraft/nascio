@@ -9,7 +9,7 @@
 //! **Streaming.** Chunk columns within the view distance are generated and meshed on a
 //! dedicated rayon pool, nearest first, then turned into Bevy meshes on the main thread.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::f64::consts::{FRAC_PI_2, TAU};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -28,7 +28,7 @@ use nascio_core::geo::{latitude, longitude, seam_distance};
 use nascio_core::time::GameClock;
 use nascio_core::torus::{delta, delta_chunks};
 use nascio_voxel::mesh::MeshData;
-use nascio_voxel::{ChunkMesh, ColumnSet, DeltaStore, Terrain, mesh_chunk};
+use nascio_voxel::{ChunkMesh, ColumnSet, DeltaStore, FoliageMode, Terrain, mesh_chunk_with};
 
 use crate::remote::Remote;
 
@@ -69,6 +69,12 @@ pub struct FlySettings {
     pub fullscreen: bool,
     /// Weather cloud cover forced everywhere (`--clouds`, captures); `None` follows the climate.
     pub fixed_clouds: Option<f64>,
+    /// Radius of the cut-out foliage, chunk columns ("Distance de transparence", or
+    /// `[render] foliage_cutout_chunks`); negative: no transparency, all foliage opaque.
+    pub foliage_cutout_chunks: i32,
+    /// Shadows of the cut-out foliage cut out by its texture too; off, they are solid (no
+    /// fragment shader in the shadow pass).
+    pub alpha_shadows: bool,
 }
 
 impl Default for FlySettings {
@@ -85,6 +91,8 @@ impl Default for FlySettings {
             vsync: true,
             fullscreen: false,
             fixed_clouds: None,
+            foliage_cutout_chunks: crate::curvature::DEFAULT_FOLIAGE_CUTOUT_CHUNKS,
+            alpha_shadows: true,
         }
     }
 }
@@ -187,6 +195,8 @@ impl WorldInfo {
 #[derive(Resource)]
 pub struct TerrainMaterials {
     pub opaque: Handle<CurvedMaterial>,
+    /// Foliage: alpha mask, cut out by its texture's alpha (shadows included).
+    pub foliage: Handle<CurvedMaterial>,
     pub water: Handle<CurvedMaterial>,
 }
 
@@ -242,6 +252,8 @@ struct ColumnResult {
     key: (i32, i32),
     /// Request number: only the latest request of a column is kept.
     request: u64,
+    /// How its foliage was meshed.
+    mode: FoliageMode,
     /// `None`: not meshable yet (network mode: a neighbouring column is missing).
     meshes: Option<Vec<(i32, ChunkMesh)>>,
 }
@@ -252,6 +264,8 @@ enum Slot {
         entities: Vec<Entity>,
         quads: usize,
         shown: bool,
+        /// How its foliage is meshed (cut out near the camera, opaque farther).
+        mode: FoliageMode,
         /// A new mesh is on its way (after an edit): replaces this one when it arrives.
         remesh: Option<u64>,
     },
@@ -279,8 +293,14 @@ pub struct Streamer {
     pub quads: usize,
     pub ready_columns: usize,
     requests: u64,
-    /// Columns to mesh again (edited blocks).
+    /// Columns to mesh again (new neighbours, foliage mode to change).
     remesh: Vec<(i32, i32)>,
+    /// Columns to mesh again after an edit: before every other job.
+    urgent: Vec<(i32, i32)>,
+    /// Jobs waiting for a worker, edits first.
+    jobs: Arc<Mutex<Jobs>>,
+    /// Radius of the cut-out foliage, columns (negative: none).
+    cutout: i32,
 }
 
 impl Streamer {
@@ -300,6 +320,9 @@ impl Streamer {
             ready_columns: 0,
             requests: 0,
             remesh: Vec::new(),
+            urgent: Vec::new(),
+            jobs: Arc::default(),
+            cutout: 0,
         }
     }
 
@@ -318,6 +341,11 @@ impl Streamer {
     /// Meshes these columns again, if loaded or loading.
     pub fn request_remesh(&mut self, keys: impl IntoIterator<Item = (i32, i32)>) {
         self.remesh.extend(keys);
+    }
+
+    /// Meshes these columns again after an edit, before any other column.
+    pub fn request_edit_remesh(&mut self, keys: impl IntoIterator<Item = (i32, i32)>) {
+        self.urgent.extend(keys);
     }
 
     fn set_radius(&mut self, radius: i32) {
@@ -349,6 +377,49 @@ impl Streamer {
     pub fn wants_hole(&self, key: (i32, i32)) -> bool {
         matches!(self.slots.get(&key), Some(Slot::Ready { .. })) && self.within(key, self.radius)
     }
+
+    /// Foliage mode wanted for column `key`: cut out within the cut-out radius (none if it is
+    /// negative).
+    fn foliage_mode(&self, key: (i32, i32)) -> FoliageMode {
+        if self.cutout >= 0 && self.within(key, self.cutout) {
+            FoliageMode::CutOut
+        } else {
+            FoliageMode::Opaque
+        }
+    }
+}
+
+/// A meshing job.
+type Job = Box<dyn FnOnce() + Send>;
+
+/// Meshing jobs waiting for a worker: each task given to the pool runs the first one, so
+/// the remeshes of edits overtake the columns queued before them.
+#[derive(Default)]
+struct Jobs {
+    urgent: VecDeque<Job>,
+    normal: VecDeque<Job>,
+}
+
+/// Queues `job` (first if `urgent`) and gives the pool a task that runs the first job.
+fn submit(workers: &Workers, jobs: &Arc<Mutex<Jobs>>, urgent: bool, job: Job) {
+    {
+        let mut q = jobs.lock().unwrap_or_else(|e| e.into_inner());
+        if urgent {
+            q.urgent.push_back(job);
+        } else {
+            q.normal.push_back(job);
+        }
+    }
+    let jobs = jobs.clone();
+    workers.pool.spawn(move || {
+        let job = {
+            let mut q = jobs.lock().unwrap_or_else(|e| e.into_inner());
+            q.urgent.pop_front().or_else(|| q.normal.pop_front())
+        };
+        if let Some(job) = job {
+            job();
+        }
+    });
 }
 
 /// Where the columns come from.
@@ -362,50 +433,61 @@ enum ColumnSource {
 
 /// Generates and meshes column `key` (with its deltas) on the worker pool; in network mode,
 /// meshes it from the columns the server sent instead (no generation).
+#[allow(clippy::too_many_arguments)]
 fn spawn_column(
     workers: &Workers,
+    jobs: &Arc<Mutex<Jobs>>,
+    urgent: bool,
     source: ColumnSource,
     tx: Sender<ColumnResult>,
     key: (i32, i32),
     request: u64,
+    mode: FoliageMode,
 ) {
-    workers.pool.spawn(move || {
-        let (terrain, deltas, blocks) = match source {
-            ColumnSource::Remote(remote) => {
-                let meshes = remote.mesh_column(key);
-                let _ = tx.send(ColumnResult {
-                    key,
-                    request,
-                    meshes,
-                });
-                return;
-            }
-            ColumnSource::Local(t, d, b) => (t, d, b),
-        };
-        let underground = terrain.config().underground_chunks;
-        let col = ColumnSet::new(&terrain, key.0, key.1);
-        let mut tint = terrain.chunk_tint(key.0, key.1);
-        tint.water_depth = col.water_depths();
-        let mut ys: BTreeSet<i32> = col
-            .chunk_range(underground)
-            .filter(|&cy| col.may_have_faces(cy))
-            .collect();
-        ys.extend(deltas.touched_ys(key.0, key.1));
-        let meshes = ys
-            .into_iter()
-            .map(|cy| {
-                let mut p = col.padded_chunk(&terrain, cy);
-                deltas.apply_padded(ChunkPos::new(key.0, cy, key.1), &mut p);
-                (cy, mesh_chunk(&p, &blocks, &tint))
-            })
-            .filter(|(_, m)| !m.is_empty())
-            .collect();
-        let _ = tx.send(ColumnResult {
-            key,
-            request,
-            meshes: Some(meshes),
-        });
-    });
+    submit(
+        workers,
+        jobs,
+        urgent,
+        Box::new(move || {
+            let (terrain, deltas, blocks) = match source {
+                ColumnSource::Remote(remote) => {
+                    let meshes = remote.mesh_column(key, mode);
+                    let _ = tx.send(ColumnResult {
+                        key,
+                        request,
+                        mode,
+                        meshes,
+                    });
+                    return;
+                }
+                ColumnSource::Local(t, d, b) => (t, d, b),
+            };
+            let underground = terrain.config().underground_chunks;
+            let col = ColumnSet::new(&terrain, key.0, key.1);
+            let mut tint = terrain.chunk_tint(key.0, key.1);
+            tint.water_depth = col.water_depths();
+            let mut ys: BTreeSet<i32> = col
+                .chunk_range(underground)
+                .filter(|&cy| col.may_have_faces(cy))
+                .collect();
+            ys.extend(deltas.touched_ys(key.0, key.1));
+            let meshes = ys
+                .into_iter()
+                .map(|cy| {
+                    let mut p = col.padded_chunk(&terrain, cy);
+                    deltas.apply_padded(ChunkPos::new(key.0, cy, key.1), &mut p);
+                    (cy, mesh_chunk_with(&p, &blocks, &tint, mode))
+                })
+                .filter(|(_, m)| !m.is_empty())
+                .collect();
+            let _ = tx.send(ColumnResult {
+                key,
+                request,
+                mode,
+                meshes: Some(meshes),
+            });
+        }),
+    );
 }
 
 /// Spawns the Bevy entities of a meshed column; returns them and their quad count.
@@ -427,9 +509,10 @@ fn spawn_meshes(
             z: key.1 * CHUNK_SIZE,
         };
         let t = Transform::from_translation(origin.translation(anchor.x, anchor.y, anchor.z));
-        quads += m.opaque.quad_count() + m.water.quad_count();
+        quads += m.quad_count();
         for (data, material, water) in [
             (m.opaque, &materials.opaque, false),
+            (m.foliage, &materials.foliage, false),
             (m.water, &materials.water, true),
         ] {
             if data.is_empty() {
@@ -506,6 +589,7 @@ pub fn stream_chunks(
     };
     let s = &mut *streamer;
     s.set_radius((settings.view_distance_m / CHUNK_SIZE as f32).ceil() as i32);
+    s.cutout = settings.foliage_cutout_chunks;
     let cam_block = cam.pos.block();
     let center = (
         cam_block.x.div_euclid(CHUNK_SIZE),
@@ -558,6 +642,7 @@ pub fn stream_chunks(
                         entities,
                         quads,
                         shown: false,
+                        mode: r.mode,
                         remesh: None,
                     },
                 );
@@ -566,6 +651,7 @@ pub fn stream_chunks(
                 entities,
                 quads,
                 shown,
+                mode,
                 remesh,
             }) if *remesh == Some(r.request) => {
                 for &e in entities.iter() {
@@ -583,23 +669,57 @@ pub fn stream_chunks(
                 s.quads = s.quads - *quads + n;
                 *entities = new;
                 *quads = n;
+                *mode = r.mode;
                 *remesh = None;
             }
             _ => {}
         }
     }
 
-    // Edited columns: request a new mesh (a pending request is superseded).
-    for key in std::mem::take(&mut s.remesh) {
+    // Columns that crossed the cut-out radius: mesh their foliage the other way.
+    let crossed: Vec<(i32, i32)> = s
+        .slots
+        .iter()
+        .filter(|&(&k, slot)| match slot {
+            Slot::Ready { mode, remesh, .. } => remesh.is_none() && *mode != s.foliage_mode(k),
+            Slot::Pending(_) => false,
+        })
+        .map(|(&k, _)| k)
+        .collect();
+    s.remesh.extend(crossed);
+
+    // Edited columns first (their own queue), then the others: request a new mesh (a pending
+    // request is superseded).
+    let urgent: BTreeSet<(i32, i32)> = std::mem::take(&mut s.urgent).into_iter().collect();
+    let normal: BTreeSet<(i32, i32)> = std::mem::take(&mut s.remesh)
+        .into_iter()
+        .filter(|k| !urgent.contains(k))
+        .collect();
+    let jobs = s.jobs.clone();
+    let remeshes = urgent
+        .into_iter()
+        .map(|k| (k, true))
+        .chain(normal.into_iter().map(|k| (k, false)));
+    for (key, first) in remeshes {
         s.requests += 1;
         let request = s.requests;
+        let mode = s.foliage_mode(key);
         match s.slots.get_mut(&key) {
             Some(Slot::Pending(q)) => *q = request,
             Some(Slot::Ready { remesh, .. }) => *remesh = Some(request),
             None => continue,
         }
         s.in_flight += 1;
-        spawn_column(&workers, source.clone(), s.tx.clone(), key, request);
+        spawn_column(
+            &workers,
+            &jobs,
+            first,
+            source.clone(),
+            s.tx.clone(),
+            key,
+            request,
+            mode,
+        );
     }
 
     // 2. Forget pending columns that left the range (their results will be discarded).
@@ -638,7 +758,17 @@ pub fn stream_chunks(
                     s.requests += 1;
                     let request = s.requests;
                     s.slots.insert(key, Slot::Pending(request));
-                    spawn_column(&workers, source.clone(), s.tx.clone(), key, request);
+                    let mode = s.foliage_mode(key);
+                    spawn_column(
+                        &workers,
+                        &jobs,
+                        false,
+                        source.clone(),
+                        s.tx.clone(),
+                        key,
+                        request,
+                        mode,
+                    );
                 }
             }
         }
@@ -1016,7 +1146,7 @@ pub fn hud(
                 }
             }));
             ui.small(if remote.is_some() {
-                "ZQSD: walk · Z twice: run · Space: jump · Shift: crouch · Space twice: fly (administrators) · G: edit · F3: this panel · Esc: menu".to_owned()
+                "ZQSD: walk · Z twice: run · Space: jump · Shift: crouch · Left click: break · right click: place · wheel: slot · G: god mode (administrators) · Space twice: fly (god mode) · F3: this panel · Esc: menu".to_owned()
             } else {
                 format!(
                     "Right drag: look · WASD/ZQSD: move · Space/Shift: up/down · F3: this panel · Esc: menu{}",

@@ -1,11 +1,12 @@
 //! Chantier 5.3, the rules of the simulated players: no block placed inside a player, edits
-//! within 5 m of the eyes, a player arriving inside blocks put beside them (5.3bis), flight
-//! for administrators only. (Deaths and respawns: unit tests of `movement`, `arrival.rs`.)
+//! within 5 m of the eyes, a player arriving inside blocks put beside them (5.3bis), the
+//! inventory in walk mode, god mode and flight for administrators only. (Deaths and respawns: unit tests of `movement`, `arrival.rs`.)
 
 use std::time::{Duration, Instant};
 
 use nascio_client::{Connection, Event, connect};
 use nascio_physics::{Input, Mode, State, keys};
+use nascio_protocol::inventory::Inventory;
 use nascio_protocol::messages::{ClientMsg, ServerMsg};
 use nascio_protocol::player::{Commands, PlayerState};
 use nascio_server::config::SecretLogin;
@@ -89,7 +90,24 @@ impl Player {
             pos,
             block,
             cmd: self.ack,
+            slot: Some(0),
         });
+    }
+
+    /// The inventory after a walk mode edit, or the refusal.
+    async fn stock(&mut self, pos: [i32; 3], block: u16) -> Result<Inventory, String> {
+        self.set_block(pos, block);
+        match self
+            .wait(|m| {
+                matches!(m, ServerMsg::EditRefused { pos: p, .. } if *p == pos)
+                    || matches!(m, ServerMsg::Inventory(_))
+            })
+            .await
+        {
+            ServerMsg::EditRefused { reason, .. } => Err(reason),
+            ServerMsg::Inventory(inv) => Ok(inv),
+            _ => unreachable!(),
+        }
     }
 
     /// The answer to an edit: `Ok` when the block changed, `Err(reason)` when refused.
@@ -139,6 +157,21 @@ async fn edits_arrivals_and_flight() {
     a.run(1_000, Input::default()).await;
     let here = a.state.expect("a state").pos;
 
+    // Walk mode: a block placed must come from the inventory; one destroyed goes in it.
+    let refused = a.stock(cell(3), granite).await.unwrap_err();
+    assert!(refused.contains("not in the inventory"), "{refused}");
+    let ground = [cell(0)[0] - 2, cell(0)[1] - 2, cell(0)[2]];
+    let inv = a.stock(ground, 0).await.unwrap();
+    let got = inv.slots[0].expect("the block destroyed");
+    assert_eq!(got.count, 1);
+    assert_ne!(got.block, 0);
+    let inv = a.stock(ground, got.block).await.unwrap();
+    assert_eq!(inv, Inventory::default(), "placed back");
+
+    // God mode (console): unlimited blocks.
+    assert!(server.shared.god("builder", true));
+    a.wait(|m| matches!(m, ServerMsg::God(true))).await;
+
     // Inside the player: refused; out of reach: refused.
     let refused = a.edit(cell(1), granite).await.unwrap_err();
     assert!(refused.contains("inside a player"), "{refused}");
@@ -184,12 +217,25 @@ async fn edits_arrivals_and_flight() {
     assert!(beside(out), "beside the blocks: {out:?} (spawn {spawn:?})");
     assert_eq!(c.state.unwrap().mode, Mode::Walk);
 
-    // Flight: refused to a player, granted to an administrator and by the console.
+    // God mode and flight: refused to a player; granted to an administrator, flight in god
+    // mode only; leaving god mode walks again; the console grants both.
+    c.c.send(ClientMsg::God(true));
+    c.wait(|m| matches!(m, ServerMsg::God(false))).await;
     c.c.send(ClientMsg::Fly(true));
     c.run(500, Input::default()).await;
     assert_eq!(c.state.unwrap().mode, Mode::Walk, "not an administrator");
     server.shared.accounts.set_admin("unlucky", true).unwrap();
     c.c.send(ClientMsg::Fly(true));
+    c.run(500, Input::default()).await;
+    assert_eq!(c.state.unwrap().mode, Mode::Walk, "not in god mode");
+    c.c.send(ClientMsg::God(true));
+    c.c.send(ClientMsg::Fly(true));
+    c.run(500, Input::default()).await;
+    assert_eq!(c.state.unwrap().mode, Mode::Fly);
+    c.c.send(ClientMsg::God(false));
+    c.run(500, Input::default()).await;
+    assert_eq!(c.state.unwrap().mode, Mode::Walk, "god mode left");
+    assert!(server.shared.fly("unlucky", true));
     c.run(500, Input::default()).await;
     assert_eq!(c.state.unwrap().mode, Mode::Fly);
     assert!(server.shared.fly("unlucky", false));

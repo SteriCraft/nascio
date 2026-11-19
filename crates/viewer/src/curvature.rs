@@ -12,8 +12,6 @@
 //! - A point at height `H` is visible from height `h` up to `√(2Rh) + √(2RH)` (tangent to the
 //!   parabola): the horizon only draws the levels within that range and the fog ends there.
 
-use std::f64::consts::TAU;
-
 use bevy::asset::RenderAssetUsages;
 use bevy::asset::embedded_asset;
 use bevy::camera::primitives::{Aabb, MeshAabb};
@@ -22,14 +20,11 @@ use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
-use nascio_core::consts::WORLD_SIZE_F64;
 use serde::Deserialize;
 
 use crate::fly::FlySettings;
 
-/// Radius of the sphere with the same circumference as the torus, m (≈ 15 915 m).
-pub const REAL_RADIUS_M: f64 = WORLD_SIZE_F64 / TAU;
-/// Range of the radius slider, m.
+/// Range of the radius accepted from `--curvature-radius` and `--render-config`, m.
 pub const RADIUS_MIN_M: f64 = 5_000.0;
 pub const RADIUS_MAX_M: f64 = 500_000.0;
 /// Largest horizontal distance between the camera and a vertex of a shown chunk, m (maximum
@@ -43,6 +38,10 @@ const PREPASS_SHADER: &str = "embedded://nascio_viewer/curvature_prepass.wesl";
 /// Snow cover gained per °C of cooling with height above the climate cell's mean (5 °C, about
 /// 770 m, from bare ground to full cover).
 const SNOW_PER_DEGREE: f32 = 0.2;
+/// Texture alpha below which foliage is cut out (alpha-mask material; `curvature.wesl` and
+/// `curvature_prepass.wesl` have the same constant). The texture mips keep the share of texels
+/// above it (`crate::textures`).
+pub const FOLIAGE_CUTOFF: f32 = 0.5;
 /// Default display radius `R_vis`, m (decided after the author's trial, M4).
 pub const DEFAULT_RADIUS_M: f64 = 200_000.0;
 
@@ -52,12 +51,20 @@ pub const DEFAULT_RADIUS_M: f64 = 200_000.0;
 pub struct RenderConfig {
     /// Display radius `R_vis`, m; 0 draws the world flat.
     pub curvature_radius_m: f64,
+    /// Columns within this many chunks of the camera column draw cut-out foliage; farther
+    /// ones draw it opaque (the cut-out inner faces about double a forest's quads). Negative:
+    /// no cut-out foliage. Overrides the client's "Distance de transparence" for the session.
+    pub foliage_cutout_chunks: i32,
 }
+
+/// Default of [`RenderConfig::foliage_cutout_chunks`] (author's choice).
+pub const DEFAULT_FOLIAGE_CUTOUT_CHUNKS: i32 = 4;
 
 impl Default for RenderConfig {
     fn default() -> Self {
         Self {
             curvature_radius_m: DEFAULT_RADIUS_M,
+            foliage_cutout_chunks: DEFAULT_FOLIAGE_CUTOUT_CHUNKS,
         }
     }
 }
@@ -176,6 +183,12 @@ impl MaterialExtension for Curvature {
         PREPASS_SHADER.into()
     }
 
+    /// Cuts the foliage out in the shadow pass (run only for the alpha-mask material, or when
+    /// depth clipping is emulated).
+    fn prepass_fragment_shader() -> ShaderRef {
+        PREPASS_SHADER.into()
+    }
+
     fn enable_prepass() -> bool {
         true
     }
@@ -232,6 +245,35 @@ pub fn relief_end(settings: &FlySettings, horizon_extent_m: f64) -> f32 {
         horizon_extent_m as f32 * 0.95
     } else {
         settings.view_distance_m
+    }
+}
+
+/// "Ombres alpha": the foliage material is an alpha mask (its shadow pass runs
+/// `curvature_prepass.wesl`, which cuts the shadows out) or opaque (solid shadows, no fragment
+/// shader in the shadow pass). The main pass cuts the foliage out in both cases
+/// (`curvature.wesl`). Changing the material re-prepares the chunks once.
+pub fn sync_foliage_shadows(
+    settings: Res<FlySettings>,
+    terrain: Option<Res<crate::fly::TerrainMaterials>>,
+    mut materials: ResMut<Assets<CurvedMaterial>>,
+) {
+    let Some(terrain) = terrain else {
+        return;
+    };
+    if !settings.is_changed() && !terrain.is_added() {
+        return;
+    }
+    let mode = if settings.alpha_shadows {
+        AlphaMode::Mask(FOLIAGE_CUTOFF)
+    } else {
+        AlphaMode::Opaque
+    };
+    if materials
+        .get(&terrain.foliage)
+        .is_some_and(|m| m.base.alpha_mode != mode)
+        && let Some(mut m) = materials.get_mut(&terrain.foliage)
+    {
+        m.base.alpha_mode = mode;
     }
 }
 
@@ -307,6 +349,11 @@ pub fn sync_curved(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nascio_core::consts::WORLD_SIZE_F64;
+    use std::f64::consts::TAU;
+
+    /// Radius of the sphere with the same circumference as the torus, m (≈ 15 915 m).
+    const REAL_RADIUS_M: f64 = WORLD_SIZE_F64 / TAU;
 
     #[test]
     fn real_radius_matches_circumference() {
@@ -343,17 +390,28 @@ mod tests {
     /// The material kinds of the shader are the mesher's (audit F4).
     #[test]
     fn shader_material_kinds_match_the_mesher() {
-        use nascio_voxel::mesh::{MATERIAL_FOLIAGE, MATERIAL_GROUND, MATERIAL_WATER};
+        use nascio_voxel::mesh::{
+            MATERIAL_FOLIAGE, MATERIAL_FOLIAGE_CUT, MATERIAL_GROUND, MATERIAL_WATER,
+        };
         let src = include_str!("curvature.wesl");
         for (name, v) in [
             ("GROUND", MATERIAL_GROUND),
             ("WATER", MATERIAL_WATER),
             ("FOLIAGE", MATERIAL_FOLIAGE),
+            ("FOLIAGE_CUT", MATERIAL_FOLIAGE_CUT),
         ] {
             let line = format!("const MATERIAL_{name}: f32 = {v:.1};");
             assert!(src.contains(&line), "missing {line}");
         }
         // No alpha tag left.
         assert!(!src.contains("0.99"));
+        // The foliage cutout and kind are the same in both passes.
+        let prepass = include_str!("curvature_prepass.wesl");
+        for s in [src, prepass] {
+            let cutoff = format!("const FOLIAGE_CUTOFF: f32 = {FOLIAGE_CUTOFF:.1};");
+            assert!(s.contains(&cutoff), "missing {cutoff}");
+            let kind = format!("const MATERIAL_FOLIAGE_CUT: f32 = {MATERIAL_FOLIAGE_CUT:.1};");
+            assert!(s.contains(&kind), "missing {kind}");
+        }
     }
 }

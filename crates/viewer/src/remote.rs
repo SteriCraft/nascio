@@ -7,8 +7,10 @@
 //! world of its own.
 //!
 //! A thread runs the connection on its own tokio runtime and fills a [`Mirror`]; the columns
-//! that arrive or change (and their neighbours, whose borders they are) are queued for
-//! meshing again. The other players come as entity datagrams ([`Entities`], acknowledged at
+//! that arrive (and their neighbours, whose borders they are) are queued for meshing again.
+//! The player's edits are predicted in the mirror at once and undone if the server refuses
+//! them or does not answer in time; an edited cell remeshes only the columns that show it
+//! ([`columns_for_cell`]), before any other column. The other players come as entity datagrams ([`Entities`], acknowledged at
 //! once) and are drawn as boxes at their interpolated positions (S5). The player's own
 //! movement is predicted by a [`Player`] shared with the frame ([`crate::player`]): this thread
 //! gives it the server's states, death and respawn, and the round trip time (chantier 5.5).
@@ -24,11 +26,12 @@ use bevy::prelude::{
     MeshMaterial3d, Quat, Query, Res, ResMut, Resource, StandardMaterial, Transform, Vec3,
 };
 use nascio_chunk::horizon::{HorizonTile, TileKey};
-use nascio_chunk::{Blocks, ChunkMesh, mesh_chunk};
-use nascio_client::{Auth, Entities, Event, Mirror, Player, connect_with};
+use nascio_chunk::{Blocks, ChunkMesh, FoliageMode, mesh_chunk_with};
+use nascio_client::{Auth, Entities, Event, Mirror, Player, columns_for_cell, connect_with};
 use nascio_core::consts::CHUNKS_PER_AXIS;
 use nascio_core::coords::{BlockPos, ChunkPos, WorldPos};
 use nascio_physics::Shapes;
+use nascio_protocol::inventory::Inventory;
 use nascio_protocol::messages::Chat;
 use nascio_protocol::messages::{ClientMsg, ServerMsg};
 use nascio_protocol::player::Commands as PlayerCommands;
@@ -49,9 +52,7 @@ pub struct Remote {
     /// The player, predicted. Lock it before the mirror, never the other way.
     player: Arc<Mutex<Player>>,
     out: tokio::sync::mpsc::UnboundedSender<Out>,
-    dirty: Arc<Mutex<BTreeSet<(i32, i32)>>>,
-    /// Last event worth showing (refused edit, closed connection).
-    pub status: Arc<Mutex<String>>,
+    dirty: Arc<Mutex<Dirty>>,
     /// The other players, and the local time base of their samples.
     pub entities: Arc<Mutex<Entities>>,
     /// Chat lines received and not yet shown.
@@ -60,11 +61,17 @@ pub struct Remote {
     pub closed: Arc<Mutex<Option<String>>>,
     /// The player's spawn position from the server (world metres).
     pub spawn: [f64; 3],
-    /// The account is an administrator (it may ask to fly).
+    /// The account is an administrator (it may ask god mode, and fly in it).
     pub admin: bool,
+    /// The inventory, as the server last sent it.
+    pub inventory: Arc<Mutex<Inventory>>,
+    /// God mode, as the server last confirmed it.
+    pub god: Arc<std::sync::atomic::AtomicBool>,
     epoch: Instant,
-    /// Radius of the columns the server sends, metres.
+    /// Largest radius of the columns the server sends, metres.
     pub radius_m: u32,
+    /// Radius last asked with `ClientMsg::ViewRadius`, metres (0: none yet).
+    asked_radius_m: Arc<std::sync::atomic::AtomicU32>,
     /// The server's block table (meshing).
     pub blocks: Arc<Blocks>,
     /// The sky and far ground of the server's world.
@@ -73,6 +80,39 @@ pub struct Remote {
     pub tiles: Arc<Mutex<Vec<HorizonTile>>>,
     /// Disk cache of this world (`None`: no cache).
     pub cache: Option<std::path::PathBuf>,
+}
+
+/// Columns to mesh again.
+#[derive(Default)]
+struct Dirty {
+    /// Arrived or forgotten columns and their neighbours.
+    columns: BTreeSet<(i32, i32)>,
+    /// Columns showing an edited cell: first.
+    edits: BTreeSet<(i32, i32)>,
+}
+
+impl Dirty {
+    fn cells(&mut self, cells: impl IntoIterator<Item = BlockPos>) {
+        for p in cells {
+            self.edits.extend(columns_for_cell(p));
+        }
+    }
+}
+
+/// Columns asked beyond the view distance, metres (see [`Remote::wanted_radius_m`]).
+pub const VIEW_MARGIN_M: u32 = 64;
+
+/// Asks the server the columns within the view distance (again whenever it changes): a
+/// shorter view costs the server less.
+pub fn ask_view_radius(remote: Option<Res<Remote>>, settings: Res<crate::fly::FlySettings>) {
+    let Some(r) = remote else { return };
+    let want = r.wanted_radius_m(settings.view_distance_m);
+    if r.asked_radius_m
+        .swap(want, std::sync::atomic::Ordering::Relaxed)
+        != want
+    {
+        r.send(ClientMsg::ViewRadius { radius_m: want });
+    }
 }
 
 /// Deepest search for the floor under the camera, blocks.
@@ -142,8 +182,7 @@ impl Remote {
         root: std::path::PathBuf,
     ) -> anyhow::Result<Self> {
         let mirror = Arc::new(Mutex::new(Mirror::default()));
-        let dirty = Arc::new(Mutex::new(BTreeSet::new()));
-        let status = Arc::new(Mutex::new(String::new()));
+        let dirty = Arc::new(Mutex::new(Dirty::default()));
         let entities = Arc::new(Mutex::new(Entities::new(0.05)));
         let chat = Arc::new(Mutex::new(Vec::new()));
         let closed = Arc::new(Mutex::new(None));
@@ -151,6 +190,9 @@ impl Remote {
         let epoch = Instant::now();
         let (out, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
         let tiles = Arc::new(Mutex::new(Vec::new()));
+        let inventory = Arc::new(Mutex::new(Inventory::default()));
+        let god = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (inv, gd) = (inventory.clone(), god.clone());
         type Ready = (
             u32,
             Blocks,
@@ -161,12 +203,7 @@ impl Remote {
             bool,
         );
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<anyhow::Result<Ready>>();
-        let (m, d, st, en) = (
-            mirror.clone(),
-            dirty.clone(),
-            status.clone(),
-            entities.clone(),
-        );
+        let (m, d, en) = (mirror.clone(), dirty.clone(), entities.clone());
         let (ch, cl, ti) = (chat.clone(), closed.clone(), tiles.clone());
         std::thread::Builder::new()
             .name("network".into())
@@ -222,7 +259,7 @@ impl Remote {
                         let mut d = lock(&d);
                         for dz in -1..=1 {
                             for dx in -1..=1 {
-                                d.insert((
+                                d.columns.insert((
                                     (cx + dx).rem_euclid(CHUNKS_PER_AXIS),
                                     (cz + dz).rem_euclid(CHUNKS_PER_AXIS),
                                 ));
@@ -245,17 +282,21 @@ impl Remote {
                                     mark(cx, cz);
                                 }
                                 Some(Event::Msg(ServerMsg::Blocks { chunk, lsn, changes })) => {
-                                    let resends = {
+                                    let (changed, resends) = {
                                         let mut m = lock(&m);
-                                        m.blocks(chunk, lsn, changes);
-                                        m.take_resends()
+                                        let changed = m.blocks(chunk, lsn, changes);
+                                        (changed, m.take_resends())
                                     };
                                     // An edit below a column's chunks: the mirror forgot the
                                     // column, the server sends it again.
+                                    if !resends.is_empty() {
+                                        mark(chunk[0], chunk[2]);
+                                    }
                                     for column in resends {
                                         c.send(ClientMsg::Resend { column });
                                     }
-                                    mark(chunk[0], chunk[2]);
+                                    // A confirmed prediction changes nothing on screen.
+                                    lock(&d).cells(changed);
                                 }
                                 Some(Event::Player(s)) => {
                                     let mut p = lock(&pl);
@@ -269,16 +310,24 @@ impl Remote {
                                     let now = epoch.elapsed().as_secs_f64();
                                     match lock(&en).receive(&bytes, now) {
                                         Ok(seq) => c.send(ClientMsg::Ack { seqs: vec![seq] }),
-                                        Err(e) => *lock(&st) = format!("entities: {e:#}"),
+                                        Err(e) => bevy::log::warn!("entities: {e:#}"),
                                     }
                                 }
                                 Some(Event::Msg(ServerMsg::Forget { columns })) => {
                                     lock(&m).forget(&columns);
                                 }
                                 Some(Event::Msg(ServerMsg::EditRefused { pos, reason })) => {
-                                    *lock(&st) = format!("edit at {pos:?} refused: {reason}");
+                                    bevy::log::debug!("edit at {pos:?} refused: {reason}");
+                                    let p = BlockPos::new(pos[0], pos[1], pos[2]);
+                                    if lock(&m).refused(p) {
+                                        lock(&d).cells([p]);
+                                    }
                                 }
                                 Some(Event::Msg(ServerMsg::Chat(line))) => lock(&ch).push(line),
+                                Some(Event::Msg(ServerMsg::Inventory(i))) => *lock(&inv) = i,
+                                Some(Event::Msg(ServerMsg::God(on))) => {
+                                    gd.store(on, std::sync::atomic::Ordering::Relaxed);
+                                }
                                 Some(Event::Sky(sky, bytes)) => {
                                     if let Some(d) = &cache {
                                         write_cache(&sky_file(d), &bytes);
@@ -294,7 +343,6 @@ impl Remote {
                                     lock(&ti).push(*tile);
                                 }
                                 Some(Event::Msg(ServerMsg::Kick { reason })) | Some(Event::Closed(reason)) => {
-                                    *lock(&st) = format!("disconnected: {reason}");
                                     if let Some(tx) = ready.take() {
                                         let _ = tx.send(Err(anyhow::anyhow!("{reason}")));
                                     }
@@ -324,14 +372,16 @@ impl Remote {
             player,
             out,
             dirty,
-            status,
             entities,
             chat,
             closed,
             spawn,
             admin,
+            inventory,
+            god,
             epoch,
             radius_m,
+            asked_radius_m: Default::default(),
             blocks: Arc::new(blocks),
             sky,
             tiles,
@@ -376,8 +426,32 @@ impl Remote {
         })
     }
 
+    /// The player edits cell `p` (to `block`): shown at once (see [`Mirror::predict`]), unless
+    /// the block would overlap the player, which the server refuses. Returns the columns to
+    /// mesh again.
+    pub fn predict(&self, p: BlockPos, block: u16) -> Vec<(i32, i32)> {
+        if self.lock_player().overlaps_cell(p, block) {
+            return Vec::new();
+        }
+        if lock(&self.mirror).predict(p, block, Instant::now()) {
+            columns_for_cell(p)
+        } else {
+            Vec::new()
+        }
+    }
+
     pub fn send(&self, m: ClientMsg) {
         let _ = self.out.send(Out::Msg(m));
+    }
+
+    /// Radius of the columns to ask for a view distance, metres: one column more than the
+    /// view (a column is meshed once its neighbours arrived), in whole columns, within the
+    /// server's.
+    pub fn wanted_radius_m(&self, view_distance_m: f32) -> u32 {
+        let r = view_distance_m.max(0.0) as u32 + VIEW_MARGIN_M;
+        r.div_ceil(nascio_core::consts::CHUNK_SIZE as u32)
+            .saturating_mul(nascio_core::consts::CHUNK_SIZE as u32)
+            .min(self.radius_m)
     }
 
     /// Sends the player's commands in a datagram.
@@ -407,8 +481,8 @@ impl Remote {
     }
 
     /// Meshes a column from the mirror with the server's block table: `None` while a
-    /// neighbour is missing.
-    pub fn mesh_column(&self, key: (i32, i32)) -> Option<Vec<(i32, ChunkMesh)>> {
+    /// neighbour is missing. Foliage is meshed as `mode` says.
+    pub fn mesh_column(&self, key: (i32, i32), mode: FoliageMode) -> Option<Vec<(i32, ChunkMesh)>> {
         let (padded, tint) = {
             let m = lock(&self.mirror);
             if !m.can_mesh(key.0, key.1) {
@@ -424,22 +498,34 @@ impl Remote {
         Some(
             padded
                 .into_iter()
-                .map(|(cy, p)| (cy, mesh_chunk(&p, &self.blocks, &tint)))
+                .map(|(cy, p)| (cy, mesh_chunk_with(&p, &self.blocks, &tint, mode)))
                 .filter(|(_, m)| !m.is_empty())
                 .collect(),
         )
     }
 }
 
-/// Columns that arrived or changed are meshed again. The player's commands go from
-/// [`crate::player::walk`].
-pub fn remote_sync(remote: Option<Res<Remote>>, mut streamer: ResMut<Streamer>) {
+/// Predicted edits left unanswered go; columns that arrived or changed are meshed again
+/// (edits first). The player's commands go from [`crate::player::walk`].
+pub fn remote_sync(
+    remote: Option<Res<Remote>>,
+    saved: Option<Res<crate::settings::Saved>>,
+    mut streamer: ResMut<Streamer>,
+) {
     let Some(remote) = remote else { return };
-    let dirty: Vec<(i32, i32)> = std::mem::take(&mut *lock(&remote.dirty))
-        .into_iter()
-        .collect();
-    if !dirty.is_empty() {
-        streamer.request_remesh(dirty);
+    let timeout_ms = saved.map_or(1000, |s| s.edit_timeout_ms);
+    let expired =
+        lock(&remote.mirror).expire(Instant::now(), Duration::from_millis(u64::from(timeout_ms)));
+    let Dirty { columns, edits } = {
+        let mut d = lock(&remote.dirty);
+        d.cells(expired);
+        std::mem::take(&mut *d)
+    };
+    if !edits.is_empty() {
+        streamer.request_edit_remesh(edits);
+    }
+    if !columns.is_empty() {
+        streamer.request_remesh(columns);
     }
 }
 

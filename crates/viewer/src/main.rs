@@ -221,12 +221,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     } else {
         None
     };
-    let god = god::God::new(
-        local
-            .as_ref()
-            .and_then(|l| l.terrain.blocks().id("granite"))
-            .unwrap_or(1),
-    );
+    let god = god::God::new();
 
     let (x, z, y) = match args.pos.as_deref() {
         Some([x, z]) => (*x, *z, None),
@@ -267,6 +262,9 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     if args.render_config.is_some() || args.curvature_radius.is_some() {
         settings.curvature_radius_m = render_cfg.radius();
     }
+    if args.render_config.is_some() {
+        settings.foliage_cutout_chunks = render_cfg.foliage_cutout_chunks;
+    }
     settings.horizon &= !args.no_horizon;
     settings.shadows &= !args.no_shadows;
     settings.vsync &= !args.no_vsync;
@@ -293,7 +291,9 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             let r = menu::connect(addr, &login)?;
             // Only the columns the server sends can be shown, and a column is meshed once its
             // neighbours arrived: keep one column inside the radius.
-            settings.view_distance_m = settings.view_distance_m.min(r.radius_m as f32 - 64.0);
+            settings.view_distance_m = settings
+                .view_distance_m
+                .min((r.radius_m - remote::VIEW_MARGIN_M) as f32);
             // The server gives the feet; the camera is at the eyes.
             let eyes = nascio_physics::PlayerParams::default().eye_height;
             cam.pos = WorldPos::new(r.spawn[0], r.spawn[1] + eyes, r.spawn[2]);
@@ -361,6 +361,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     .insert_resource(fly::Workers::new())
     .insert_resource(fly::Streamer::new())
     .insert_resource(god)
+    .init_resource::<god::Icons>()
     .insert_resource(horizon::Horizon::new(
         horizon_cfg,
         horizon::WaterColors::new(
@@ -409,6 +410,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
                 player::walk,
                 god::god_input,
                 remote::remote_sync,
+                remote::ask_view_radius,
                 fly::stream_chunks,
                 horizon::update_horizon,
                 fly::column_visibility,
@@ -420,6 +422,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
                 sky::update_sky,
                 sky::update_star_limit,
                 curvature::sync_curved,
+                curvature::sync_foliage_shadows,
             )
                 .chain()
                 .run_if(in_state(Mode::Fly)),
@@ -610,7 +613,7 @@ fn adopt_remote(
         (*remote).clone(),
     )));
     commands.insert_resource(god::BlockTable(remote.blocks.clone()));
-    god.block = remote.blocks.id("granite").unwrap_or(1);
+    god.reset();
 }
 
 fn setup(
@@ -706,7 +709,28 @@ fn setup(
         ground_handle.clone(),
         block_array.clone(),
     ));
-    commands.insert_resource(fly::TerrainMaterials { opaque, water });
+    // Foliage: cut out by the alpha of its texture (`curvature.wesl`, and its prepass for the
+    // shadows), not blended: no sorting, depth written. Opaque when "Ombres alpha" is off
+    // (`curvature::sync_foliage_shadows`): solid shadows.
+    let foliage = materials.add(curvature::material(
+        StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.95,
+            reflectance: 0.15,
+            alpha_mode: AlphaMode::Mask(curvature::FOLIAGE_CUTOFF),
+            fog_enabled: false,
+            ..default()
+        },
+        frame_handle.clone(),
+        climate.clone(),
+        ground_handle.clone(),
+        block_array.clone(),
+    ));
+    commands.insert_resource(fly::TerrainMaterials {
+        opaque,
+        foliage,
+        water,
+    });
     let horizon = materials.add(curvature::material(
         StandardMaterial {
             base_color: Color::WHITE,

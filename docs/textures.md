@@ -11,6 +11,8 @@ Un fichier PNG de 32×32 par texture, dans le dossier des textures, nommé d'apr
 
 Priorité pour une face : `_top` ou `_bottom`, puis `_end`, puis `_side`, puis `bloc.png`. Les côtés prennent `_side`, sinon `bloc.png`. Exceptions écrites dans le code : le dessous de `grass` et de `podzol` est `dirt`, `snow_layer` prend `snow`.
 
+Transparence : seuls les blocs de feuillage (`FOLIAGE`) gardent l'alpha de leur image ; un pixel d'alpha inférieur à 0,5 est découpé. Les autres blocs sont opaques (leurs pixels transparents prennent la couleur moyenne de l'image).
+
 Les blocs ont pour l'instant une couleur unie (`color` du registre). Cette liste recense les blocs qui attendent une texture. On la complète à chaque nouveau bloc. Chaque texture tierce va dans `ASSETS.md`, avec sa source et sa licence (CC0 de préférence).
 
 ## Surface et sols
@@ -35,7 +37,7 @@ Les blocs ont pour l'instant une couleur unie (`color` du registre). Cette liste
 
 ## Végétation (provisoire)
 - [x] `spruce_log` : tronc de sapin (dessus et côtés)
-- [x] `spruce_leaves` : aiguilles de sapin (opaques pour l'instant)
+- [x] `spruce_leaves` : aiguilles de sapin, avec transparence (alpha < 0,5 : pixel découpé, près de la caméra seulement)
 - [x] `cactus`
 
 ## Fluides et divers

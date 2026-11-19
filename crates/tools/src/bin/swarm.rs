@@ -272,6 +272,9 @@ async fn bot(
         None => conn.hello.spawn,
     };
     let granite = conn.blocks.id("granite").unwrap_or(1);
+    // Granite without an inventory: god mode, granted to administrators only (others see
+    // their placements refused, which still loads the server).
+    conn.send(ClientMsg::God(true));
     let mut rng = Lcg(cli.seed ^ (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     // A random start within the radius, a random heading.
     let r = cli.radius * rng.next().sqrt();
@@ -328,7 +331,7 @@ async fn bot(
                     next_edit += edit_every;
                     // Place a block three metres overhead, take it away the next time.
                     let at = [pos[0].floor() as i32, pos[1] as i32 + 3, pos[2].floor() as i32];
-                    conn.send(ClientMsg::SetBlock { pos: at, block: if placed { 0 } else { granite }, cmd: last_command });
+                    conn.send(ClientMsg::SetBlock { pos: at, block: if placed { 0 } else { granite }, cmd: last_command, slot: None });
                     placed = !placed;
                     c.edits.fetch_add(1, Ordering::Relaxed);
                 }

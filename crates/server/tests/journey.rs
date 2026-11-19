@@ -63,7 +63,9 @@ impl Client {
                     chunk,
                     lsn,
                     changes,
-                }) => self.mirror.blocks(chunk, lsn, changes),
+                }) => {
+                    self.mirror.blocks(chunk, lsn, changes);
+                }
                 Event::Msg(ServerMsg::Forget { columns }) => self.mirror.forget(&columns),
                 Event::Msg(ServerMsg::EditRefused { pos, reason }) => {
                     self.refused.push((pos, reason));
@@ -116,6 +118,7 @@ impl Client {
             pos,
             block,
             cmd: self.player.last_cmd(),
+            slot: None,
         });
         let p = BlockPos::new(pos[0], pos[1], pos[2]);
         self.run_until(5_000, Controls::default(), |c| {
@@ -203,7 +206,8 @@ async fn a_client_walks_jumps_edits_dies_and_respawns() {
     assert!((y1 - y0).abs() < 1e-9 && a.player.state().on_ground);
     assert_eq!(a.player.stats().corrections, corrections, "no correction");
 
-    // Edits from the eyes: 4 m away accepted, 6 m away refused (reach 5 m).
+    // Edits from the eyes (god mode): 4 m away accepted, 6 m away refused (reach 5 m).
+    assert!(server.shared.god("walker", true));
     let granite = a.c.blocks.id("granite").unwrap();
     let e = a.player.eye();
     let cell = |ahead: f64| {

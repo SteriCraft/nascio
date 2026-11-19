@@ -15,7 +15,7 @@ pub const CATALOGUE: &str = "assets/stars/bsc5.csv";
 /// stops there.
 pub const FAINTEST: f64 = 6.5;
 /// Default magnitude limit.
-pub const DEFAULT_LIMIT: f64 = 5.0;
+pub const DEFAULT_LIMIT: f64 = FAINTEST;
 /// Brightest end of the limit slider: Sirius (−1.46) and Canopus (−0.72) stay visible.
 pub const SLIDER_BRIGHTEST: f64 = -1.0;
 

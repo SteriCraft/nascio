@@ -14,5 +14,5 @@ pub use block::{
     AIR, BlockDef, BlockId, BlockRegistry, BlockTextures, Blocks, FaceTexture, FaceTint, Matter,
 };
 pub use chunk::{Chunk, PaddedChunk};
-pub use mesh::{ChunkMesh, MeshData, mesh_chunk};
+pub use mesh::{ChunkMesh, FoliageMode, MeshData, mesh_chunk, mesh_chunk_with};
 pub use tint::ChunkTint;

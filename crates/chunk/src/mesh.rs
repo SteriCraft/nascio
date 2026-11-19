@@ -41,8 +41,21 @@ pub fn water_shade(alpha: f32) -> f32 {
 pub const MATERIAL_GROUND: f32 = 0.0;
 /// Water: sun glint, no snow.
 pub const MATERIAL_WATER: f32 = 1.0;
-/// Foliage: opaque, its sides keep their green under the seasonal snow.
+/// Opaque foliage (far chunks): its sides keep their green under the seasonal snow.
 pub const MATERIAL_FOLIAGE: f32 = 2.0;
+/// Cut-out foliage (near chunks): as [`MATERIAL_FOLIAGE`], cut out by its texture's alpha.
+pub const MATERIAL_FOLIAGE_CUT: f32 = 3.0;
+
+/// How a chunk's foliage is meshed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FoliageMode {
+    /// See-through (near the camera): foliage hides nothing, its inner faces are drawn and go
+    /// to [`ChunkMesh::foliage`], cut out by the texture's alpha.
+    CutOut,
+    /// Opaque (far away): foliage is an ordinary solid in [`ChunkMesh::opaque`] (about half the
+    /// quads of a forest, no alpha test).
+    Opaque,
+}
 /// `y` of [`MeshData::material`] on a face without texture.
 pub const NO_TEXTURE: f32 = -1.0;
 
@@ -103,26 +116,37 @@ impl MeshData {
     }
 }
 
-/// Meshes of one chunk: opaque terrain and the water surface (drawn translucent).
+/// Meshes of one chunk: opaque terrain, foliage (cut out by its texture's alpha) and the water
+/// surface (drawn translucent).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChunkMesh {
     pub opaque: MeshData,
+    pub foliage: MeshData,
     pub water: MeshData,
 }
 
 impl ChunkMesh {
     pub fn is_empty(&self) -> bool {
-        self.opaque.is_empty() && self.water.is_empty()
+        self.opaque.is_empty() && self.foliage.is_empty() && self.water.is_empty()
+    }
+
+    pub fn quad_count(&self) -> usize {
+        self.opaque.quad_count() + self.foliage.quad_count() + self.water.quad_count()
     }
 }
 
 /// Face drawn on `block` when its neighbour across the face is `neighbour` (`Some(water)`):
 /// the per-cell rule, applied on whole rows by [`mesh_chunk`] (kept for the reference mesher).
-fn face(blocks: &Blocks, block: BlockId, neighbour: BlockId) -> Option<bool> {
+/// Cut-out foliage hides nothing: every face against it is drawn, foliage against foliage
+/// included.
+fn face(blocks: &Blocks, block: BlockId, neighbour: BlockId, mode: FoliageMode) -> Option<bool> {
+    let see_through = mode == FoliageMode::CutOut && blocks.is_foliage(neighbour);
     match (blocks.matter(block), blocks.matter(neighbour)) {
         (Matter::Solid, Matter::Empty | Matter::Fluid | Matter::Layer) => Some(false),
         (Matter::Layer, Matter::Empty | Matter::Fluid) => Some(false),
         (Matter::Fluid, Matter::Empty) => Some(true),
+        (Matter::Solid | Matter::Layer, _) if see_through => Some(false),
+        (Matter::Fluid, _) if see_through => Some(true),
         _ => None,
     }
 }
@@ -136,7 +160,7 @@ struct Face {
     depth: u8,
     /// Thin layer (snow cover): drawn `LAYER_H` thick at the bottom of its cell.
     layer: bool,
-    /// Foliage: opaque, tagged by [`FOLIAGE_ALPHA`].
+    /// Foliage: cut out, in its own mesh, tagged [`MATERIAL_FOLIAGE`].
     foliage: bool,
     ao: [u8; 4],
 }
@@ -154,6 +178,8 @@ struct Scratch {
     layer: Vec<u64>,
     fluid: Vec<u64>,
     empty: Vec<u64>,
+    /// See-through blocks (foliage, also in `solid`).
+    see: Vec<u64>,
     /// Visible faces per direction `2 · d + (sign < 0)`: bit `x` of word `z + N · y`.
     faces: [Vec<u32>; 6],
     mask: Vec<Option<Face>>,
@@ -166,6 +192,7 @@ impl Scratch {
             layer: vec![0; ROWS],
             fluid: vec![0; ROWS],
             empty: vec![0; ROWS],
+            see: vec![0; ROWS],
             faces: std::array::from_fn(|_| vec![0; N * N]),
             mask: vec![None; N * N],
         }
@@ -181,15 +208,27 @@ thread_local! {
 /// The visible faces are found with bit masks (one `u64` per padded row and matter), so the
 /// cost follows the number of faces rather than the volume (audit M5). Same output as the
 /// per-cell rule (solid against empty, fluid or layer; layer against empty or fluid; fluid
-/// against empty; checked by the tests).
+/// against empty; anything but empty against cut-out foliage; checked by the tests).
+/// Foliage is cut out ([`FoliageMode::CutOut`]); see [`mesh_chunk_with`].
 pub fn mesh_chunk(p: &PaddedChunk, blocks: &Blocks, tint: &ChunkTint) -> ChunkMesh {
+    mesh_chunk_with(p, blocks, tint, FoliageMode::CutOut)
+}
+
+/// [`mesh_chunk`] with the foliage meshed as `mode` says.
+pub fn mesh_chunk_with(
+    p: &PaddedChunk,
+    blocks: &Blocks,
+    tint: &ChunkTint,
+    mode: FoliageMode,
+) -> ChunkMesh {
     let mut out = ChunkMesh::default();
     let first = p.blocks[0];
-    if p.blocks.iter().all(|&b| b == first) {
+    let see_first = mode == FoliageMode::CutOut && blocks.is_foliage(first);
+    if !see_first && p.blocks.iter().all(|&b| b == first) {
         // Uniform (air, rock or water): no face anywhere.
         return out;
     }
-    SCRATCH.with(|s| mesh_into(&mut out, &mut s.borrow_mut(), p, blocks, tint));
+    SCRATCH.with(|s| mesh_into(&mut out, &mut s.borrow_mut(), p, blocks, tint, mode));
     out
 }
 
@@ -199,10 +238,12 @@ fn mesh_into(
     p: &PaddedChunk,
     blocks: &Blocks,
     tint: &ChunkTint,
+    mode: FoliageMode,
 ) {
+    let cut = mode == FoliageMode::CutOut;
     // Matter masks of the padded rows.
     for (r, row) in p.blocks.as_chunks::<NP>().0.iter().enumerate() {
-        let (mut so, mut la, mut fl, mut em) = (0u64, 0u64, 0u64, 0u64);
+        let (mut so, mut la, mut fl, mut em, mut se) = (0u64, 0u64, 0u64, 0u64, 0u64);
         for (x, &b) in row.iter().enumerate() {
             let bit = 1u64 << x;
             match blocks.matter(b) {
@@ -211,8 +252,11 @@ fn mesh_into(
                 Matter::Fluid => fl |= bit,
                 Matter::Empty => em |= bit,
             }
+            if cut && blocks.is_foliage(b) {
+                se |= bit;
+            }
         }
-        (s.solid[r], s.layer[r], s.fluid[r], s.empty[r]) = (so, la, fl, em);
+        (s.solid[r], s.layer[r], s.fluid[r], s.empty[r], s.see[r]) = (so, la, fl, em, se);
     }
     // Visible faces per direction (the rule of `face`, on whole rows).
     let mut any_face = false;
@@ -233,8 +277,12 @@ fn mesh_into(
                     _ => m[nr],
                 };
                 let (ne, nf, nl) = (nb(&s.empty), nb(&s.fluid), nb(&s.layer));
-                let vis =
-                    (s.solid[r] & (ne | nf | nl)) | (s.layer[r] & (ne | nf)) | (s.fluid[r] & ne);
+                // Foliage hides nothing but empty cells (which draw no face).
+                let ns = nb(&s.see) & !s.empty[r];
+                let vis = (s.solid[r] & (ne | nf | nl))
+                    | (s.layer[r] & (ne | nf))
+                    | (s.fluid[r] & ne)
+                    | ns;
                 let w = (vis >> 1) as u32;
                 any_face |= w != 0;
                 faces[z + N * y] = w;
@@ -330,6 +378,7 @@ fn mesh_into(
                             out,
                             blocks,
                             tint,
+                            mode,
                             f,
                             d,
                             u,
@@ -371,6 +420,7 @@ fn emit(
     out: &mut ChunkMesh,
     blocks: &Blocks,
     tint: &ChunkTint,
+    mode: FoliageMode,
     f: Face,
     d: usize,
     u: usize,
@@ -405,8 +455,11 @@ fn emit(
     }
     let alpha = if f.water { water_alpha(f.depth) } else { 1.0 };
     let texture = blocks.face_texture(f.block, d, sign);
+    let cut = f.foliage && mode == FoliageMode::CutOut;
     let kind = if f.water {
         MATERIAL_WATER
+    } else if cut {
+        MATERIAL_FOLIAGE_CUT
     } else if f.foliage {
         MATERIAL_FOLIAGE
     } else {
@@ -454,6 +507,8 @@ fn emit(
     });
     let target = if f.water {
         &mut out.water
+    } else if cut {
+        &mut out.foliage
     } else {
         &mut out.opaque
     };
@@ -464,8 +519,19 @@ fn emit(
 /// tests (here and in `nascio-voxel` on generated terrain).
 #[doc(hidden)]
 pub fn mesh_reference(p: &PaddedChunk, blocks: &Blocks, tint: &ChunkTint) -> ChunkMesh {
+    mesh_reference_with(p, blocks, tint, FoliageMode::CutOut)
+}
+
+#[doc(hidden)]
+pub fn mesh_reference_with(
+    p: &PaddedChunk,
+    blocks: &Blocks,
+    tint: &ChunkTint,
+    mode: FoliageMode,
+) -> ChunkMesh {
     let mut out = ChunkMesh::default();
-    if p.is_uniform(AIR) || p.blocks.iter().all(|&b| blocks.is_solid(b)) {
+    let hides = |b| blocks.is_solid(b) && !(mode == FoliageMode::CutOut && blocks.is_foliage(b));
+    if p.is_uniform(AIR) || p.blocks.iter().all(|&b| hides(b)) {
         return out;
     }
     let n = N as i32;
@@ -487,8 +553,8 @@ pub fn mesh_reference(p: &PaddedChunk, blocks: &Blocks, tint: &ChunkTint) -> Chu
                         let mut nb = c;
                         nb[d] += sign;
                         let neighbour = p.get(nb[0], nb[1], nb[2]);
-                        mask[a as usize + N * b as usize] =
-                            face(blocks, block, neighbour).map(|water| {
+                        mask[a as usize + N * b as usize] = face(blocks, block, neighbour, mode)
+                            .map(|water| {
                                 let ao = if water {
                                     [3; 4]
                                 } else {
@@ -540,6 +606,7 @@ pub fn mesh_reference(p: &PaddedChunk, blocks: &Blocks, tint: &ChunkTint) -> Chu
                             &mut out,
                             blocks,
                             tint,
+                            mode,
                             f,
                             d,
                             u,
@@ -693,7 +760,12 @@ mod tests {
             for (k, d) in tint.water_depth.iter_mut().enumerate() {
                 *d = (seed as usize + k) as u8 % 7;
             }
-            prop_assert_eq!(mesh_chunk(&p, &b, &tint), mesh_reference(&p, &b, &tint));
+            for mode in [FoliageMode::CutOut, FoliageMode::Opaque] {
+                prop_assert_eq!(
+                    mesh_chunk_with(&p, &b, &tint, mode),
+                    mesh_reference_with(&p, &b, &tint, mode)
+                );
+            }
         }
     }
 
@@ -876,6 +948,88 @@ mod tests {
             assert_eq!(hi - lo, LAYER_H);
         }
         assert_eq!(sides, 4);
+    }
+
+    #[test]
+    fn foliage_hides_nothing_and_has_its_own_mesh() {
+        let (b, stone, water) = ids();
+        let leaves = b.id("spruce_leaves").unwrap();
+        // One leaf block on flat ground: the ground's top stays whole, the leaves draw five
+        // faces (not the bottom one, against the rock).
+        let p = padded(|x, y, z| match (x, y, z) {
+            (_, ..10, _) => stone,
+            (4, 10, 6) => leaves,
+            _ => AIR,
+        });
+        let m = mesh_chunk(&p, &b, &ChunkTint::NONE);
+        assert_eq!(m.foliage.quad_count(), 5);
+        assert!(
+            m.foliage
+                .material
+                .iter()
+                .all(|m| m[0] == MATERIAL_FOLIAGE_CUT)
+        );
+        // Area of the ground's top faces (at y = 10).
+        let ground_top = |d: &MeshData| -> f32 {
+            (0..d.quad_count())
+                .filter(|&q| d.normals[4 * q] == [0.0, 1.0, 0.0] && d.positions[4 * q][1] == 10.0)
+                .map(|q| {
+                    let ps = &d.positions[4 * q..4 * q + 4];
+                    let span = |k: usize| {
+                        let it = ps.iter().map(|p| p[k]);
+                        it.clone().fold(f32::MIN, f32::max) - it.fold(f32::MAX, f32::min)
+                    };
+                    span(0) * span(2)
+                })
+                .sum()
+        };
+        assert_eq!(ground_top(&m.opaque), 32.0 * 32.0);
+        // Far away, the same leaf block is an opaque solid: the ground under it loses its
+        // face, the leaves' five faces go to the opaque mesh.
+        let far = mesh_chunk_with(&p, &b, &ChunkTint::NONE, FoliageMode::Opaque);
+        assert!(far.foliage.is_empty());
+        assert_eq!(ground_top(&far.opaque), 32.0 * 32.0 - 1.0);
+        assert_eq!(
+            far.opaque
+                .material
+                .iter()
+                .filter(|m| m[0] == MATERIAL_FOLIAGE)
+                .count(),
+            5 * 4
+        );
+
+        // Two leaf blocks side by side: their shared faces are drawn on both sides.
+        let p = padded(|x, y, z| match (x, y, z) {
+            (4 | 5, 10, 6) => leaves,
+            _ => AIR,
+        });
+        let m = mesh_chunk(&p, &b, &ChunkTint::NONE);
+        assert_eq!(m.foliage.quad_count(), 8);
+        assert!(m.opaque.is_empty());
+
+        // Water under leaves keeps its surface.
+        let p = padded(|_, y, _| match y {
+            ..10 => water,
+            10 => leaves,
+            _ => AIR,
+        });
+        let m = mesh_chunk(&p, &b, &ChunkTint::NONE);
+        assert_eq!(m.water.quad_count(), 1);
+
+        // A chunk full of leaves is not culled as uniform.
+        let m = mesh_chunk(&padded(|_, _, _| leaves), &b, &ChunkTint::NONE);
+        assert!(!m.foliage.is_empty() && m.opaque.is_empty());
+        let far = mesh_chunk_with(
+            &padded(|_, _, _| leaves),
+            &b,
+            &ChunkTint::NONE,
+            FoliageMode::Opaque,
+        );
+        assert!(far.is_empty());
+        assert_eq!(
+            m,
+            mesh_reference(&padded(|_, _, _| leaves), &b, &ChunkTint::NONE)
+        );
     }
 
     #[test]

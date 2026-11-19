@@ -24,7 +24,7 @@ use nascio_protocol::player::{Commands, InputQueue};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use crate::accounts::{Accounts, Login};
+use crate::accounts::{Accounts, Login, load_inventory};
 use crate::columns::{ColumnCache, wrap_column};
 use crate::config::{SecretLogin, ServerConfig};
 use crate::security::{AbuseLog, Bucket, LoginGuard, Overrun};
@@ -158,19 +158,34 @@ impl Shared {
         true
     }
 
-    /// Flight on or off for a player online (console); false if not online.
+    /// Flight on or off for a player online (console); flight puts it in god mode. False if
+    /// not online.
     pub fn fly(&self, name: &str, on: bool) -> bool {
-        let id = match self
-            .sessions
+        let Some(id) = self.session_id(name) else {
+            return false;
+        };
+        if on {
+            self.input(Input::Msg(id, ClientMsg::God(true)));
+        }
+        self.input(Input::Msg(id, ClientMsg::Fly(on)));
+        true
+    }
+
+    /// God mode on or off for a player online (console); false if not online.
+    pub fn god(&self, name: &str, on: bool) -> bool {
+        let Some(id) = self.session_id(name) else {
+            return false;
+        };
+        self.input(Input::Msg(id, ClientMsg::God(on)));
+        true
+    }
+
+    fn session_id(&self, name: &str) -> Option<u32> {
+        self.sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(name)
-        {
-            Some(s) => s.id,
-            None => return false,
-        };
-        self.input(Input::Msg(id, ClientMsg::Fly(on)));
-        true
+            .map(|s| s.id)
     }
 
     fn input(&self, i: Input) {
@@ -293,6 +308,8 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
     let home = home.expect("a point when not refused");
     // Back where it left, alive; otherwise at its point.
     let last = shared.accounts.last(&hello.name);
+    let names: Vec<String> = shared.hello.blocks.iter().map(|b| b.name.clone()).collect();
+    let inventory = load_inventory(&shared.accounts.inventory(&hello.name), &names);
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
     let name = hello.name.clone();
     let mut sh = shared.hello.clone();
@@ -309,6 +326,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         name: hello.name,
         home,
         last,
+        inventory,
         ip,
         out,
         subs: Mutex::new(BTreeSet::new()),
@@ -324,6 +342,7 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
         tiles: Default::default(),
         inputs: Mutex::new(InputQueue::new(MAX_QUEUED_COMMANDS)),
         rescan: AtomicBool::new(false),
+        radius_m: AtomicU32::new(shared.cfg.chunk_radius_m),
     });
     {
         let mut sessions = shared.sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -491,10 +510,24 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
                         server_unix_ms: unix_ms(),
                     });
                 }
-                ClientMsg::SetBlock { pos, block, cmd } => {
-                    // Reach and room are checked by the simulation, from the eyes after `cmd`.
+                ClientMsg::SetBlock {
+                    pos,
+                    block,
+                    cmd,
+                    slot,
+                } => {
+                    // Reach, room and inventory are checked by the simulation, from the eyes
+                    // after `cmd`.
                     if edits.take(now) {
-                        shared.input(Input::Msg(id, ClientMsg::SetBlock { pos, block, cmd }));
+                        shared.input(Input::Msg(
+                            id,
+                            ClientMsg::SetBlock {
+                                pos,
+                                block,
+                                cmd,
+                                slot,
+                            },
+                        ));
                     } else {
                         violations += 1;
                         abuse("edits", "edit over the limit");
@@ -512,8 +545,22 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
                         break;
                     }
                 }
+                ClientMsg::God(on) => {
+                    // Asked at each request, as flight.
+                    if !on || shared.accounts.is_admin(&name) {
+                        shared.input(Input::Msg(id, ClientMsg::God(on)));
+                    } else {
+                        violations += 1;
+                        abuse(
+                            "god",
+                            "god mode asked by a player who is not an administrator",
+                        );
+                        let _ = link.out.send(ServerMsg::God(false));
+                    }
+                }
                 ClientMsg::Fly(on) => {
-                    // Asked at each request: `admin <name> off` takes effect at once.
+                    // Asked at each request: `admin <name> off` takes effect at once. The
+                    // simulation grants it in god mode only.
                     if shared.accounts.is_admin(&name) {
                         shared.input(Input::Msg(id, ClientMsg::Fly(on)));
                     } else {
@@ -592,6 +639,14 @@ async fn connection(incoming: quinn::Incoming, shared: Arc<Shared>) -> anyhow::R
                         .unwrap_or_else(|e| e.into_inner())
                         .remove(&k)
                     {
+                        link.rescan.store(true, Ordering::Relaxed);
+                    }
+                }
+                ClientMsg::ViewRadius { radius_m } => {
+                    // At least the reach of the edits and the movement around the player.
+                    let r = radius_m
+                        .clamp(MIN_VIEW_RADIUS_M, cfg.chunk_radius_m.max(MIN_VIEW_RADIUS_M));
+                    if link.radius_m.swap(r, Ordering::Relaxed) != r {
                         link.rescan.store(true, Ordering::Relaxed);
                     }
                 }
@@ -724,6 +779,9 @@ fn offsets(radius: i32) -> Vec<(i32, i32)> {
     v
 }
 
+/// Smallest radius a client may ask, metres.
+const MIN_VIEW_RADIUS_M: u32 = 64;
+
 /// Bytes reserved for a tile until it is sent (about its compressed size).
 const TILE_RESERVE: f64 = 3_000.0;
 
@@ -732,9 +790,16 @@ const TILE_RESERVE: f64 = 3_000.0;
 /// tiles the client asked, out of the same budget.
 async fn stream_columns(conn: quinn::Connection, link: Arc<PlayerLink>, shared: Arc<Shared>) {
     let cfg = &shared.cfg;
-    let radius = (cfg.chunk_radius_m as i32 + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    let keep = radius + cfg.forget_margin_m as i32 / CHUNK_SIZE;
-    let ring = offsets(radius);
+    // Radius in columns, and the ring for it; follows the client's view radius.
+    let ring_of = |radius_m: u32| {
+        let radius = (radius_m as i32 + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        (
+            radius_m,
+            radius + cfg.forget_margin_m as i32 / CHUNK_SIZE,
+            offsets(radius),
+        )
+    };
+    let (mut radius_m, mut keep, mut ring) = ring_of(link.radius_m.load(Ordering::Relaxed));
     let budget = f64::from(cfg.client_budget_bytes_per_s);
     // Token bucket: at most one second of budget in advance.
     let mut tokens = budget;
@@ -762,6 +827,10 @@ async fn stream_columns(conn: quinn::Connection, link: Arc<PlayerLink>, shared: 
         last = now;
         if link.rescan.swap(false, Ordering::Relaxed) {
             complete = None;
+            let r = link.radius_m.load(Ordering::Relaxed);
+            if r != radius_m {
+                (radius_m, keep, ring) = ring_of(r);
+            }
         }
         let pos = link.view.lock().unwrap_or_else(|e| e.into_inner()).pos;
         let cs = f64::from(CHUNK_SIZE);

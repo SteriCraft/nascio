@@ -6,13 +6,15 @@
 //! (checked by `tests/no_generation.rs`). The block table comes from the server's hello.
 
 pub mod discovery;
+pub mod edits;
 pub mod entities;
 pub mod mirror;
 pub mod net;
 pub mod player;
 
+pub use edits::{PendingEdit, PendingEdits};
 pub use entities::{Entities, Pose};
-pub use mirror::Mirror;
+pub use mirror::{Mirror, columns_for_cell};
 pub use nascio_protocol::messages::Auth;
 pub use net::{Connection, Event, connect, connect_with};
 pub use player::{Controls, Player, PlayerEvent, PlayerStats};

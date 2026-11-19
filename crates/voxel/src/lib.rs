@@ -19,5 +19,5 @@ pub use chunk::{Chunk, ChunkDeltas, NoDeltas, PaddedChunk};
 pub use delta::{DeltaConfig, DeltaStore};
 pub use fingerprint::{DEV_OVERRIDE_MARK, GenConfig};
 pub use generate::{ColumnCache, ColumnSet, chunk_at, generate_chunk};
-pub use mesh::{ChunkMesh, MeshData, mesh_chunk};
+pub use mesh::{ChunkMesh, FoliageMode, MeshData, mesh_chunk, mesh_chunk_with};
 pub use terrain::{ChunkTint, Terrain, VoxelConfig};

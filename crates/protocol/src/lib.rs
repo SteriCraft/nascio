@@ -11,6 +11,7 @@ pub mod discovery;
 pub mod entity;
 pub mod frame;
 pub mod horizon;
+pub mod inventory;
 pub mod messages;
 pub mod player;
 pub mod sky;
@@ -25,11 +26,13 @@ pub mod varint;
 /// datagram, `PlayerParams` in `ServerHello`; `Move` and `Correct` removed. v10: the server simulates the players:
 /// `ServerMsg::Died` / `Respawned`, `ClientMsg::Respawn` and `Fly`, `SetBlock.cmd`. v11:
 /// `ClientMsg::Resend` (the client's prediction, chantier 5.4). v12: `ServerHello.admin` (only
-/// administrators ask to fly).
+/// administrators ask to fly). v13: god mode and the inventory (`ClientMsg::God`,
+/// `SetBlock.slot`, `ServerMsg::God` and `Inventory`). v14: `ClientMsg::ViewRadius` (the client's
+/// view distance bounds the columns it gets).
 ///
 /// [`ClientMsg::Tiles`]: messages::ClientMsg::Tiles
 /// [`ClientMsg::Sky`]: messages::ClientMsg::Sky
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// First byte of a unidirectional stream from the server: what follows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

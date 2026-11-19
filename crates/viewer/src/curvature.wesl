@@ -5,6 +5,9 @@
 // light as its view). Normals stay the flat-world normals: lighting happens in the flat world,
 // where the sun direction depends on the position (§2.4).
 //
+// Near foliage (material kind 3) is cut out where its texture's alpha is below the material's
+// cutoff, here and in the prepass (`curvature_prepass.wesl`), so its shadows are cut out too.
+//
 // Fragment: the sun (`sun.wesl`) is computed per pixel from the fragment's world position
 // (latitude from z, hour angle from x, δ_eff and the seam band from the seam distance), so the
 // terminator, the seam twilight band and distant sunsets show on the horizon. Direct light
@@ -69,6 +72,9 @@ const CLIMATE_HEIGHT: f32 = 3500.0;
 const MATERIAL_GROUND: f32 = 0.0;
 const MATERIAL_WATER: f32 = 1.0;
 const MATERIAL_FOLIAGE: f32 = 2.0;
+const MATERIAL_FOLIAGE_CUT: f32 = 3.0;
+// Alpha below which foliage is cut out: `curvature::FOLIAGE_CUTOFF` (checked by a test).
+const FOLIAGE_CUTOFF: f32 = 0.5;
 
 
 // Snow cover at a fragment of world height `h`: the cell's cover, less snow below the cell's
@@ -125,7 +131,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     material = in.uv;
     let is_water = abs(material.x - MATERIAL_WATER) < 0.5;
     // Foliage: a little less snow on its tops.
-    let is_foliage = abs(material.x - MATERIAL_FOLIAGE) < 0.5;
+    let is_cut = abs(material.x - MATERIAL_FOLIAGE_CUT) < 0.5;
+    let is_foliage = abs(material.x - MATERIAL_FOLIAGE) < 0.5 || is_cut;
     pbr_input.material.base_color = alpha_discard(
         pbr_input.material.flags,
         pbr_input.material.alpha_cutoff,
@@ -140,8 +147,13 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 @if(VERTEX_UVS_B)
     tex_uv = in.uv_b;
     let layer = i32(max(material.y, 0.0) + 0.5);
-    let texel = textureSample(block_tex, block_smp, tex_uv, layer).rgb;
-    albedo *= select(vec3<f32>(1.0), texel, material.y >= 0.0);
+    let texel = textureSample(block_tex, block_smp, tex_uv, layer);
+    albedo *= select(vec3<f32>(1.0), texel.rgb, material.y >= 0.0);
+    // Near foliage is cut out by its texture's alpha (alpha-mask material; the prepass does
+    // the same for the shadows). Other faces, far foliage included, stay opaque.
+    if is_cut && material.y >= 0.0 && texel.a < FOLIAGE_CUTOFF {
+        discard;
+    }
     let n = pbr_input.N;
 
     // World position of the fragment (camera-relative offsets are exact across the seam).

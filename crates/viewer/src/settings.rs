@@ -1,7 +1,9 @@
 //! The client's settings, kept in `client-settings.toml` next to the executable: the account
 //! (name and secret, saved after a successful connection), the last server address, and the
-//! display settings of the "Paramètres" window (view distance, horizon, shadows, curvature,
-//! vsync, fullscreen, faintest star, field of view) and of the game (automatic jump).
+//! display settings of the "Paramètres" window (view distance, horizon, transparency and its
+//! distance, shadows and alpha shadows, vsync, fullscreen, faintest star, field of view) and of
+//! the game (automatic jump). The display curvature is fixed (`curvature::DEFAULT_RADIUS_M`;
+//! `--curvature-radius` or `--render-config` for development).
 //!
 //! The command line overrides them for the session without saving. Benchmarks and captures
 //! ignore the file (reproducible runs).
@@ -12,7 +14,8 @@ use bevy::prelude::{Resource, warn};
 use bevy_egui::egui;
 use serde::{Deserialize, Serialize};
 
-use crate::curvature;
+use nascio_core::consts::CHUNK_SIZE;
+
 use crate::fly::{FlySettings, VIEW_MAX, VIEW_MIN};
 
 /// File name, next to the executable.
@@ -29,10 +32,12 @@ pub struct Saved {
     pub address: String,
     pub view_distance_m: f32,
     pub horizon: bool,
+    /// See-through foliage near the camera ("Transparence"), within this distance, m.
+    pub transparency: bool,
+    pub transparency_distance_m: f32,
     pub shadows: bool,
-    /// Display curvature on, with its radius in km.
-    pub curvature: bool,
-    pub curvature_radius_km: f64,
+    /// Shadows of see-through foliage cut out too ("Ombres alpha"); off, they are solid.
+    pub alpha_shadows: bool,
     pub vsync: bool,
     pub fullscreen: bool,
     pub star_mag_limit: f64,
@@ -40,6 +45,8 @@ pub struct Saved {
     pub fov_deg: f32,
     /// Jump by itself in front of a one-block step (off by default: author's decision).
     pub auto_jump: bool,
+    /// A predicted edit the server has not answered after this long is undone, ms.
+    pub edit_timeout_ms: u32,
 }
 
 impl Default for Saved {
@@ -51,15 +58,16 @@ impl Default for Saved {
             address: "127.0.0.1".into(),
             view_distance_m: fly.view_distance_m,
             horizon: fly.horizon,
+            transparency: fly.foliage_cutout_chunks >= 0,
+            transparency_distance_m: (fly.foliage_cutout_chunks.max(1) * CHUNK_SIZE) as f32,
             shadows: fly.shadows,
-            curvature: fly.curvature_radius_m.is_some(),
-            curvature_radius_km: fly.curvature_radius_m.unwrap_or(curvature::REAL_RADIUS_M)
-                / 1_000.0,
+            alpha_shadows: fly.alpha_shadows,
             vsync: fly.vsync,
             fullscreen: false,
             star_mag_limit: fly.star_mag_limit,
             fov_deg: crate::player::FOV_DEFAULT_DEG,
             auto_jump: false,
+            edit_timeout_ms: 1000,
         }
     }
 }
@@ -100,15 +108,25 @@ impl Saved {
     pub fn apply(&self, s: &mut FlySettings) {
         s.view_distance_m = self.view_distance_m.clamp(VIEW_MIN, VIEW_MAX);
         s.horizon = self.horizon;
+        s.foliage_cutout_chunks = if self.transparency {
+            cutout_chunks(self.transparency_distance_m)
+        } else {
+            -1
+        };
         s.shadows = self.shadows;
-        s.curvature_radius_m = self.curvature.then(|| {
-            (self.curvature_radius_km * 1_000.0)
-                .clamp(curvature::RADIUS_MIN_M, curvature::RADIUS_MAX_M)
-        });
+        s.alpha_shadows = self.alpha_shadows;
         s.vsync = self.vsync;
         s.fullscreen = self.fullscreen;
         s.star_mag_limit = self.star_mag_limit;
     }
+}
+
+/// Range of the "Distance de transparence" slider, m (one chunk to the view distance).
+const TRANSPARENCY_MIN: f32 = CHUNK_SIZE as f32;
+
+/// Cut-out radius, chunk columns, of a transparency distance in m.
+fn cutout_chunks(distance_m: f32) -> i32 {
+    (distance_m.clamp(TRANSPARENCY_MIN, VIEW_MAX) / CHUNK_SIZE as f32).round() as i32
 }
 
 /// The "Paramètres" window, shown while `open`: a change applies at once, closing it (cross
@@ -145,98 +163,161 @@ pub fn settings_window(
     }
 }
 
-/// The widgets of the "Paramètres" window. True if something changed.
+/// Width of the cell of a slider and its value, px: fixed, so that the window does not
+/// change width as the value's text does.
+const SLIDER_CELL: f32 = 200.0;
+
+/// A cell of [`SLIDER_CELL`] px for one widget, left aligned.
+fn fixed(ui: &mut egui::Ui) -> egui::Ui {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(SLIDER_CELL, ui.spacing().interact_size.y),
+        egui::Sense::hover(),
+    );
+    ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    )
+}
+
+/// The widgets of the "Paramètres" window, in two columns. True if something changed.
 pub fn settings_ui(ui: &mut egui::Ui, saved: &mut Saved) -> bool {
     let mut changed = false;
-    egui::Grid::new("settings")
-        .num_columns(2)
-        .spacing([16.0, 8.0])
-        .show(ui, |ui| {
-            ui.label("Distance de vue");
-            changed |= ui
-                .add(
-                    egui::Slider::new(&mut saved.view_distance_m, VIEW_MIN..=VIEW_MAX)
-                        .suffix(" m")
-                        .step_by(32.0),
-                )
-                .changed();
-            ui.end_row();
+    ui.spacing_mut().slider_width = 110.0;
+    ui.horizontal_top(|ui| {
+        // Left: view and window, game.
+        egui::Grid::new("settings_left")
+            .num_columns(2)
+            .spacing([16.0, 10.0])
+            .show(ui, |ui| {
+                ui.label("Distance de vue");
+                changed |= fixed(ui)
+                    .add(
+                        egui::Slider::new(&mut saved.view_distance_m, VIEW_MIN..=VIEW_MAX)
+                            .suffix(" m")
+                            .step_by(32.0),
+                    )
+                    .changed();
+                ui.end_row();
 
-            ui.label("Horizon lointain");
-            changed |= ui.checkbox(&mut saved.horizon, "").changed();
-            ui.end_row();
+                ui.label("Horizon lointain");
+                changed |= ui.checkbox(&mut saved.horizon, "").changed();
+                ui.end_row();
 
-            ui.label("Ombres");
-            changed |= ui.checkbox(&mut saved.shadows, "").changed();
-            ui.end_row();
+                ui.label("Plein écran");
+                changed |= ui.checkbox(&mut saved.fullscreen, "").changed();
+                ui.end_row();
 
-            ui.label("Courbure");
-            ui.horizontal(|ui| {
-                changed |= ui.checkbox(&mut saved.curvature, "").changed();
-                if saved.curvature {
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(
-                                &mut saved.curvature_radius_km,
-                                curvature::RADIUS_MIN_M / 1_000.0
-                                    ..=curvature::RADIUS_MAX_M / 1_000.0,
-                            )
-                            .logarithmic(true)
-                            .suffix(" km"),
+                ui.label("Synchronisation verticale");
+                changed |= ui.checkbox(&mut saved.vsync, "").changed();
+                ui.end_row();
+
+                ui.label("Champ de vision");
+                changed |= fixed(ui)
+                    .add(
+                        egui::Slider::new(
+                            &mut saved.fov_deg,
+                            crate::player::FOV_MIN_DEG..=crate::player::FOV_MAX_DEG,
                         )
-                        .changed();
-                    if ui
-                        .small_button("réelle")
-                        .on_hover_text("15,9 km : même circonférence que le tore")
-                        .clicked()
-                    {
-                        saved.curvature_radius_km = curvature::REAL_RADIUS_M / 1_000.0;
-                        changed = true;
-                    }
-                }
+                        .suffix("°")
+                        .step_by(1.0),
+                    )
+                    .on_hover_text("Vertical ; 1,3 fois plus large en course et en vol")
+                    .changed();
+                ui.end_row();
+
+                ui.label("Saut automatique");
+                changed |= ui
+                    .checkbox(&mut saved.auto_jump, "")
+                    .on_hover_text("Saute seul devant une marche d'un bloc")
+                    .changed();
+                ui.end_row();
             });
-            ui.end_row();
+        ui.add_space(32.0);
+        // Right: shadows, transparency, sky.
+        egui::Grid::new("settings_right")
+            .num_columns(2)
+            .spacing([16.0, 10.0])
+            .show(ui, |ui| {
+                ui.label("Ombres");
+                changed |= ui.checkbox(&mut saved.shadows, "").changed();
+                ui.end_row();
 
-            ui.label("Synchronisation verticale");
-            changed |= ui.checkbox(&mut saved.vsync, "").changed();
-            ui.end_row();
-
-            ui.label("Plein écran");
-            changed |= ui.checkbox(&mut saved.fullscreen, "").changed();
-            ui.end_row();
-
-            ui.label("Étoiles (magnitude limite)");
-            changed |= ui
-                .add(
-                    egui::Slider::new(
-                        &mut saved.star_mag_limit,
-                        crate::stars::SLIDER_BRIGHTEST..=crate::stars::FAINTEST,
+                ui.label("Ombres alpha");
+                changed |= ui
+                    .add_enabled(
+                        saved.shadows && saved.transparency,
+                        egui::Checkbox::new(&mut saved.alpha_shadows, ""),
                     )
-                    .step_by(0.1),
-                )
-                .changed();
-            ui.end_row();
-
-            ui.label("Champ de vision");
-            changed |= ui
-                .add(
-                    egui::Slider::new(
-                        &mut saved.fov_deg,
-                        crate::player::FOV_MIN_DEG..=crate::player::FOV_MAX_DEG,
+                    .on_hover_text(
+                        "Désactivées, le feuillage ajouré projette des ombres pleines (plus rapide)",
                     )
-                    .suffix("°")
-                    .step_by(1.0),
-                )
-                .on_hover_text("Vertical ; 1,3 fois plus large en course et en vol")
-                .changed();
-            ui.end_row();
+                    .changed();
+                ui.end_row();
 
-            ui.label("Saut automatique");
-            changed |= ui
-                .checkbox(&mut saved.auto_jump, "")
-                .on_hover_text("Saute seul devant une marche d'un bloc")
-                .changed();
-            ui.end_row();
-        });
+                ui.label("Transparence");
+                changed |= ui
+                    .checkbox(&mut saved.transparency, "")
+                    .on_hover_text("Feuillage ajouré près de la caméra ; opaque au-delà")
+                    .changed();
+                ui.end_row();
+
+                ui.label("Distance de transparence");
+                changed |= fixed(ui)
+                    .add_enabled(
+                        saved.transparency,
+                        egui::Slider::new(
+                            &mut saved.transparency_distance_m,
+                            TRANSPARENCY_MIN..=VIEW_MAX,
+                        )
+                        .suffix(" m")
+                        .step_by(CHUNK_SIZE as f64),
+                    )
+                    .changed();
+                ui.end_row();
+
+                ui.label("Étoiles (magnitude limite)");
+                changed |= fixed(ui)
+                    .add(
+                        egui::Slider::new(
+                            &mut saved.star_mag_limit,
+                            crate::stars::SLIDER_BRIGHTEST..=crate::stars::FAINTEST,
+                        )
+                        .step_by(0.1),
+                    )
+                    .changed();
+                ui.end_row();
+            });
+    });
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transparency_settings_reach_the_view() {
+        let mut fly = FlySettings::default();
+        let mut saved = Saved::default();
+        // The defaults round-trip: 4 chunks, alpha shadows on.
+        saved.apply(&mut fly);
+        assert_eq!(
+            fly.foliage_cutout_chunks,
+            crate::curvature::DEFAULT_FOLIAGE_CUTOUT_CHUNKS
+        );
+        assert!(fly.alpha_shadows);
+        saved.transparency_distance_m = 200.0;
+        saved.alpha_shadows = false;
+        saved.apply(&mut fly);
+        assert_eq!(fly.foliage_cutout_chunks, 6);
+        assert!(!fly.alpha_shadows);
+        // Off: no cut-out foliage at all.
+        saved.transparency = false;
+        saved.apply(&mut fly);
+        assert!(fly.foliage_cutout_chunks < 0);
+        // Out of range distances are clamped.
+        assert_eq!(cutout_chunks(0.0), 1);
+        assert_eq!(cutout_chunks(1e6), (VIEW_MAX / CHUNK_SIZE as f32) as i32);
+    }
 }

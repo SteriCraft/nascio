@@ -69,6 +69,12 @@ impl Menu {
             status: String::new(),
         }
     }
+
+    /// Back from the game, with `status` under the buttons (empty: none).
+    pub fn back(&mut self, status: String) {
+        self.status = status;
+        self.dialog = false;
+    }
 }
 
 /// Pinned certificates: address → certificate (DER, hexadecimal).
@@ -183,8 +189,9 @@ pub fn menu_ui(
                 cam.pos = nascio_core::coords::WorldPos::new(p[0], p[1], p[2]);
                 // Only the columns the server sends can be shown, and a column is meshed once
                 // its neighbours arrived: keep one column inside the radius.
-                settings.view_distance_m =
-                    settings.view_distance_m.min(remote.radius_m as f32 - 64.0);
+                settings.view_distance_m = settings
+                    .view_distance_m
+                    .min((remote.radius_m - crate::remote::VIEW_MARGIN_M) as f32);
                 info!("connected, columns within {} m", remote.radius_m);
                 saved.name = menu.login.name.trim().to_owned();
                 if let Auth::Secret(secret) = &menu.login.auth {
@@ -439,8 +446,7 @@ pub fn disconnected_ui(
             ui.add_space(8.0);
             ui.vertical_centered(|ui| {
                 if ui.add(theme::big_button("Menu principal", 1.0)).clicked() {
-                    menu.status = format!("Déconnecté : {reason}");
-                    menu.dialog = false;
+                    menu.back(format!("Déconnecté : {reason}"));
                     next.set(crate::Mode::Menu);
                 }
             });

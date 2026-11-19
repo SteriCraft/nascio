@@ -460,7 +460,13 @@ const COMMANDS: &[(&str, &str, &str, &str)] = &[
         "fly",
         "<name> on|off",
         "flight on or off for a player online",
-        "In flight there is no gravity and blocks still collide; up to fly_max_speed. Coming down onto a block walks again. Administrators may also switch it from their client. Back to walking at each login.",
+        "In flight there is no gravity and blocks still collide; up to fly_max_speed. Coming down onto a block walks again. Flight puts the player in god mode. Administrators may also switch it from their client, in god mode. Back to walking at each login.",
+    ),
+    (
+        "god",
+        "<name> on|off",
+        "god mode on or off for a player online",
+        "In god mode the player places any block without using its inventory, and may fly. Leaving it walks again. Administrators may also switch it from their client (G). Off at each login.",
     ),
     (
         "seed",
@@ -612,6 +618,16 @@ fn command(server: &RunningServer, line: &str) -> bool {
                 }
             }
             _ => say!("fly <name> on|off"),
+        },
+        Some("god") => match (words.next(), words.next()) {
+            (Some(name), Some(flag @ ("on" | "off"))) => {
+                if sh.god(name, flag == "on") {
+                    say!("{name}: god mode {flag}");
+                } else {
+                    say!("{name} is not online");
+                }
+            }
+            _ => say!("god <name> on|off"),
         },
         Some("stats") => print_stats(server),
         Some("seed") => say!("seed {}", sh.seed),

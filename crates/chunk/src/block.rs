@@ -12,7 +12,9 @@ pub type BlockId = u16;
 /// Air is always id 0 (validated by the registry): empty chunks are all zeros.
 pub const AIR: BlockId = 0;
 
-/// Blocks drawn as foliage (their sides keep their green under the seasonal snow).
+/// Blocks drawn as foliage: see-through (their texture is cut out by its alpha, so they hide
+/// no face, theirs included), and their sides keep their green under the seasonal snow. They
+/// stay solid for physics.
 pub const FOLIAGE: [&str; 1] = ["spruce_leaves"];
 
 /// How a block takes part in rendering and physics.
@@ -78,7 +80,8 @@ pub const BUILTIN: [(&str, [u8; 3], Matter, f32); 32] = [
     ("snow", [244, 247, 251], Matter::Solid, 400.0),
     // Thin snow cover on top of a block, in the air cell above it (drawn 1/8 m thick).
     ("snow_layer", [244, 247, 251], Matter::Layer, 200.0),
-    // Provisional vegetation (M6): one spruce model, cacti in the hot desert. Leaves are opaque.
+    // Provisional vegetation (M6): one spruce model, cacti in the hot desert. Leaves are solid
+    // but see-through (`FOLIAGE`).
     ("spruce_log", [88, 64, 44], Matter::Solid, 600.0),
     ("spruce_leaves", [42, 96, 50], Matter::Solid, 200.0),
     ("cactus", [74, 124, 60], Matter::Solid, 900.0),
@@ -253,8 +256,8 @@ impl Blocks {
         self.matter(id) == Matter::Solid
     }
 
-    /// Whether a block is foliage (tagged for the shader: its sides stay green under the
-    /// seasonal snow).
+    /// Whether a block is foliage: see-through for meshing (it hides no face), drawn cut out by
+    /// its texture's alpha, its sides green under the seasonal snow.
     #[inline]
     pub fn is_foliage(&self, id: BlockId) -> bool {
         self.foliage[usize::from(id)]

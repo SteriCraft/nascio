@@ -5,23 +5,24 @@
 //! against the blocks of [`WorldView`]; last, each player gets its state and the entities.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use nascio_chunk::BlockId;
+use nascio_chunk::{AIR, BlockId};
 use nascio_core::coords::BlockPos;
 use nascio_physics::{Mode, PlayerParams, Shapes};
 use nascio_protocol::ServerDatagram;
 use nascio_protocol::entity::QState;
+use nascio_protocol::inventory::{Inventory, SLOTS};
 use nascio_protocol::messages::{ClientMsg, DeathCause, ServerMsg};
 use nascio_protocol::player::{InputQueue, PlayerState};
 use nascio_voxel::DeltaStore;
 use rayon::prelude::*;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::accounts::Change;
+use crate::accounts::{Change, save_inventory};
 use crate::columns::{ColumnCache, wrap_column};
 use crate::movement::{Body, FREE_RADIUS_M, Rules, Settle, reach, solid_top};
 use crate::replicate::{Entity, Grid, ReplConfig, Replicator};
@@ -48,6 +49,8 @@ pub struct PlayerLink {
     pub home: Home,
     /// Where the player left (the arrival point when `Some`).
     pub last: Option<[f64; 3]>,
+    /// The inventory kept by its account.
+    pub inventory: Inventory,
     /// Address of the connection (abuse log).
     pub ip: std::net::IpAddr,
     /// Control messages to the player.
@@ -72,8 +75,11 @@ pub struct PlayerLink {
     pub tiles: Mutex<VecDeque<nascio_chunk::horizon::TileKey>>,
     /// Movement commands received and not applied yet.
     pub inputs: Mutex<InputQueue>,
-    /// A column was asked again (`Resend`): the column streamer scans the ring again.
+    /// A column was asked again (`Resend`) or the radius changed: the column streamer scans
+    /// the ring again.
     pub rescan: AtomicBool,
+    /// Radius of the columns sent, metres: the client's (`ViewRadius`) within the server's.
+    pub radius_m: AtomicU32,
 }
 
 /// Commands a player may have waiting: one second of steps.
@@ -82,7 +88,8 @@ pub const MAX_QUEUED_COMMANDS: usize = 64;
 pub enum Input {
     Join(Arc<PlayerLink>),
     Leave(u32),
-    /// A message of the player; `Fly` comes only from an administrator or the console.
+    /// A message of the player; `Fly` and `God` come only from an administrator or the
+    /// console.
     Msg(u32, ClientMsg),
 }
 
@@ -145,6 +152,7 @@ struct Edit {
     pos: [i32; 3],
     block: u16,
     cmd: Option<u32>,
+    slot: Option<u8>,
     /// Tick it arrived.
     since: u32,
 }
@@ -156,6 +164,9 @@ struct Player {
     /// The spawn point (a new one is drawn when it is blocked).
     home: Home,
     edits: VecDeque<Edit>,
+    /// God mode: unlimited blocks, flight allowed.
+    god: bool,
+    inventory: Inventory,
     /// Edits refused out of reach (the first and every hundredth are logged).
     out_of_reach: u64,
     repl: Replicator,
@@ -167,6 +178,8 @@ pub struct Sim {
     pub deltas: Arc<DeltaStore>,
     pub cache: Arc<ColumnCache>,
     pub blocks: usize,
+    /// Names of the blocks, by id (inventories are kept by name).
+    pub block_names: Vec<String>,
     pub tick: Duration,
     pub tick_hz: u32,
     pub stats: Arc<Mutex<SimStats>>,
@@ -196,13 +209,41 @@ const REACH_SLACK_M: f64 = 0.01;
 /// Spawn points drawn for a player whose point is blocked, before it suffocates.
 pub const MAX_REDRAWS: u32 = 8;
 
-/// What a player leaves to its account: its position, or nothing when dead (it comes back at
-/// its point).
-fn last_of(p: &Player) -> Change {
-    Change::Last(
-        p.link.name.clone(),
-        (!p.body.dead).then_some(p.body.state.pos),
-    )
+/// What a player leaves to its account: its position (nothing when dead: it comes back at
+/// its point) and its inventory.
+fn kept_of(p: &Player, names: &[String]) -> [Change; 2] {
+    [
+        Change::Last(
+            p.link.name.clone(),
+            (!p.body.dead).then_some(p.body.state.pos),
+        ),
+        Change::Inventory(p.link.name.clone(), save_inventory(&p.inventory, names)),
+    ]
+}
+
+/// What a player left, kept by name until its account has it.
+type Departed = BTreeMap<String, (Option<[f64; 3]>, Inventory)>;
+
+/// In walk mode, whether the edit fits the inventory: a placed block must be in its slot, a
+/// destroyed one must be known (`was`: the block there, if its column is held).
+fn stock(p: &Player, e: &Edit, was: Option<BlockId>) -> Result<(), String> {
+    if p.god {
+        return Ok(());
+    }
+    if e.block == AIR {
+        return was.map(|_| ()).ok_or_else(|| "column not ready".to_owned());
+    }
+    let held = e
+        .slot
+        .map(usize::from)
+        .filter(|&s| s < SLOTS)
+        .and_then(|s| p.inventory.slots[s])
+        .is_some_and(|s| s.block == e.block);
+    if held {
+        Ok(())
+    } else {
+        Err("not in the inventory".to_owned())
+    }
 }
 
 impl Sim {
@@ -224,7 +265,7 @@ impl Sim {
         let mut tick: u32 = 0;
         // Players gone, by name, with what they left: a login handled before the account
         // has it (one tick) still arrives there.
-        let mut departed: BTreeMap<String, Option<[f64; 3]>> = BTreeMap::new();
+        let mut departed = Departed::new();
         let save_every = self.position_save_s.saturating_mul(self.tick_hz);
         while !stop.load(Ordering::Relaxed) {
             next += self.tick;
@@ -241,7 +282,7 @@ impl Sim {
                 self.input(input, tick, &mut players, &mut world, &mut departed);
             }
             if save_every > 0 && tick.is_multiple_of(save_every) && !players.is_empty() {
-                let _ = self.accounts.send(players.values().map(last_of).collect());
+                let _ = self.accounts.send(self.kept(&players));
             }
             let (edits, refused, changed) = self.edits(tick, &mut players, &mut world);
             let m0 = Instant::now();
@@ -283,8 +324,15 @@ impl Sim {
                 None => next = Instant::now(),
             }
         }
-        // Clean stop: every player online keeps its position.
-        let _ = self.accounts.send(players.values().map(last_of).collect());
+        // Clean stop: every player online keeps its position and inventory.
+        let _ = self.accounts.send(self.kept(&players));
+    }
+
+    fn kept(&self, players: &BTreeMap<u32, Player>) -> Vec<Change> {
+        players
+            .values()
+            .flat_map(|p| kept_of(p, &self.block_names))
+            .collect()
     }
 
     fn input(
@@ -293,11 +341,14 @@ impl Sim {
         tick: u32,
         players: &mut BTreeMap<u32, Player>,
         world: &mut WorldView,
-        departed: &mut BTreeMap<String, Option<[f64; 3]>>,
+        departed: &mut Departed,
     ) {
         match input {
             Input::Join(link) => {
-                let last = departed.remove(&link.name).unwrap_or(link.last);
+                let (last, inventory) = departed
+                    .remove(&link.name)
+                    .unwrap_or_else(|| (link.last, link.inventory.clone()));
+                let _ = link.out.send(ServerMsg::Inventory(inventory.clone()));
                 let body = match last {
                     Some(pos) => Body::arriving(pos, Settle::Last),
                     None => Body::new(link.home.pos),
@@ -312,6 +363,8 @@ impl Sim {
                         home: link.home,
                         link,
                         edits: VecDeque::new(),
+                        god: false,
+                        inventory,
                         out_of_reach: 0,
                         repl: Replicator::default(),
                         state: None,
@@ -320,11 +373,9 @@ impl Sim {
             }
             Input::Leave(id) => {
                 if let Some(p) = players.remove(&id) {
-                    let change = last_of(&p);
-                    if let Change::Last(name, pos) = &change {
-                        departed.insert(name.clone(), *pos);
-                    }
-                    let _ = self.accounts.send(vec![change]);
+                    let pos = (!p.body.dead).then_some(p.body.state.pos);
+                    departed.insert(p.link.name.clone(), (pos, p.inventory.clone()));
+                    let _ = self.accounts.send(kept_of(&p, &self.block_names).to_vec());
                 }
             }
             Input::Msg(id, msg) => {
@@ -337,10 +388,16 @@ impl Sim {
                             p.repl.ack(s);
                         }
                     }
-                    ClientMsg::SetBlock { pos, block, cmd } => p.edits.push_back(Edit {
+                    ClientMsg::SetBlock {
                         pos,
                         block,
                         cmd,
+                        slot,
+                    } => p.edits.push_back(Edit {
+                        pos,
+                        block,
+                        cmd,
+                        slot,
                         since: tick,
                     }),
                     ClientMsg::Respawn if p.body.dead => {
@@ -353,8 +410,16 @@ impl Sim {
                             pos: p.body.state.pos,
                         });
                     }
-                    ClientMsg::Fly(on) => {
+                    // Flight in god mode only.
+                    ClientMsg::Fly(on) if p.god || !on => {
                         p.body.set_mode(if on { Mode::Fly } else { Mode::Walk });
+                    }
+                    ClientMsg::God(on) => {
+                        p.god = on;
+                        if !on {
+                            p.body.set_mode(Mode::Walk);
+                        }
+                        let _ = p.link.out.send(ServerMsg::God(on));
                     }
                     _ => {}
                 }
@@ -392,6 +457,8 @@ impl Sim {
         let mut changes: BTreeMap<(i32, i32, i32), Changes> = BTreeMap::new();
         let mut changed = Vec::new();
         let (mut edits, mut refused) = (0, 0);
+        // Cells set during this tick and their block.
+        let mut pending: BTreeMap<[i32; 3], BlockId> = BTreeMap::new();
         for (id, e, eye) in ready {
             let p = &players[&id];
             let mut far = None;
@@ -405,6 +472,12 @@ impl Sim {
                 .unwrap_or_else(|er| er.into_inner())
                 .contains(&wrap_column(c.cx, c.cz));
             let top = solid_top(&self.shapes, e.block);
+            // The block there now (edits of this tick included: `world` has them only at the
+            // end, so an earlier edit of the tick on the same cell is looked up first).
+            let was = pending
+                .get(&cell)
+                .copied()
+                .or_else(|| world.block(at.x, at.y, at.z));
             let result = if usize::from(e.block) >= self.blocks {
                 Err(format!("unknown block {}", e.block))
             } else if !held {
@@ -430,13 +503,30 @@ impl Sim {
                     .any(|q| !q.body.dead && q.body.overlaps_cell(&self.player, cell, top))
             {
                 Err("inside a player".to_owned())
+            } else if let Err(why) = stock(p, &e, was) {
+                Err(why)
             } else {
                 self.deltas.set(at, e.block).map_err(|er| format!("{er:#}"))
             };
             match result {
                 Ok(lsn) => {
                     edits += 1;
+                    let p = players.get_mut(&id).expect("player");
+                    if !p.god {
+                        // Checked by `stock`: the slot holds the block; a destroyed block
+                        // goes in (lost when there is no room).
+                        if e.block == AIR {
+                            if let Some(b) = was.filter(|&b| b != AIR) {
+                                p.inventory.add(b);
+                            }
+                        } else {
+                            p.inventory
+                                .take(usize::from(e.slot.unwrap_or(u8::MAX)), e.block);
+                        }
+                        let _ = p.link.out.send(ServerMsg::Inventory(p.inventory.clone()));
+                    }
                     self.cache.invalidate(c.cx, c.cz);
+                    pending.insert(cell, e.block);
                     let ch = changes.entry((c.cx, c.cy, c.cz)).or_default();
                     ch.0 = lsn;
                     ch.1.push((at.local().index() as u16, e.block));

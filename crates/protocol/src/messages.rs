@@ -67,10 +67,15 @@ pub enum ClientMsg {
     /// `cmd` is the number of the newest movement command sent when the player clicked
     /// (`None`: none sent yet): the server measures the reach from the eyes as they were
     /// after that command, whatever the latency.
+    ///
+    /// In walk mode a destroyed block goes to the inventory, and a placed one comes from
+    /// `slot`, which must hold `block`; in god mode blocks are unlimited and `slot` is
+    /// ignored.
     SetBlock {
         pos: [i32; 3],
         block: u16,
         cmd: Option<u32>,
+        slot: Option<u8>,
     },
     /// Entity datagrams received (their `seq`): their states can serve as baselines.
     Ack {
@@ -95,12 +100,21 @@ pub enum ClientMsg {
     Bye,
     /// Back to life after [`ServerMsg::Died`], at the account's spawn point.
     Respawn,
-    /// Asks to fly or to walk again; administrators only (others are refused and logged).
+    /// Asks to fly or to walk again; administrators in god mode only (others are refused).
     Fly(bool),
+    /// Asks god mode on or off (unlimited blocks, flight); administrators only. The server
+    /// answers [`ServerMsg::God`]; leaving it walks again.
+    God(bool),
     /// Asks a column again (an edit fell below its chunks: the client forgot it). Ignored for
     /// a column the server is not sending to the client.
     Resend {
         column: [i32; 2],
+    },
+    /// Radius of the columns the client wants, metres (its view distance and a margin). The
+    /// server sends within the smaller of it and its own `chunk_radius_m`, and forgets the
+    /// columns beyond; until this message, its own radius.
+    ViewRadius {
+        radius_m: u32,
     },
 }
 
@@ -149,6 +163,10 @@ pub enum ServerMsg {
     Respawned {
         pos: [f64; 3],
     },
+    /// The player's inventory, whole: after the hello and at each change.
+    Inventory(crate::inventory::Inventory),
+    /// God mode is on or off for the player (asked, or set by the console).
+    God(bool),
 }
 
 /// Why a player died; the client words it in its own language.
@@ -240,6 +258,8 @@ mod tests {
             ServerMsg::Respawned {
                 pos: [0.5, -12.25, 99_999.75],
             },
+            ServerMsg::God(true),
+            ServerMsg::Inventory(crate::inventory::Inventory::default()),
         ];
         for m in msgs {
             let b = to_bytes(&m).unwrap();
@@ -250,10 +270,15 @@ mod tests {
             pos: [99_999, 70, 5],
             block: 12,
             cmd: Some(1_000_000),
+            slot: None,
         })
         .unwrap();
-        assert!(edit.len() <= 13, "{} bytes", edit.len());
-        for m in [ClientMsg::Respawn, ClientMsg::Fly(true)] {
+        assert!(edit.len() <= 14, "{} bytes", edit.len());
+        for m in [
+            ClientMsg::Respawn,
+            ClientMsg::Fly(true),
+            ClientMsg::God(false),
+        ] {
             assert_eq!(from_bytes::<ClientMsg>(&to_bytes(&m).unwrap()).unwrap(), m);
         }
         let mut b = to_bytes(&ClientMsg::Bye).unwrap();

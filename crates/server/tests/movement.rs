@@ -105,7 +105,9 @@ async fn lost_duplicated_and_late_commands_give_the_local_trajectory() {
                     chunk,
                     lsn,
                     changes,
-                }) => mirror.blocks(chunk, lsn, changes),
+                }) => {
+                    mirror.blocks(chunk, lsn, changes);
+                }
                 Event::Msg(ServerMsg::Died { cause }) => panic!("died: {cause:?}"),
                 Event::Player(PlayerState {
                     ack: Some(a),
