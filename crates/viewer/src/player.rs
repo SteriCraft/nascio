@@ -6,7 +6,8 @@
 //!   flies down). Two presses of Z within 300 ms run; the view then widens from 42° to 60°.
 //! - The mouse turns the view (captured while playing; Échap, the chat and death free it).
 //! - Administrators: two presses of Space within 300 ms ask to fly, or to walk again; the view
-//!   is at 60° while flying (author's decision). Other players never ask.
+//!   is at 60° while flying, at a fixed 20 m/s, and coming down onto a block walks again
+//!   (author's decisions). Other players never ask.
 //! - Death: a grey veil with its cause and a "Réapparaître" button.
 //!
 //! The network thread gives the player the server's states, its death and respawn and the
@@ -37,6 +38,8 @@ const FLY_TAP_S: f64 = 0.3;
 const FLY_ANSWER_S: f64 = 2.0;
 /// A message of the player stays this long, s.
 const NOTICE_S: f64 = 4.0;
+/// Flight speed, m/s (author's decision: fixed, the wheel does nothing connected).
+pub const FLY_SPEED_MPS: f64 = 20.0;
 
 /// What the interface shows of the player.
 #[derive(Resource, Default)]
@@ -94,8 +97,8 @@ pub fn walk(
         crouch: held(KeyCode::ShiftLeft) || held(KeyCode::ShiftRight),
         yaw: cam.yaw,
         pitch: cam.pitch as f32,
-        // The physics caps it at the server's `fly_max_speed`.
-        fly_speed: (cam.speed * 10.0).round().min(f64::from(u16::MAX)) as u16,
+        // In 0.1 m/s; the physics caps it at the server's `fly_max_speed`.
+        fly_speed: (FLY_SPEED_MPS * 10.0).round() as u16,
     };
     let (events, eye, running, flying) = {
         let mut player = remote.lock_player();
@@ -118,14 +121,8 @@ pub fn walk(
                 life.died = None;
                 life.respawn_asked = false;
             }
-            PlayerEvent::Mode(m) => {
-                let text = match m {
-                    Motion::Fly => "Vol",
-                    Motion::Walk => "Marche",
-                };
-                life.notice = Some((text.into(), now_s));
-            }
-            PlayerEvent::Snapped => {}
+            // No message on the change of mode (author's decision).
+            PlayerEvent::Mode(_) | PlayerEvent::Snapped => {}
         }
     }
     cam.pos = WorldPos::new(eye[0], eye[1], eye[2]);
@@ -222,20 +219,14 @@ pub fn life_ui(
         DeathCause::Magma => "Mort dans le magma",
     };
     let mut respawn = false;
-    egui::Window::new("Mort")
-        .title_bar(false)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new(wording).size(30.0).strong());
-                ui.add_space(16.0);
-                let button = egui::Button::new(egui::RichText::new("Réapparaître").size(18.0))
-                    .min_size(egui::vec2(220.0, 38.0));
-                respawn = ui.add_enabled(!life.respawn_asked, button).clicked();
-            });
+    crate::theme::dialog(ctx, "death", None, [0.0, 0.0], None, |ui| {
+        ui.vertical_centered(|ui| {
+            ui.label(egui::RichText::new(wording).size(30.0));
+            ui.add_space(16.0);
+            let button = crate::theme::big_button("Réapparaître", 1.0);
+            respawn = ui.add_enabled(!life.respawn_asked, button).clicked();
         });
+    });
     if respawn {
         remote.send(ClientMsg::Respawn);
         life.respawn_asked = true;

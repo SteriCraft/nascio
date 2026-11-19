@@ -444,6 +444,10 @@ pub fn step(
         }
     }
     s.on_ground = cut[1] && d[1] < 0.0;
+    // Coming down onto a block ends the flight (author's decision).
+    if s.mode == Mode::Fly && s.on_ground {
+        s.mode = Mode::Walk;
+    }
     s.pos = [wrap_f64(pos[0]), pos[1], wrap_f64(pos[2])];
     *state = s;
     Ok(())

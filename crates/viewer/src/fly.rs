@@ -712,7 +712,7 @@ pub fn column_visibility(
 
 /// Mouse look (right button held; captured for good in god mode, and connected while alive),
 /// WASD/ZQSD + Space/Shift, wheel for speed. Connected, the keys move the player instead
-/// ([`crate::player::walk`]) and the wheel sets its flight speed.
+/// ([`crate::player::walk`]) and the wheel does nothing (fixed flight speed).
 #[allow(clippy::too_many_arguments)]
 pub fn fly_input(
     time: Res<Time<Real>>,
@@ -756,7 +756,7 @@ pub fn fly_input(
         cam.pitch =
             (cam.pitch - f64::from(d.y) * 0.0025).clamp(-FRAC_PI_2 + 0.01, FRAC_PI_2 - 0.01);
     }
-    if !ui.0 && !god.on && !pause.open && scroll.delta.y != 0.0 {
+    if remote.is_none() && !ui.0 && !god.on && !pause.open && scroll.delta.y != 0.0 {
         let notches = match scroll.unit {
             MouseScrollUnit::Line => f64::from(scroll.delta.y),
             MouseScrollUnit::Pixel => f64::from(scroll.delta.y) / 40.0,

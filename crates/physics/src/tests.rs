@@ -209,10 +209,28 @@ fn flight_has_no_gravity_and_collides() {
     i.fly_speed = 60_000;
     run(&mut s, i, 1, &scene);
     assert_eq!(s.vel[1], 120.0);
-    // Down to the ground and no further.
+    // Down to the ground and no further: landing ends the flight.
     i.keys = keys::CROUCH;
     run(&mut s, i, 60, &scene);
     assert_eq!(s.pos[1], 10.0);
+    assert_eq!(s.mode, Mode::Walk);
+}
+
+#[test]
+fn flying_along_the_ground_or_into_a_ceiling_keeps_flying() {
+    let mut scene = Scene::default();
+    scene.set(500, 12, 500, STONE);
+    // Level flight just above the ground: no landing.
+    let mut s = State::new([500.5, 10.0, 500.5], Mode::Fly);
+    let mut i = keys(keys::FORWARD, EAST);
+    i.fly_speed = 200;
+    run(&mut s, i, 20, &scene);
+    assert_eq!(s.mode, Mode::Fly);
+    // Up into a ceiling: still flying.
+    let mut s = State::new([500.5, 10.0, 500.5], Mode::Fly);
+    i.keys = keys::JUMP;
+    run(&mut s, i, 20, &scene);
+    assert_eq!(s.mode, Mode::Fly);
 }
 
 #[test]

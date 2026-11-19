@@ -29,6 +29,7 @@ use crate::Mode;
 use crate::fly::{FlyCam, FlySettings};
 use crate::remote::Remote;
 use crate::settings::Saved;
+use crate::theme;
 
 /// How the client logs in: the saved account, or the command line's.
 #[derive(Clone)]
@@ -206,39 +207,68 @@ pub fn menu_ui(
             .layer_id(egui::LayerId::background())
             .max_rect(ctx.viewport_rect()),
     );
+    // The layout of the former project's menu (1280 px wide reference, scaled with the
+    // window): title 150 px from the top, three buttons from the centre down, 70 px apart, the
+    // version bottom left.
+    let view = ctx.viewport_rect();
+    let k = (view.width() / theme::REF_WIDTH).clamp(0.5, 3.0);
+    let dialog_open = menu.dialog || menu.settings;
     egui::CentralPanel::default()
-        .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(18, 24, 34)))
+        .frame(egui::Frame::NONE.fill(theme::PAPER))
         .show(&mut root, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() * 0.25);
-                ui.label(egui::RichText::new("Nascio").size(56.0).strong());
-                ui.add_space(36.0);
-                let size = egui::vec2(260.0, 44.0);
-                let big = |t: &str| egui::Button::new(egui::RichText::new(t).size(20.0));
-                if ui.add(big("Se connecter").min_size(size)).clicked() {
-                    menu.dialog = true;
-                    menu.settings = false;
-                }
-                ui.add_space(10.0);
-                if ui.add(big("Paramètres").min_size(size)).clicked() {
-                    menu.settings = true;
-                    menu.dialog = false;
-                }
-                ui.add_space(10.0);
-                if ui.add(big("Quitter").min_size(size)).clicked() {
-                    exit.write(AppExit::Success);
+            ui.set_style(theme::style());
+            let at = |dy: f32, size: egui::Vec2| {
+                egui::Rect::from_center_size(egui::pos2(view.center().x, dy), size)
+            };
+            ui.put(
+                at(view.top() + 150.0 * k, egui::vec2(800.0, 100.0) * k),
+                egui::Label::new(
+                    egui::RichText::new("NASCIO")
+                        .family(theme::title_family())
+                        .size(80.0 * k)
+                        .color(theme::INK),
+                ),
+            );
+            // A window open over the menu: its buttons wait.
+            ui.add_enabled_ui(!dialog_open, |ui| {
+                let buttons = ["Se connecter", "Paramètres", "Quitter"];
+                for (i, text) in buttons.into_iter().enumerate() {
+                    let y = view.center().y + i as f32 * theme::BUTTON_STEP * k;
+                    let r = ui.put(at(y, theme::BUTTON * k), theme::big_button(text, k));
+                    if r.clicked() {
+                        match i {
+                            0 => menu.dialog = true,
+                            1 => menu.settings = true,
+                            _ => {
+                                exit.write(AppExit::Success);
+                            }
+                        }
+                    }
                 }
             });
+        });
+    egui::Area::new(egui::Id::new("menu-version"))
+        .anchor(egui::Align2::LEFT_BOTTOM, [10.0 * k, -10.0 * k])
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(concat!("Version ", env!("CARGO_PKG_VERSION")))
+                    .family(theme::text_family())
+                    .size(18.0 * k)
+                    .color(theme::INK),
+            );
         });
 
     if menu.dialog {
         let mut open = true;
-        egui::Window::new("Se connecter")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 80.0])
-            .show(ctx, |ui| connect_dialog(ui, menu));
+        theme::dialog(
+            ctx,
+            "connect",
+            Some("Se connecter"),
+            [0.0, 0.0],
+            Some(&mut open),
+            |ui| connect_dialog(ui, menu),
+        );
         if !open && menu.connecting.is_none() {
             menu.dialog = false;
         }
@@ -398,16 +428,22 @@ pub fn disconnected_ui(
     };
     // Give the mouse back.
     god.on = false;
-    egui::Window::new("Déconnecté")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
+    theme::dialog(
+        ctx,
+        "disconnected",
+        Some("Déconnecté"),
+        [0.0, 0.0],
+        None,
+        |ui| {
             ui.label(format!("Le serveur a fermé la connexion : {reason}"));
-            if ui.button("Menu principal").clicked() {
-                menu.status = format!("Déconnecté : {reason}");
-                menu.dialog = false;
-                next.set(crate::Mode::Menu);
-            }
-        });
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| {
+                if ui.add(theme::big_button("Menu principal", 1.0)).clicked() {
+                    menu.status = format!("Déconnecté : {reason}");
+                    menu.dialog = false;
+                    next.set(crate::Mode::Menu);
+                }
+            });
+        },
+    );
 }

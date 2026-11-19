@@ -120,18 +120,20 @@ pub fn settings_window(
         return;
     }
     let mut close = false;
-    egui::Window::new("Paramètres")
-        .open(open)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 80.0])
-        .show(ctx, |ui| {
+    crate::theme::dialog(
+        ctx,
+        "settings",
+        Some("Paramètres"),
+        [0.0, 0.0],
+        Some(&mut *open),
+        |ui| {
             if settings_ui(ui, saved) {
                 saved.apply(fly);
             }
             ui.add_space(8.0);
             close = ui.button("Fermer").clicked();
-        });
+        },
+    );
     if close {
         *open = false;
     }

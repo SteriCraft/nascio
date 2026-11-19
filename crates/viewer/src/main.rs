@@ -29,6 +29,7 @@ mod settings;
 mod sky;
 mod stars;
 mod textures;
+mod theme;
 mod tiles;
 
 use std::path::PathBuf;
@@ -145,9 +146,9 @@ struct Args {
     /// With `--generate`: TOML file overriding generation parameters.
     #[arg(long)]
     world_config: Option<PathBuf>,
-    /// Folder of the block textures (`<block>.png`, `_top`, `_bottom`); missing: the block
-    /// colours.
-    #[arg(long, default_value = textures::DEFAULT_DIR)]
+    /// Folder of the block textures (`<block>.png`, `_side`, `_top`, `_bottom`, `_end`); default:
+    /// `textures/` next to the executable; missing: the block colours.
+    #[arg(long, default_value_os_t = textures::default_dir())]
     textures: PathBuf,
     /// With `--generate`: deposit catalogue (default: config/deposits.toml, else built in).
     #[arg(long)]
@@ -384,6 +385,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     .add_systems(
         EguiPrimaryContextPass,
         (
+            theme::install_fonts,
             menu::menu_ui.run_if(in_state(Mode::Menu)),
             (
                 god::god_ui,

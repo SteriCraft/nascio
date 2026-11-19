@@ -72,26 +72,21 @@ pub fn pause_ui(
         return Ok(());
     }
     let mut resume = false;
-    egui::Window::new("Menu")
-        .title_bar(false)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                let size = egui::vec2(220.0, 38.0);
-                let big = |t: &str| egui::Button::new(egui::RichText::new(t).size(18.0));
-                resume = ui.add(big("Reprendre").min_size(size)).clicked();
-                ui.add_space(8.0);
-                if ui.add(big("Paramètres").min_size(size)).clicked() {
-                    pause.settings = true;
-                }
-                ui.add_space(8.0);
-                if ui.add(big("Quitter").min_size(size)).clicked() {
-                    exit.write(AppExit::Success);
-                }
-            });
+    crate::theme::dialog(ctx, "pause", None, [0.0, 0.0], None, |ui| {
+        ui.vertical_centered(|ui| {
+            // The main menu's spacing: centres 70 px apart.
+            let gap = crate::theme::BUTTON_STEP - crate::theme::BUTTON.y;
+            ui.spacing_mut().item_spacing.y = gap;
+            let big = |t| crate::theme::big_button(t, 1.0);
+            resume = ui.add(big("Reprendre")).clicked();
+            if ui.add(big("Paramètres")).clicked() {
+                pause.settings = true;
+            }
+            if ui.add(big("Quitter")).clicked() {
+                exit.write(AppExit::Success);
+            }
         });
+    });
     if resume {
         pause.close(&saved);
     }
