@@ -17,15 +17,25 @@ use nascio_chunk::block::{BlockTextures, Blocks, FaceTexture, FaceTint, srgb_to_
 pub const TEXTURE_SIZE: u32 = 32;
 /// Mip levels of the array: 32, 16, 8, 4, 2, 1.
 pub const MIP_LEVELS: u32 = 6;
-/// Default folder of the block textures (local test images, never committed).
-pub const DEFAULT_DIR: &str = "textures_temp/blocks";
+/// Name of the default texture folder, next to the executable (`target/release/textures`).
+/// Development images live in `textures_temp/blocks` (never committed); `scripts/sync-textures.ps1`
+/// copies them next to the executable.
+pub const DIR_NAME: &str = "textures";
+
+/// Default folder of the block textures: `textures/` next to the executable (the working
+/// directory does not matter).
+pub fn default_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join(DIR_NAME)))
+        .unwrap_or_else(|| PathBuf::from(DIR_NAME))
+}
 /// Colour of the spruce leaves (sRGB), applied as a fixed tint.
 pub const SPRUCE_GREEN: [u8; 3] = [40, 70, 42];
 
 /// Block name -> file stem, when they differ.
 const ALIASES: [(&str, &str); 1] = [("snow_layer", "snow")];
-/// Block name -> file stem of the bottom face (besides: `<stem>_bottom`, then the top for
-/// trunks `*_log`, then `<stem>`).
+/// Block name -> file stem of the bottom face (otherwise the naming rule of `load`).
 const BOTTOM: [(&str, &str); 2] = [("grass", "dirt"), ("podzol", "dirt")];
 
 /// Block textures loaded from a folder: the layers of the texture array (with their mips) and the
@@ -200,29 +210,24 @@ pub fn load(dir: &Path, blocks: &Blocks) -> Option<BlockTextureSet> {
             .find(|(n, _)| *n == name)
             .map_or(name, |(_, s)| *s);
         let exists = |s: &str| dir.join(format!("{s}.png")).is_file();
-        let top_stem = format!("{stem}_top");
-        let top_stem = if exists(&top_stem) {
-            top_stem
-        } else {
-            stem.to_string()
+        // Naming rule: `<stem>_top` / `<stem>_bottom` (one face), then `<stem>_end` (both ends),
+        // then `<stem>_side`, then `<stem>` (all faces). The side faces take `_side` or the base.
+        let pick = |faces: &[&str]| -> String {
+            faces
+                .iter()
+                .map(|f| format!("{stem}{f}"))
+                .find(|s| exists(s))
+                .unwrap_or_else(|| stem.to_string())
         };
+        let top_stem = pick(&["_top", "_end", "_side", ""]);
+        let side_stem = pick(&["_side", ""]);
         let bottom_stem = match BOTTOM.iter().find(|(n, _)| *n == name) {
             Some((_, s)) => (*s).to_string(),
-            None => {
-                let b = format!("{stem}_bottom");
-                if exists(&b) {
-                    b
-                } else if name.ends_with("_log") {
-                    // Tree trunks: the cut end on both ends.
-                    top_stem.clone()
-                } else {
-                    stem.to_string()
-                }
-            }
+            None => pick(&["_bottom", "_end", "_side", ""]),
         };
         let t = BlockTextures {
             top: face(&top_stem),
-            side: face(stem),
+            side: face(&side_stem),
             bottom: face(&bottom_stem),
         };
         if t != BlockTextures::default() {
@@ -324,18 +329,25 @@ pub fn textured(dir: &Path, blocks: &Blocks) -> (Blocks, Option<Image>) {
 pub fn adopt_remote_textures(
     mut remote: ResMut<crate::remote::Remote>,
     dir: Res<TextureDir>,
-    array: Res<BlockArray>,
+    mut array: ResMut<BlockArray>,
     terrain: Res<crate::fly::TerrainMaterials>,
+    horizon: Res<crate::horizon::HorizonMaterial>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<crate::curvature::CurvedMaterial>>,
 ) {
     let (blocks, image) = textured(&dir.0, &remote.blocks);
     remote.blocks = Arc::new(blocks);
-    let _ = images.insert(array.0.id(), image.unwrap_or_else(placeholder));
-    // Re-prepare the chunk materials so they bind the new array.
-    for h in [&terrain.opaque, &terrain.water] {
-        let _ = materials.get_mut(h);
+    // A new image under a new handle, given to the materials: replacing the old image in place
+    // did not always rebind it (connecting from the menu kept the one-layer placeholder, so the
+    // faces showed their flat colours).
+    let new = images.add(image.unwrap_or_else(placeholder));
+    for h in [&terrain.opaque, &terrain.water, &horizon.0] {
+        if let Some(mut m) = materials.get_mut(h) {
+            m.extension.blocks = new.clone();
+        }
     }
+    images.remove(array.0.id());
+    array.0 = new;
 }
 
 #[cfg(test)]
@@ -389,7 +401,7 @@ mod tests {
             "grass",
             "grass_top",
             "spruce_log",
-            "spruce_log_top",
+            "spruce_log_end",
             "snow",
             "podzol",
         ]
@@ -416,9 +428,9 @@ mod tests {
         assert_eq!(layer_of(&set, t("podzol").top), "podzol");
 
         let log = t("spruce_log");
-        assert_eq!(layer_of(&set, log.top), "spruce_log_top");
+        assert_eq!(layer_of(&set, log.top), "spruce_log_end");
         assert_eq!(layer_of(&set, log.side), "spruce_log");
-        assert_eq!(layer_of(&set, log.bottom), "spruce_log_top");
+        assert_eq!(layer_of(&set, log.bottom), "spruce_log_end");
 
         let snow = t("snow_layer");
         assert_eq!(layer_of(&set, snow.top), "snow");
@@ -430,6 +442,30 @@ mod tests {
         assert_eq!(set.layers.len(), 7);
         assert_eq!(set.names.len(), 7);
         assert_eq!(set.table.len(), blocks.len());
+    }
+
+    #[test]
+    fn side_and_end_rules() {
+        let blocks = Blocks::builtin();
+        let d = Dir::new("sideend");
+        for n in [
+            "spruce_log_side",
+            "spruce_log_end",
+            "cactus_side",
+            "cactus_top",
+        ] {
+            d.solid(n, [20, 60, 90, 255]);
+        }
+        let set = load(&d.0, &blocks).unwrap();
+        let t = |n: &str| set.table[usize::from(blocks.id(n).unwrap())];
+        let log = t("spruce_log");
+        assert_eq!(layer_of(&set, log.side), "spruce_log_side");
+        assert_eq!(layer_of(&set, log.top), "spruce_log_end");
+        assert_eq!(layer_of(&set, log.bottom), "spruce_log_end");
+        // `_top` alone: the bottom falls back to `_side`.
+        let cactus = t("cactus");
+        assert_eq!(layer_of(&set, cactus.top), "cactus_top");
+        assert_eq!(layer_of(&set, cactus.bottom), "cactus_side");
     }
 
     #[test]

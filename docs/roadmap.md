@@ -137,7 +137,12 @@ Audit complet du projet par Fable, à partir des derniers benchmarks du PC Windo
 Les limites détaillées sont dans `docs/limites.md` (numéros L…). Cocher ou retirer une ligne quand elle est faite.
 - [ ] Banc complet sur le portable Linux (RTX 3050 Mobile), aurores comprises (L8, `rapport-audit-M7.md` §9).
 - [ ] Au prochain changement de format du monde : le feuillage devient une propriété de `blocks.toml` (L3).
-- [ ] Spec, mode 3D : décrire les textures des blocs (la spec dit encore « les textures viendront plus tard ») ; règles des faces et teintes dans un fichier TOML (L7).
+- [ ] Spec, mode 3D : décrire les textures des blocs (la spec dit encore « les textures viendront plus tard » ; règle de nommage faite dans `docs/textures.md`) ; règles des faces et teintes dans un fichier TOML (L7).
+- [ ] **Textures** — état : branche fusionnée dans `main` (602a932, 2026-11-18), usage de **test visuel** seulement ; 20 blocs sur 25 environ sont texturés par les images de l'auteur (`textures_temp/blocks`, hors dépôt, option `--textures`). Reste :
+  - [ ] textures manquantes : `ice`, `snow_layer` (prend `snow` pour l'instant), les huit roches magmatiques et métamorphiques (`granite`, `gneiss`, `schist`, `basalt`, `gabbro`, `andesite`, `granulite`, `peridotite`), les minerais de `config/deposits.toml` (liste dans `docs/textures.md`) ;
+  - [x] textures : pack 32×32 libre de droits de l'auteur (confirmé le 2026-11-19), pas de réécriture de l'historique ; `ASSETS.md` à compléter avec la source et la licence du pack.
+  - [x] `docs/textures.md` coché (2026-11-19).
+  - [x] point d'arrivée sans sol : disparu (confirmé par l'auteur le 2026-11-19).
 - [ ] Tuiles d'horizon invalidées par région éditée, si de grands chantiers des joueurs doivent se voir de loin (L1).
 
 ---

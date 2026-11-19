@@ -1,0 +1,1 @@
+cargo build --release -p nascio-server -p nascio-viewer

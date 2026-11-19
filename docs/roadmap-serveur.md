@@ -48,12 +48,15 @@ Les limites détaillées sont dans `docs/limites.md` (numéros L…). Cocher ou 
 
 **Essais de l'auteur** (reportés après le chantier 5) :
 - [ ] Chantier 4 : à l'écran, en `--fly` puis en réseau, horizon identique à l'ancien et sans couture, ciel en 125², sol lointain ; un client lancé hors du dépôt (`.exe` copié ailleurs) se connecte sans dossier de monde. Le cache disque est déjà vérifié par un test.
-- [ ] Chantier « Interfaces » : fenêtre du serveur (carte, console, graphiques, joueurs, bannis), boîte de démarrage, menu du client, scan du réseau local, chat, paramètres et menu en jeu.
+- [x] Chantier « Interfaces » : fenêtre du serveur (carte, console, graphiques, joueurs, bannis), boîte de démarrage, menu du client, scan du réseau local, chat, paramètres et menu en jeu. Validé par l'auteur le 2026-11-19 : suffisant en l'état.
 
 **Avant un serveur public** :
 - [ ] Mesurer et corriger les échecs de connexion pendant une arrivée en masse (L11).
 - [ ] Remplacer la confiance au premier usage du certificat (L14).
 - [ ] Confirmer les hypothèses de travail du début de ce fichier (hébergement, fenêtre de perte, cible de charge).
+- [ ] Déployer avec `--bind 0.0.0.0:7777 --server-id <nom>` (le serveur refuse `dev` hors adresse locale) ; mesurer toujours avec les bots sur une autre machine.
+- [ ] Connexion par jetons émis par le site (décision du 2026-11-18, à faire avant toute ouverture) : le mot de passe en clair de `client-settings.toml` ne restera que pour les administrateurs (L15).
+- [ ] Horizon invalidé par région éditée, si les chantiers des joueurs doivent se voir de loin (L1, voir `roadmap.md`).
 
 **Améliorations repérées** :
 - [ ] Statut d'administrateur pris en compte sans reconnexion (L9).

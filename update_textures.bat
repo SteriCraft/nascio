@@ -1,0 +1,1 @@
+./scripts/sync-textures.ps1 -Profile release
