@@ -224,10 +224,27 @@ Limites connues :
 - **§8.5** : dans le 1ᵉʳ point, « les positions (`Move`) et » devient « les datagrammes de commandes et » ; le 3ᵉ point (« Un déplacement plus rapide… `Correct` ») est remplacé par : « Le serveur simule lui-même chaque joueur ; un seau de jetons limite les datagrammes de commandes (`input_datagrams_per_s`, 40). La portée d'édition (`edit_reach_m`, 5 m) se mesure des yeux, tels qu'ils étaient après la commande que porte `SetBlock.cmd`, au point le plus proche de la cellule ; une édition qui précède sa commande attend au plus une seconde ; un bloc qui fait obstacle ne se pose pas dans un joueur vivant ; un mort n'édite pas. Une demande de vol d'un non-administrateur est refusée et consignée. »
 - **§8.6**, nouveau point : « Un point d'apparition **obstrué** (aucune place libre à 10 m) est remplacé par un autre point tiré à 300 m au plus du même site, gardé dans le compte (8 tirages au plus, puis l'étouffement). Avec `spawn_xz`, le nouveau point est tiré autour du point fixe et n'est pas gardé. »
 
-### Reste à faire pour clore le chantier
-1. **Valider la proposition de spec** ci-dessus, puis l'intégrer à `world-spec.md`.
-2. **Mesure à 500 bots, `swarm` sur une autre machine** (même commit sur les deux machines) :
-   - serveur (cette machine) : `cargo run -p nascio-server --release -- out/server/world-42 --nogui --open-registration --bind 0.0.0.0:7787 --server-id c5-bots --data out/c5-bots/data` (autoriser le pare-feu de Windows ; copier `out/c5-bots/data/server/cert.der` sur l'autre machine) ;
-   - bots (autre machine) : `cargo run -p nascio-tools --release --bin swarm -- <IP du serveur>:7787 <chemin>/cert.der --bots 500` ;
-   - relever dans les lignes du serveur (toutes les 10 s, ou `stats`) : tick p50 et p99, movement p99, steps, « without commands » (attendu : proche de 0) ; paralléliser le mouvement s'il dépasse 5 ms.
-3. Marquer le chantier 5 clos dans `docs/roadmap.md` après l'accord de l'auteur.
+## Bilan final — chantier clos le 2026-11-19
+
+**Fait.**
+- `nascio-physics`, partagée par le serveur et le client (boîte de 0,6 × 1,8 m, yeux à 1,62 m, marche, course, accroupi, saut de 1,25 m, nage, vol jusqu'à 120 m/s sans traverser les blocs, marche de 0,5 m, étouffement, place libre la plus proche).
+- Protocole v9 à v12 : commandes et état autoritaire en datagrammes typés, `Died`/`Respawned`/`Respawn`, `Fly`, `Resend`, `SetBlock.cmd`, `ServerHello.admin` ; `Move` et `Correct` retirés.
+- Serveur autoritaire : simulation des joueurs sur la vue décodée des colonnes, crédit de pas, famine à 250 ms, portée de 5 m des yeux, mort (étouffement, magma), dernière position gardée avec le compte, expulsion à 10 m au plus, nouveau tirage d'un point obstrué.
+- Client : prédiction, rejeu, lissage (τ = 100 ms, recalage à 2 m), renumérotation à `ack + 1 + ⌈RTT × 60⌉ + 3`, oubli et renvoi des colonnes éditées sous leur plage.
+- Visualiseur connecté sur le joueur prédit : ZQSD, course par double Z, vol des administrateurs par double Espace, champ de vision 42° → 60°, saut automatique en option, éditions à 5 m, écran de mort.
+- Tests de bout en bout (`journey.rs`, `prediction.rs`, `arrival.rs`) et campagne complète verte ; spec intégrée (§8.1, 8.2, **8.4bis**, 8.5, 8.6, 8.7, partie client).
+
+**Mesures clés.**
+- Bout en bout : 1,5 s de marche sans aucune correction, saut de 1,21 m retombé au bit près, édition à 4,5 m acceptée et à 5,5 m refusée ; après un gel d'une seconde, une seule renumérotation.
+- 460 joueurs avec de vraies commandes, bots sur une seconde machine : mouvement p99 2,85 à 2,96 ms, tick p50 ≈ 4,7 ms et p99 ≈ 8 ms, 0,5 à 0,8 % de pas sans commandes ; aucune parallélisation nécessaire.
+- Réplication de 500 joueurs dans 200 m (test ignoré) : 17 à 19 ms par tick, 2 133 o par client et par tick ; sauvegarde des 500 comptes 3,3 ms.
+
+**Limites restantes.**
+- Le statut d'administrateur n'est lu qu'à la connexion : un `admin` donné en console ne vaut qu'à la reconnexion.
+- Le panneau F3 n'a pas la souris pendant le jeu connecté (souris capturée) ; Échap la libère.
+- Un client qui plante n'envoie pas `Bye` : le serveur garde le compte 30 s (« already connected ») et comble ses pas.
+- La vitesse de vol affichée (molette) n'est pas plafonnée à `fly_max_speed` ; la physique la plafonne.
+- `DeviceLost` (Vulkan) vu une fois sur quatre lancements du visualiseur, cause non établie.
+- Pendant une arrivée en masse, 8 % des connexions dépassent les 10 s d'attente du `ServerHello` (hypothèse : hachage Argon2id derrière la génération des colonnes), et `swarm` ne voit appliquer qu'≈ 85 % de ses pas (hypothèse : commandes en attente de terrain neuf) ; à mesurer avant un serveur public.
+- `swarm` calcule sa position sans physique : ses éditions sont parfois refusées pour portée.
+- La spec dit encore « couleurs par bloc (les textures viendront plus tard) » dans le mode 3D, hors de ce chantier.

@@ -134,4 +134,4 @@ Audit complet du projet par Fable, à partir des derniers benchmarks du PC Windo
 - le portable Linux (RTX 3050 Mobile) sera re-mesuré plus tard, à la demande de l'auteur.
 
 ---
-Ensuite viendra la **Phase « Serveur et réseau »**, qui fera l'objet d'une feuille de route séparée.
+Ensuite vient la **Phase « Serveur et réseau »**, suivie dans sa propre feuille de route, `roadmap-serveur.md` (jalons C0 à S7, puis les chantiers ; chantier 5, mouvement autoritaire, clos le 2026-11-19).

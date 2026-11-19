@@ -35,3 +35,10 @@ Bin `swarm` : 500 bots dans un rayon de 200 m. **Validation** : p99 du tick < 50
 
 ## S7 — Comptes et sécurité
 Comptes (argon2), limites de débit, contrôles de portée et de vitesse, console d'administration. **Validation** : abus refusés et journalisés.
+
+## Chantiers après S7
+
+### Chantier 5 — Mouvement autoritaire — **clos (2026-11-19)**
+Le serveur simule les joueurs (crate `nascio-physics` partagée), le client prédit et réconcilie, le visualiseur connecté marche, nage, court, vole (administrateurs) et meurt ; spec §8.4bis. Rapport : `docs/reports/chantier-5.md`.
+- Commits : 27080e1 (5.1 physique), 31b7f47 (5.2 protocole v9), bc14176 (5.3 serveur, v10), 40679c5 (5.3bis dernière position, expulsion, point obstrué), e58749b et 7530464 (5.4 prédiction, v11, renumérotation), 9c502f8 (5.5 visualiseur), b461e05 (vol par double Espace, v12), 0083c5a (5.6 tests de bout en bout), 88cef5e (spec), 3ce27eb (mesure à 500 bots).
+- **Validation** : tests `movement`, `rules`, `arrival`, `prediction` et `journey` verts (marche sans correction, saut de 1,21 m, portée de 5 m, mort et réapparition, nouveau tirage d'un point obstrué) ; 460 joueurs avec de vraies commandes depuis une seconde machine : mouvement p99 < 3 ms, tick p99 ≈ 8 ms, 0,5 à 0,8 % de pas sans commandes.
