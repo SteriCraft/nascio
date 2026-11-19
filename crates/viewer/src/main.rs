@@ -653,8 +653,8 @@ fn setup(
     commands.spawn((
         Camera3d::default(),
         Projection::from(PerspectiveProjection {
-            // 42° vertical (pre-M5 review): less stretching at the edges (round Moon).
-            fov: 42f32.to_radians(),
+            // The player's field of view; `player::field_of_view` follows the setting.
+            fov: player::FOV_DEFAULT_DEG.to_radians(),
             near: 0.1,
             far: 60_000.0,
             ..default()

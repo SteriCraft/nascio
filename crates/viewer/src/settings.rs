@@ -1,7 +1,7 @@
 //! The client's settings, kept in `client-settings.toml` next to the executable: the account
 //! (name and secret, saved after a successful connection), the last server address, and the
 //! display settings of the "Paramètres" window (view distance, horizon, shadows, curvature,
-//! vsync, fullscreen, faintest star) and of the game (automatic jump).
+//! vsync, fullscreen, faintest star, field of view) and of the game (automatic jump).
 //!
 //! The command line overrides them for the session without saving. Benchmarks and captures
 //! ignore the file (reproducible runs).
@@ -36,6 +36,8 @@ pub struct Saved {
     pub vsync: bool,
     pub fullscreen: bool,
     pub star_mag_limit: f64,
+    /// Vertical field of view, degrees (1.3 times wider running or flying).
+    pub fov_deg: f32,
     /// Jump by itself in front of a one-block step (off by default: author's decision).
     pub auto_jump: bool,
 }
@@ -56,6 +58,7 @@ impl Default for Saved {
             vsync: fly.vsync,
             fullscreen: false,
             star_mag_limit: fly.star_mag_limit,
+            fov_deg: crate::player::FOV_DEFAULT_DEG,
             auto_jump: false,
         }
     }
@@ -211,6 +214,20 @@ pub fn settings_ui(ui: &mut egui::Ui, saved: &mut Saved) -> bool {
                     )
                     .step_by(0.1),
                 )
+                .changed();
+            ui.end_row();
+
+            ui.label("Champ de vision");
+            changed |= ui
+                .add(
+                    egui::Slider::new(
+                        &mut saved.fov_deg,
+                        crate::player::FOV_MIN_DEG..=crate::player::FOV_MAX_DEG,
+                    )
+                    .suffix("°")
+                    .step_by(1.0),
+                )
+                .on_hover_text("Vertical ; 1,3 fois plus large en course et en vol")
                 .changed();
             ui.end_row();
 

@@ -3,10 +3,11 @@
 //! same commands with the authority (`docs/world-spec.md` §8.4).
 //!
 //! - ZQSD (physical WASD) moves, Space jumps (swims up, flies up), Shift crouches (swims and
-//!   flies down). Two presses of Z within 300 ms run; the view then widens from 42° to 60°.
+//!   flies down). Two presses of Z within 300 ms run; the view then widens by 1.3 times the
+//!   player's field of view (a setting, 60° by default).
 //! - The mouse turns the view (captured while playing; Échap, the chat and death free it).
 //! - Administrators: two presses of Space within 300 ms ask to fly, or to walk again; the view
-//!   is at 60° while flying, at a fixed 20 m/s, and coming down onto a block walks again
+//!   widens the same way while flying, at a fixed 20 m/s, and coming down onto a block walks again
 //!   (author's decisions). Other players never ask.
 //! - Death: a grey veil with its cause and a "Réapparaître" button.
 //!
@@ -25,9 +26,13 @@ use nascio_protocol::messages::{ClientMsg, DeathCause};
 use crate::fly::{FlyCam, FlyCamera};
 use crate::remote::Remote;
 
-/// Vertical field of view walking, and running, degrees (author's decision).
-pub const FOV_WALK_DEG: f32 = 42.0;
-pub const FOV_RUN_DEG: f32 = 60.0;
+/// Vertical field of view set by the player: default and slider range, degrees (author's
+/// decision).
+pub const FOV_DEFAULT_DEG: f32 = 60.0;
+pub const FOV_MIN_DEG: f32 = 40.0;
+pub const FOV_MAX_DEG: f32 = 100.0;
+/// Running or flying, the view widens by this factor (author's decision).
+pub const FOV_RUN_FACTOR: f32 = 1.3;
 /// Time constant of the change of the field of view, s.
 const FOV_TAU_S: f32 = 0.15;
 /// Reach of the edits from the eyes, m (the server's `edit_reach_m`).
@@ -148,17 +153,19 @@ pub fn walk(
     }
 }
 
-/// The field of view: 60° running or flying, 42° otherwise, smoothly.
+/// The field of view: the player's, 1.3 times wider running or flying, smoothly.
 pub fn field_of_view(
     life: Res<Life>,
     remote: Option<Res<Remote>>,
+    saved: Res<crate::settings::Saved>,
     time: Res<Time<Real>>,
     mut cameras: Query<&mut Projection, With<FlyCamera>>,
 ) {
+    let base = saved.fov_deg.clamp(FOV_MIN_DEG, FOV_MAX_DEG);
     let deg = if remote.is_some() && (life.running || life.flying) {
-        FOV_RUN_DEG
+        base * FOV_RUN_FACTOR
     } else {
-        FOV_WALK_DEG
+        base
     };
     let target = deg.to_radians();
     let k = 1.0 - (-time.delta_secs() / FOV_TAU_S).exp();
