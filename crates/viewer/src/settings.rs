@@ -56,7 +56,8 @@ impl Default for Saved {
             name: String::new(),
             secret: String::new(),
             address: "127.0.0.1".into(),
-            view_distance_m: fly.view_distance_m,
+            // 512 m at the first launch (author's decision); up to VIEW_MAX in the settings.
+            view_distance_m: 512.0,
             horizon: fly.horizon,
             transparency: fly.foliage_cutout_chunks >= 0,
             transparency_distance_m: (fly.foliage_cutout_chunks.max(1) * CHUNK_SIZE) as f32,

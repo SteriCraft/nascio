@@ -69,7 +69,7 @@ struct Args {
     /// Camera speed, m/s.
     #[arg(long, default_value_t = 40.0)]
     speed: f64,
-    /// Chunk view distance, m (default: the saved setting, else 1 024 m).
+    /// Chunk view distance, m (default: the saved setting, else 512 m).
     #[arg(long)]
     view_distance: Option<f32>,
     /// Fixed local solar hour for lighting (default: real time).
