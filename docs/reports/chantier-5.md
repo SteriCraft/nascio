@@ -186,8 +186,31 @@ Limites connues :
 - **Campagne complète** (agent, release) : `cargo fmt --all -- --check` et `cargo clippy --workspace --all-targets -- -D warnings` sans remarque ; `cargo test --workspace --release` vert (33 binaires de test, aucun échec ; `prediction` 32 s, `journey` 7 s). `journey` relancé 3 fois : vert à chaque fois (marche 6,5 m, saut 1,21 m, nouveau point à 75, 215 et 220 m).
   - `write_cost_500_accounts` : `accounts.toml` de 99 Ko, sauvegarde complète 3,3 ms en médiane (2,8 à 4,0), sérialisation 1,4 ms.
   - `replication_cost_of_500_players_within_200_m` : 17,3 à 19,3 ms par tick en moyenne, meilleur tick 14,9 ms sur un fil, 2 133 o par client et par tick (inchangé).
-- **Mesure à 500 bots avec de vraies commandes** : non faite, elle demande une seconde machine pour `swarm` (voir plus bas, « Reste à faire »).
+- **Mesure à 500 bots avec de vraies commandes** : faite le 2026-11-19 sur deux machines, voir la section suivante.
 - **Spec** : la proposition ci-dessous, validée par l'auteur, est **intégrée** à `world-spec.md` le 2026-11-19 (nouvelle §8.4bis Mouvement ; aussi `fly` dans la console §8.7 et les touches du jeu connecté dans la partie client).
+
+### Mesure à 500 bots, deux machines (2026-11-19)
+- **Montage** : serveur sur cette machine (`--nogui --open-registration --bind 0.0.0.0:7787 --server-id c5-bots --data out/c5-bots/data`, world-42), `swarm --bots 500` sur une seconde machine du réseau local (Wi-Fi), même commit (88cef5e ; `main` poussé à la demande de l'auteur pour que l'autre machine l'ait). Une première tentative a échoué sur « protocol 8 (server: 12) » : l'autre machine avait `origin/main` d'avant le chantier 5.
+- **Attention à la lecture** : les p50 et p99 des lignes du serveur portent sur les **60 dernières secondes** (1 200 ticks), pas sur 10 s. Une course courte mêle la vague d'arrivées au régime établi.
+- **Course 1** (`--ramp 50`, 30 s de mesure) : 440 joueurs au plus, ≈ 400 en régime, 99 bots en `handshake timed out`. Les p99 restent figés à 46,9 ms (mouvement 6,9 ms, réplication 41 ms) : c'est la vague d'arrivées (50 connexions/s, 1 100 colonnes chargées), la fenêtre de 60 s n'en sort jamais. Lignes d'après le départ (fenêtre ≈ 40 s à 400 joueurs) : tick p99 ≈ 6 ms, mouvement p99 2,7 ms. Côté `swarm` : 425 000 datagrammes de commandes, plus grand écart d'un bot 52 ms ; 14,5 Ko/s par bot au p50, 36,7 au p99 ; 57 Mbit/s en tout.
+- **Course 2, la mesure retenue** (`--ramp 10 --duration 90`) : **460 joueurs** en régime pendant plus de 90 s, 40 bots en `handshake timed out`. Fenêtre de 60 s entièrement en régime :
+
+| | 5.3 (bots sur la même machine) | Course 2 (deux machines, 460 joueurs) |
+|---|---|---|
+| tick p50 | 3,8 à 7,4 ms | 4,4 à 4,8 ms |
+| tick p99 | 25 à 34 ms | 7,8 à 8,6 ms |
+| mouvement p99 | 2,8 à 4,7 ms | 2,85 à 2,96 ms |
+| réplication p99 | — | 3,0 à 4,1 ms |
+| pas sans commandes | la plupart | **0,5 à 0,8 %** (≈ 1 200 à 1 800 sur 235 000 par 10 s) |
+
+  - `swarm` : 1 237 000 datagrammes de commandes (≈ 20/s par bot), plus grand écart d'un bot **64 ms** ; 1 057 000 états du joueur reçus ; 5,8 Ko/s de colonnes et 2,3 Ko/s d'entités par bot (15,4 datagrammes/s), 4,9 Ko/s au p50 et 29 Ko/s au p99 ; 32 Mbit/s en tout ; 13 entités vues en moyenne (0 à 34 : les bots sont répartis sur les sites).
+  - **Aucune mort**. 114 abus pendant la course : 95 éditions hors de portée (121 refusées sur 2 467 côté `swarm`) et 19 datagrammes de commandes au-delà du seau. Les éditions hors de portée (5,2 à 8,8 m des yeux) viennent de `swarm`, qui calcule sa position sans physique : quand le serveur arrête le bot contre le relief, les deux positions divergent. Le serveur fait son travail.
+  - Colonnes de la simulation : 2 100 à 2 300 (≈ 450 Mo) sur 4 096 ; mémoire du processus 1,6 Go en fin de course.
+- **Conclusion** : avec de vraies commandes, le mouvement coûte **moins de 3 ms au p99** à 460 joueurs, sous le seuil de 5 ms : **pas de parallélisation**. Le p99 du tick tombe de 25-34 ms (5.3, CPU partagé avec les bots) à ≈ 8 ms.
+- **Points ouverts** (hors du mouvement) :
+  - **Connexions perdues en rafale** : 8 % des bots (course 2) dépassent les 10 s d'attente du `ServerHello`, même à 10 arrivées/s et avec des comptes existants ; les échecs commencent vers 220 joueurs. Hypothèse non vérifiée : la connexion par secret (Argon2id, la moitié des cœurs au plus) attend son tour derrière la génération des colonnes des bots qui marchent. À mesurer avant d'ouvrir un serveur public.
+  - **Pas appliqués ≈ 85 % du temps réel** (235 000 par 10 s pour 276 000 attendus à 460 joueurs) alors que les bots envoient bien 60 commandes/s. Hypothèse : des commandes en attente d'une colonne inconnue du serveur (les bots marchent à 4 m/s vers du terrain neuf). Les tests `prediction` et `journey` (0 correction en marchant) ne voient pas d'écart avec un vrai client.
+  - Après l'arrêt de `swarm`, 107 comptes restent 30 s sans `Bye` et le serveur comble leurs pas (limite connue).
 
 ### Proposition de texte pour la spec (validée, intégrée)
 - **§8.1**, 2ᵉ point : « `PROTOCOL_VERSION` vaut **12** (…). Le client (`nascio-client`) ne dépend que de `nascio-core`, `nascio-chunk`, `nascio-physics` et `nascio-protocol`. » 3ᵉ point : « des datagrammes non fiables pour les états des entités, les commandes du joueur et son état autoritaire, chacun précédé d'un octet de type (serveur : 0 entités, 1 état du joueur ; client : 0 commandes). »
