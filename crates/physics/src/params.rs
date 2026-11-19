@@ -50,7 +50,7 @@ impl Default for PlayerParams {
             crouch_speed: 1.3,
             ground_accel: 50.0,
             air_accel: 10.0,
-            gravity: 9.81,
+            gravity: 28.0,
             jump_height: 1.25,
             max_fall_speed: 60.0,
             step_height: 0.5,

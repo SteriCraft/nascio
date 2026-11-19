@@ -382,7 +382,7 @@ fn trajectory_is_deterministic() {
     assert_eq!(h, TRAJECTORY_HASH, "{h:#018x}");
 }
 
-const TRAJECTORY_HASH: u64 = 0xc719_0387_5710_3832;
+const TRAJECTORY_HASH: u64 = 0xec81_fcd1_c791_6b81;
 
 /// A periodic scene (period 20 divides `WORLD_SIZE`): stone pillars on a grid.
 struct Pillars;
