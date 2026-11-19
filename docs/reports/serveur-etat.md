@@ -1,5 +1,7 @@
 # État du travail — Phase « Serveur et réseau »
 
+> **Historique figé au 2026-11-18** (chantier 5 en cours). L'état courant est dans `docs/roadmap-serveur.md` (jalons, chantiers clos, « Reste à faire ») et les limites dans `docs/limites.md`.
+
 À relire après chaque compactage, avec `CLAUDE.md` et `docs/roadmap-serveur.md`.
 
 **Consignes de la nuit (2026-11-18)** : étapes dans l'ordre (C0, S0, S1, S2…) ; décisions dans `decisions.md` (raison + alternative écartée) ; rapport court `docs/reports/serveur-<étape>.md` par étape ; un commit par étape, **pas de push** ; spec inchangée (texte proposé dans `docs/reports/spec-proposee.md`) ; ne pas décider ce qui touche au gameplay, aux invariants de `CLAUDE.md` ou à `generator_version` (le noter, continuer) ; tests verts avant l'étape suivante ; ce fichier à jour à chaque commit. Le matin : synthèse de tous les rapports. Reprise automatique prévue à 2 h 15 (tâche de session).

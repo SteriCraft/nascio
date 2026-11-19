@@ -239,12 +239,4 @@ Limites connues :
 - 460 joueurs avec de vraies commandes, bots sur une seconde machine : mouvement p99 2,85 à 2,96 ms, tick p50 ≈ 4,7 ms et p99 ≈ 8 ms, 0,5 à 0,8 % de pas sans commandes ; aucune parallélisation nécessaire.
 - Réplication de 500 joueurs dans 200 m (test ignoré) : 17 à 19 ms par tick, 2 133 o par client et par tick ; sauvegarde des 500 comptes 3,3 ms.
 
-**Limites restantes.**
-- Le statut d'administrateur n'est lu qu'à la connexion : un `admin` donné en console ne vaut qu'à la reconnexion.
-- Le panneau F3 n'a pas la souris pendant le jeu connecté (souris capturée) ; Échap la libère.
-- Un client qui plante n'envoie pas `Bye` : le serveur garde le compte 30 s (« already connected ») et comble ses pas.
-- La vitesse de vol affichée (molette) n'est pas plafonnée à `fly_max_speed` ; la physique la plafonne.
-- `DeviceLost` (Vulkan) vu une fois sur quatre lancements du visualiseur, cause non établie.
-- Pendant une arrivée en masse, 8 % des connexions dépassent les 10 s d'attente du `ServerHello` (hypothèse : hachage Argon2id derrière la génération des colonnes), et `swarm` ne voit appliquer qu'≈ 85 % de ses pas (hypothèse : commandes en attente de terrain neuf) ; à mesurer avant un serveur public.
-- `swarm` calcule sa position sans physique : ses éditions sont parfois refusées pour portée.
-- La spec dit encore « couleurs par bloc (les textures viendront plus tard) » dans le mode 3D, hors de ce chantier.
+**Limites restantes** : tenues à jour dans `docs/limites.md` (L4 à L6, L9 à L13) ; les travaux qui en découlent sont dans `docs/roadmap-serveur.md`, « Reste à faire ».

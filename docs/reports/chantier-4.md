@@ -87,9 +87,7 @@ Les étapes 2 (protocole) et 3 (serveur) du plan sont regroupées : les volumes 
 - `CLAUDE.md` : commandes du client (menu sans monde, `--fly` avec monde) ; `serveur-etat.md` à jour.
 
 ## À vérifier par l'auteur (après le chantier 5)
-- Rien n'a été lancé à part la mesure `netbench horizon`. Tests écrits mais pas lancés : `crates/voxel/tests/horizon.rs`, `crates/protocol/tests/no_geology.rs`, ainsi que les tests unitaires des codecs. Les tests du serveur (`edit`, `mesh`, `entities`…) passent par `nascio-client`, qui lit maintenant l'octet de type : à relancer.
-- À l'écran, en `--fly` puis en réseau : l'horizon est-il identique à l'ancien ? Attendus : couleurs en sRGB 8 bits, centre non replié. Vérifier aussi la couture, le ciel en 125² (neige saisonnière, nuages un peu plus flous), le sol lointain, et une seconde connexion qui doit lire le cache sans rien télécharger.
-- Un client lancé hors du dépôt (`.exe` copié ailleurs) doit se connecter sans dossier de monde.
+Les tests sont passés (section suivante). Les essais à l'écran restants sont dans `docs/roadmap-serveur.md`, « Reste à faire ».
 
 ## Tests (2026-11-18, avant le chantier 5)
 - `cargo test --workspace` : tout passe du premier coup, y compris `crates/voxel/tests/horizon.rs` (2), `crates/protocol/tests/no_geology.rs` (3), les codecs du protocole (19 tests unitaires) et les tests du serveur (`edit`, `mesh`, `entities`, `security`, `spawn`, `accounts`). Aucune correction n'a été nécessaire.

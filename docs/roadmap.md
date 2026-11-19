@@ -133,5 +133,12 @@ Audit complet du projet par Fable, à partir des derniers benchmarks du PC Windo
 - banc du visualiseur `bench/default.toml` (1920×1080, 25 700 images) : moyenne 3,84 ms (260 i/s), p95 6,07 ms, p99 8,00 ms, 1 % low 97,6 i/s, 4 images au-delà de 16,7 ms ; CPU 2,46 ms, GPU 1,17 ms en moyenne. Une première passe, perturbée par des blocages périodiques extérieurs au banc, donnait la même charge CPU et GPU (2,52 et 1,20 ms) mais un p95 de 16,18 ms : elle est écartée ;
 - le portable Linux (RTX 3050 Mobile) sera re-mesuré plus tard, à la demande de l'auteur.
 
+## Reste à faire (phase « Monde »)
+Les limites détaillées sont dans `docs/limites.md` (numéros L…). Cocher ou retirer une ligne quand elle est faite.
+- [ ] Banc complet sur le portable Linux (RTX 3050 Mobile), aurores comprises (L8, `rapport-audit-M7.md` §9).
+- [ ] Au prochain changement de format du monde : le feuillage devient une propriété de `blocks.toml` (L3).
+- [ ] Spec, mode 3D : décrire les textures des blocs (la spec dit encore « les textures viendront plus tard ») ; règles des faces et teintes dans un fichier TOML (L7).
+- [ ] Tuiles d'horizon invalidées par région éditée, si de grands chantiers des joueurs doivent se voir de loin (L1).
+
 ---
 Ensuite vient la **Phase « Serveur et réseau »**, suivie dans sa propre feuille de route, `roadmap-serveur.md` (jalons C0 à S7, puis les chantiers ; chantier 5, mouvement autoritaire, clos le 2026-11-19).

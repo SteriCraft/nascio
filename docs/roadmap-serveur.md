@@ -42,3 +42,21 @@ Comptes (argon2), limites de débit, contrôles de portée et de vitesse, consol
 Le serveur simule les joueurs (crate `nascio-physics` partagée), le client prédit et réconcilie, le visualiseur connecté marche, nage, court, vole (administrateurs) et meurt ; spec §8.4bis. Rapport : `docs/reports/chantier-5.md`.
 - Commits : 27080e1 (5.1 physique), 31b7f47 (5.2 protocole v9), bc14176 (5.3 serveur, v10), 40679c5 (5.3bis dernière position, expulsion, point obstrué), e58749b et 7530464 (5.4 prédiction, v11, renumérotation), 9c502f8 (5.5 visualiseur), b461e05 (vol par double Espace, v12), 0083c5a (5.6 tests de bout en bout), 88cef5e (spec), 3ce27eb (mesure à 500 bots).
 - **Validation** : tests `movement`, `rules`, `arrival`, `prediction` et `journey` verts (marche sans correction, saut de 1,21 m, portée de 5 m, mort et réapparition, nouveau tirage d'un point obstrué) ; 460 joueurs avec de vraies commandes depuis une seconde machine : mouvement p99 < 3 ms, tick p99 ≈ 8 ms, 0,5 à 0,8 % de pas sans commandes.
+
+## Reste à faire
+Les limites détaillées sont dans `docs/limites.md` (numéros L…). Cocher ou retirer une ligne quand elle est faite.
+
+**Essais de l'auteur** (reportés après le chantier 5) :
+- [ ] Chantier 4 : à l'écran, en `--fly` puis en réseau, horizon identique à l'ancien et sans couture, ciel en 125², sol lointain ; un client lancé hors du dépôt (`.exe` copié ailleurs) se connecte sans dossier de monde. Le cache disque est déjà vérifié par un test.
+- [ ] Chantier « Interfaces » : fenêtre du serveur (carte, console, graphiques, joueurs, bannis), boîte de démarrage, menu du client, scan du réseau local, chat, paramètres et menu en jeu.
+
+**Avant un serveur public** :
+- [ ] Mesurer et corriger les échecs de connexion pendant une arrivée en masse (L11).
+- [ ] Remplacer la confiance au premier usage du certificat (L14).
+- [ ] Confirmer les hypothèses de travail du début de ce fichier (hébergement, fenêtre de perte, cible de charge).
+
+**Améliorations repérées** :
+- [ ] Statut d'administrateur pris en compte sans reconnexion (L9).
+- [ ] `swarm` avec la physique des joueurs, pour expliquer les pas manquants (L12, L13).
+- [ ] Cache disque des colonnes dans le client (L16).
+- [ ] Libérer plus vite le compte d'un client qui a planté (L10).

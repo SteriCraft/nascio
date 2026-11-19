@@ -8,6 +8,8 @@ Réversibilité :
 - **migration** : un format sur disque change, et il faut convertir les fichiers existants ;
 - **générateur** : il faut incrémenter `generator_version`, et le monde de référence change.
 
+> **Clos (2026-11-19)** : les points ci-dessous ont été tranchés depuis (gisements G1 à G3 validés et version 20 figée ; `Move` retiré au chantier 5 ; spec §5 et §8 intégrées le 2026-11-18). Le seul reste, l'adresse d'écoute par défaut, est une note de déploiement dans `docs/limites.md`.
+
 ## 1. À faire valider
 
 Ces décisions touchent au protocole, aux formats sur disque, à la sécurité, ou au contenu du futur monde de référence. Tu ne les as pas validées une par une.

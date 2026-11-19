@@ -9,7 +9,8 @@ Documents de référence, à lire avant toute tâche importante :
 - `docs/vision.md` : l'intention du projet ;
 - `docs/world-spec.md` : la spécification technique du monde, **qui fait autorité** ;
 - `docs/roadmap.md` : les jalons et leurs critères de validation ;
-- `docs/decisions.md` : le journal des décisions, à compléter à chaque décision structurante.
+- `docs/decisions.md` : le journal des décisions, à compléter à chaque décision structurante ;
+- `docs/limites.md` : les limites connues (numérotées L…), auxquelles renvoient les sections « Reste à faire » de `roadmap.md` et `roadmap-serveur.md`.
 
 ## Langues
 - Code, identifiants, noms de crates, messages de commit : **anglais**.
