@@ -108,9 +108,13 @@ pub fn quantize_height(h: f64) -> f32 {
     ((h * HEIGHT_STEPS).round() / HEIGHT_STEPS) as f32
 }
 
-/// Brightness of distant water over a `depth` m deep bottom (opaque water: darker deeper).
-pub fn water_shade(depth: f64) -> f32 {
-    1.15 - 0.75 * nascio_core::math::smoothstep(0.0, 400.0, depth) as f32
+/// Linear colour of distant water `depth` m deep over a bottom of linear colour `bed`: the
+/// chunks' translucent water ([`crate::mesh::water_alpha`], [`crate::mesh::water_shade`]) laid
+/// over its bottom, so that the horizon meets the chunks without a step.
+pub fn water_color(water: [f32; 3], bed: [f32; 3], depth: f64) -> [f32; 3] {
+    let alpha = crate::mesh::water_alpha(depth.round().clamp(1.0, 255.0) as u8);
+    let k = crate::mesh::water_shade(alpha);
+    [0, 1, 2].map(|i| water[i] * k * alpha + bed[i] * (1.0 - alpha))
 }
 
 /// Linear colour component to an sRGB byte.

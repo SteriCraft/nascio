@@ -67,6 +67,23 @@ impl PlantKind {
         self == PlantKind::Spruce
     }
 
+    /// Part seen from above, which colours the far ground.
+    pub fn crown_part(self) -> Part {
+        match self {
+            PlantKind::Spruce => Part::Leaves,
+            PlantKind::Cactus => Part::Cactus,
+        }
+    }
+
+    /// Columns the model covers seen from above, and its height, blocks.
+    pub fn footprint(self) -> (usize, i32) {
+        let p = self.parts();
+        let mut cols: Vec<(i32, i32)> = p.iter().map(|q| (q.0, q.2)).collect();
+        cols.sort_unstable();
+        cols.dedup();
+        (cols.len(), p.iter().map(|q| q.1 + 1).max().unwrap_or(0))
+    }
+
     /// Blocks of the model: `(dx, dy, dz, part)`, `dy = 0` on the block above the ground.
     pub fn parts(self) -> Vec<(i32, i32, i32, Part)> {
         let mut v = Vec::new();
@@ -160,6 +177,8 @@ mod tests {
                 assert!(dy > 6);
             }
         }
+        assert_eq!(PlantKind::Spruce.footprint(), (21, 9));
+        assert_eq!(PlantKind::Cactus.footprint(), (1, 3));
         let mut keys: Vec<_> = p.iter().map(|q| (q.0, q.1, q.2)).collect();
         keys.sort_unstable();
         keys.dedup();

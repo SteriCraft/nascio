@@ -2,7 +2,8 @@
 //!
 //! Planar layout, then zstd: key (level, i, j as zigzag varints), heights in 1/16 m as varint
 //! differences from the previous vertex, water levels likewise, one surface byte per vertex,
-//! then the colour of each ground vertex as byte differences from the previous ground colour.
+//! then the colour of each ground or water vertex (the bottom's, under water) as byte
+//! differences from the previous one; ice vertices carry no colour.
 
 use anyhow::{Context, bail, ensure};
 use nascio_chunk::horizon::{
@@ -12,7 +13,7 @@ use nascio_chunk::horizon::{
 use crate::varint::{Reader, put_i};
 
 /// Version of the tile encoding (part of the client's cache paths).
-pub const TILE_FORMAT: u32 = 1;
+pub const TILE_FORMAT: u32 = 2;
 /// Largest compressed or decompressed tile accepted.
 pub const MAX_TILE_BYTES: usize = 64 << 10;
 /// Tiles a client may ask in one message.
@@ -45,11 +46,16 @@ pub fn encode_tile(t: &HorizonTile) -> anyhow::Result<Vec<u8>> {
     }
     out.extend(t.vertices.iter().map(|v| v.surface as u8));
     let mut prev = [0u8; 3];
-    for v in t.vertices.iter().filter(|v| v.surface == Surface::Ground) {
+    for v in t.vertices.iter().filter(|v| has_color(v.surface)) {
         out.extend((0..3).map(|c| v.color[c].wrapping_sub(prev[c])));
         prev = v.color;
     }
     Ok(zstd::bulk::compress(&out, ZSTD_LEVEL)?)
+}
+
+/// Whether a vertex of this surface carries a colour (ice takes the block table's).
+fn has_color(s: Surface) -> bool {
+    s != Surface::Ice
 }
 
 /// Decompresses and decodes a tile, checking every field.
@@ -88,7 +94,7 @@ pub fn decode_tile(bytes: &[u8]) -> anyhow::Result<HorizonTile> {
     let mut prev = [0u8; 3];
     let mut vertices = Vec::with_capacity(n);
     for k in 0..n {
-        let color = if surfaces[k] == Surface::Ground {
+        let color = if has_color(surfaces[k]) {
             let d = r.take(3)?;
             prev = [0, 1, 2].map(|c| prev[c].wrapping_add(d[c]));
             prev
@@ -127,7 +133,7 @@ mod tests {
                     height,
                     water,
                     surface,
-                    color: if surface == Surface::Ground {
+                    color: if surface != Surface::Ice {
                         [(k % 256) as u8, 200, (255 - k % 256) as u8]
                     } else {
                         [0; 3]

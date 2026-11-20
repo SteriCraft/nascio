@@ -6,7 +6,7 @@
 
 use nascio_chunk::horizon::{
     HorizonTile, HorizonVertex, Surface, TILE, TileKey, linear_to_srgb8, quantize_height, spacing,
-    water_shade,
+    water_color,
 };
 use nascio_core::consts::WORLD_SIZE_F64;
 use nascio_core::fmath::DetMath;
@@ -47,28 +47,35 @@ pub fn horizon_tile(terrain: &Terrain, key: TileKey) -> HorizonTile {
             let raw = at(a, b);
             // Sea and lakes only: the coarse surface has no river channels.
             let water = terrain.water_level(x, z).round() as f32;
-            let (surface, color) = if raw < water {
+            let dx = f64::from(at(a + 1, b) - at(a - 1, b)) / (2.0 * s);
+            let dz = f64::from(at(a, b + 1) - at(a, b - 1)) / (2.0 * s);
+            let (surface, color, rise) = if raw < water {
                 if terrain.water_frozen(&terrain.climate(x, z)) {
-                    (Surface::Ice, [0; 3])
+                    (Surface::Ice, [0; 3], 0.0)
                 } else {
-                    (Surface::Water, [0; 3])
+                    // The bottom's colour: the client lays the water over it by depth.
+                    let bed = terrain.top_block(
+                        wrap(x.floor() as i32),
+                        wrap(z.floor() as i32),
+                        raw.floor() as i32,
+                        dx.det_hypot(dz),
+                    );
+                    let c = terrain.surface_color(bed, x, z, f64::from(raw));
+                    (Surface::Water, c.map(linear_to_srgb8), 0.0)
                 }
             } else {
-                let dx = f64::from(at(a + 1, b) - at(a - 1, b)) / (2.0 * s);
-                let dz = f64::from(at(a, b + 1) - at(a, b - 1)) / (2.0 * s);
                 // Beaches are too thin to show at horizon scale.
                 let top = (raw.floor() as i32).max(beach);
-                let block = terrain.top_block(
-                    wrap(x.floor() as i32),
-                    wrap(z.floor() as i32),
-                    top,
-                    dx.det_hypot(dz),
-                );
-                let c = terrain.surface_color(block, x, z, f64::from(raw));
-                (Surface::Ground, c.map(linear_to_srgb8))
+                let (c, rise) = terrain.far_ground(x, z, top, f64::from(raw), dx.det_hypot(dz));
+                (Surface::Ground, c.map(linear_to_srgb8), rise)
             };
             vertices.push(HorizonVertex {
-                height: raw,
+                // Ground vertices rise over the plants' crowns (relief of the canopy).
+                height: if rise > 0.0 {
+                    quantize_height(f64::from(raw) + rise)
+                } else {
+                    raw
+                },
                 water,
                 surface,
                 color,
@@ -94,24 +101,25 @@ pub fn ground_colors(terrain: &Terrain, res: usize) -> Vec<u8> {
                 let h = terrain.height_lod(x, z, cell);
                 let wl = terrain.water_level(x, z);
                 let frozen = h < wl && terrain.water_frozen(&terrain.climate(x, z));
+                let dx =
+                    terrain.height_lod(x + cell, z, cell) - terrain.height_lod(x - cell, z, cell);
+                let dz =
+                    terrain.height_lod(x, z + cell, cell) - terrain.height_lod(x, z - cell, cell);
                 let c = if frozen {
                     blocks.linear(blocks.ids.ice.unwrap_or(blocks.ids.water))
                 } else if h < wl {
-                    let k = water_shade(wl - h);
-                    [water[0] * k, water[1] * k, water[2] * k]
-                } else {
-                    let dx = terrain.height_lod(x + cell, z, cell)
-                        - terrain.height_lod(x - cell, z, cell);
-                    let dz = terrain.height_lod(x, z + cell, cell)
-                        - terrain.height_lod(x, z - cell, cell);
-                    let top = (h.floor() as i32).max(terrain.config().beach_high_m + 1);
-                    let block = terrain.top_block(
+                    let bed = terrain.top_block(
                         wrap(x.floor() as i32),
                         wrap(z.floor() as i32),
-                        top,
+                        h.floor() as i32,
                         dx.det_hypot(dz) / (2.0 * cell),
                     );
-                    terrain.surface_color(block, x, z, h)
+                    water_color(water, terrain.surface_color(bed, x, z, h), wl - h)
+                } else {
+                    let top = (h.floor() as i32).max(terrain.config().beach_high_m + 1);
+                    terrain
+                        .far_ground(x, z, top, h, dx.det_hypot(dz) / (2.0 * cell))
+                        .0
                 };
                 row.extend(c.map(linear_to_srgb8));
             }

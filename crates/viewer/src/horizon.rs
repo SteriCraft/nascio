@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::prelude::*;
-use nascio_chunk::horizon::{BASE_SPACING_M, HorizonVertex, Surface, TileKey, water_shade};
+use nascio_chunk::horizon::{BASE_SPACING_M, HorizonVertex, Surface, TileKey, water_color};
 use nascio_core::consts::{CHUNK_SIZE, CHUNKS_PER_AXIS, WORLD_SIZE_F64};
 use nascio_core::torus::wrap_f64;
 use nascio_voxel::mesh::{MATERIAL_GROUND, MATERIAL_WATER, MeshData, NO_TEXTURE};
@@ -376,10 +376,13 @@ fn build_level(
             let color = match vx.surface {
                 Surface::Ice => [colors.ice[0], colors.ice[1], colors.ice[2], 1.0],
                 Surface::Water => {
-                    let k = water_shade(f64::from(vx.water - vx.height));
-                    // Opaque water: the colour above already darkens it with the depth.
+                    // Opaque water: its colour lays the water over the bottom's by depth.
+                    let bed = vx
+                        .color
+                        .map(|c| nascio_chunk::block::srgb_to_linear(f32::from(c) / 255.0));
+                    let c = water_color(water, bed, f64::from(vx.water - vx.height));
                     material = [MATERIAL_WATER, NO_TEXTURE];
-                    [water[0] * k, water[1] * k, water[2] * k, 1.0]
+                    [c[0], c[1], c[2], 1.0]
                 }
                 Surface::Ground => {
                     let c = vx

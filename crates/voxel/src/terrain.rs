@@ -131,6 +131,13 @@ pub struct VoxelConfig {
     pub plant_cell_m: i32,
     /// Plants of each biome (`[[voxel.vegetation]]`); biomes not listed have none.
     pub vegetation: Vec<BiomePlants>,
+    /// Far ground (horizon tiles, far colours): the expected cover seen from above is
+    /// multiplied by this (seen from afar, at a grazing angle, crowns hide more ground).
+    pub far_canopy_gain: f64,
+    /// Far ground: brightness of the crowns' colour (self-shadowing of the foliage).
+    pub far_canopy_shade: f64,
+    /// Far ground: horizon tiles rise by this share of the mean plant height × cover.
+    pub far_canopy_relief: f64,
     /// Each column reads its biome this far (at most, triangular draw per axis) from its
     /// centre: biome boundaries become a mixed fringe (soils, plant density), m.
     pub biome_dither_m: f64,
@@ -280,6 +287,9 @@ impl Default for VoxelConfig {
             plant_max_slope: 0.7,
             plant_cell_m: 5,
             vegetation: default_vegetation(),
+            far_canopy_gain: 3.0,
+            far_canopy_shade: 0.5,
+            far_canopy_relief: 1.0,
             biome_dither_m: 64.0,
             delta_palette_above: crate::delta::DEFAULT_PALETTE_ABOVE,
         }
@@ -976,10 +986,93 @@ impl Terrain {
     /// included (horizon colours).
     pub fn top_block(&self, x: i32, z: i32, top: i32, slope: f64) -> BlockId {
         let col = self.column_geo(f64::from(x) + 0.5, f64::from(z) + 0.5);
-        if let Some(l) = self.snow_layer(&col, top, slope) {
+        self.top_block_of(&col, x, z, top, slope)
+    }
+
+    fn top_block_of(&self, col: &ColumnGeo, x: i32, z: i32, top: i32, slope: f64) -> BlockId {
+        if let Some(l) = self.snow_layer(col, top, slope) {
             return l;
         }
-        self.rock_block(&col, x, z, top, slope, i32::MIN / 2, 0).0
+        self.rock_block(col, x, z, top, slope, i32::MIN / 2, 0).0
+    }
+
+    /// The far ground at `(x, z)` (world metres), surface height `h`, top block at `top`:
+    /// colour of the top block mixed with the plants' crowns by their expected cover, and how
+    /// far the horizon tiles rise over the crowns, m.
+    pub fn far_ground(&self, x: f64, z: f64, top: i32, h: f64, slope: f64) -> ([f32; 3], f64) {
+        let (xi, zi) = (
+            nascio_core::torus::wrap(x.floor() as i32),
+            nascio_core::torus::wrap(z.floor() as i32),
+        );
+        let col = self.column_geo(f64::from(xi) + 0.5, f64::from(zi) + 0.5);
+        let ground = self.surface_color(self.top_block_of(&col, xi, zi, top, slope), x, z, h);
+        let (cover, crown, height) = self.canopy(&col, x, z, h.floor() as i32, slope);
+        let cover = (cover * self.cfg.far_canopy_gain).min(1.0);
+        let (c, shade) = (cover as f32, self.cfg.far_canopy_shade as f32);
+        (
+            [0, 1, 2].map(|i| ground[i] * (1.0 - c) + crown[i] * shade * c),
+            self.cfg.far_canopy_relief * height * cover,
+        )
+    }
+
+    /// Expected plant cover seen from above at `(x, z)`, ground top block at `top`, without
+    /// drawing the plants: `(cover in [0, 1], mean crown colour, mean plant height)`. The same
+    /// ground rules as [`Self::plant_at`]; the models of a biome are drawn evenly.
+    fn canopy(
+        &self,
+        col: &ColumnGeo,
+        x: f64,
+        z: f64,
+        top: i32,
+        slope: f64,
+    ) -> (f64, [f32; 3], f64) {
+        let none = (0.0, [0.0; 3], 0.0);
+        let (density, kinds) = &self.plants[usize::from(col.biome).min(biomes::code::COUNT - 1)];
+        if *density <= 0.0 || kinds.is_empty() || col.river || self.blocks.ids.spruce_log.is_none()
+        {
+            return none;
+        }
+        if top <= self.cfg.beach_high_m || self.water_top(x, z) > top + 1 {
+            return none;
+        }
+        if slope > self.cfg.plant_max_slope || self.glacier(col, top, slope).is_some() {
+            return none;
+        }
+        let soil = self.soil(col, top, slope);
+        if soil.depth == 0 {
+            return none;
+        }
+        let ids = &self.blocks.ids;
+        let trees_ok = ![ids.sand, ids.gravel].contains(&soil.top)
+            && self.t_warm(&col.climate, top) >= self.cfg.tree_line_warm_c;
+        let (mut area, mut color, mut height) = (0.0, [0.0f32; 3], 0.0);
+        for &k in kinds {
+            let ok = if k.is_tree() {
+                trees_ok
+            } else {
+                soil.top == ids.sand
+            };
+            let Some(block) = self.part_block(k.crown_part()).filter(|_| ok) else {
+                continue;
+            };
+            let (a, h) = k.footprint();
+            let a = a as f64;
+            let rgb = self.blocks.linear(block);
+            area += a;
+            height += a * f64::from(h);
+            for i in 0..3 {
+                color[i] += a as f32 * rgb[i];
+            }
+        }
+        if area <= 0.0 {
+            return none;
+        }
+        let cell = f64::from(self.plant_cell());
+        (
+            (density * area / kinds.len() as f64 / (cell * cell)).min(1.0),
+            color.map(|c| c / area as f32),
+            height / area,
+        )
     }
 }
 
@@ -1202,5 +1295,57 @@ pub(crate) mod tests {
             let b = t.height(x + f64::from(kx) * WORLD_SIZE_F64, z + f64::from(kz) * WORLD_SIZE_F64);
             prop_assert!((a - b).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn far_ground_cover_is_bounded() {
+        use nascio_core::torus::wrap;
+        let t = test_terrain();
+        let cfg0 = VoxelConfig {
+            far_canopy_gain: 0.0,
+            ..Default::default()
+        };
+        let t0 = Terrain::from_world(&test_world(), cfg0).unwrap();
+        let relief = VoxelConfig::default().far_canopy_relief;
+        let mut raised = 0;
+        let mut sampled = 0;
+        for i in 0..40 {
+            for j in 0..40 {
+                let fx = |k: i32| match k {
+                    0 => 0.0,
+                    39 => WORLD_SIZE_F64 - 0.5,
+                    k => f64::from(k) * WORLD_SIZE_F64 / 40.0 + 13.3,
+                };
+                let (x, z) = (fx(i), fx(j));
+                let h = t.height(x, z);
+                if h < t.water_level(x, z) {
+                    continue;
+                }
+                sampled += 1;
+                let top = h.floor() as i32;
+                let (c, rise) = t.far_ground(x, z, top, h, 0.0);
+                for v in c {
+                    assert!(
+                        v.is_finite() && (0.0..=1.5).contains(&v),
+                        "{c:?} at {x} {z}"
+                    );
+                }
+                assert!(
+                    (0.0..=9.0 * relief).contains(&rise),
+                    "rise {rise} at {x} {z}"
+                );
+                if rise > 0.0 {
+                    raised += 1;
+                }
+                let (c0, rise0) = t0.far_ground(x, z, top, h, 0.0);
+                let (xi, zi) = (wrap(x.floor() as i32), wrap(z.floor() as i32));
+                let col = t0.column_geo(f64::from(xi) + 0.5, f64::from(zi) + 0.5);
+                let block = t0.top_block_of(&col, xi, zi, top, 0.0);
+                assert_eq!(c0, t0.surface_color(block, x, z, h));
+                assert_eq!(rise0, 0.0);
+            }
+        }
+        assert!(sampled > 0, "no ground sampled");
+        assert!(raised > 0, "no sampled point has plants");
     }
 }
