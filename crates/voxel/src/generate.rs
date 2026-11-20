@@ -13,7 +13,7 @@ use crate::block::{AIR, BlockId};
 use crate::chunk::{Chunk, ChunkDeltas, NP, PaddedChunk};
 use crate::geology::{ColumnGeo, wrap};
 use crate::terrain::{RockColumn, Terrain};
-use crate::vegetation::{MAX_RADIUS, Part, PlantKind};
+use crate::vegetation::{Part, rotate};
 use nascio_world::deposits::Body;
 
 /// Columns stored around a chunk column: local `-2..=33` (one more than the padded border, for
@@ -37,8 +37,8 @@ pub struct ColumnSet {
     geos: Vec<ColumnGeo>,
     /// Ore bodies that may reach the column.
     bodies: Vec<Body>,
-    /// Plant blocks `(y, part)` above the ground of each column, local `-1..=32`.
-    plants: Vec<Vec<(i32, Part)>>,
+    /// Plant blocks `(y, part, block)` above the ground of each column, local `-1..=32`.
+    plants: Vec<Vec<(i32, Part, BlockId)>>,
     /// Highest plant block (`i32::MIN`: none).
     plant_top: i32,
 }
@@ -83,11 +83,10 @@ impl ColumnSet {
             f64::from(CHUNK_SIZE + 4),
         );
         // Plants of the column and its border, overhanging ones included. Where two overlap, the
-        // higher part wins (cactus, then log, then leaves).
+        // trunk wins over the leaves.
         let mut plants = vec![Vec::new(); NP * NP];
         let mut plant_top = i32::MIN;
-        let shapes = PlantKind::ALL.map(PlantKind::parts);
-        let r = MAX_RADIUS;
+        let r = terrain.plant_reach();
         let found = terrain.plants_in(
             ox - 1 - r,
             oz - 1 - r,
@@ -95,11 +94,9 @@ impl ColumnSet {
             oz + CHUNK_SIZE + r,
         );
         for p in found {
-            let shape = &shapes[PlantKind::ALL
-                .iter()
-                .position(|k| *k == p.kind)
-                .unwrap_or(0)];
-            for &(dx, dy, dz, part) in shape {
+            let (species, model) = terrain.plant_model(&p);
+            for &(dx, dy, dz, part) in model {
+                let (dx, dz) = rotate(dx, dz, p.rot, species.trunk_width);
                 let (lx, lz) = (p.x + dx - ox, p.z + dz - oz);
                 if !(-1..=CHUNK_SIZE).contains(&lx) || !(-1..=CHUNK_SIZE).contains(&lz) {
                     continue;
@@ -109,10 +106,12 @@ impl ColumnSet {
                 if y <= tops[k] {
                     continue;
                 }
-                let cell: &mut Vec<(i32, Part)> = &mut plants[k];
+                let cell: &mut Vec<(i32, Part, BlockId)> = &mut plants[k];
+                let block = species.block(part);
                 match cell.iter_mut().find(|e| e.0 == y) {
-                    Some(e) => e.1 = e.1.max(part),
-                    None => cell.push((y, part)),
+                    Some(e) if part > e.1 => *e = (y, part, block),
+                    Some(_) => {}
+                    None => cell.push((y, part, block)),
                 }
                 plant_top = plant_top.max(y);
             }
@@ -252,8 +251,7 @@ impl ColumnSet {
                 return terrain.water_block(self.geo(x, z), y, water_top);
             }
             if y <= self.plant_top
-                && let Some(&(_, part)) = self.plants[Self::k(x, z)].iter().find(|e| e.0 == y)
-                && let Some(b) = terrain.part_block(part)
+                && let Some(&(_, _, b)) = self.plants[Self::k(x, z)].iter().find(|e| e.0 == y)
             {
                 return b;
             }
@@ -514,7 +512,8 @@ mod tests {
                     assert_eq!(p.base, col.top(lx, lz) + 1);
                     assert!(col.water_top(lx, lz) <= p.base);
                     assert_eq!(col.block(&t, lx, p.base, lz), log);
-                    assert_eq!(col.block(&t, lx, p.base + 6, lz), log);
+                    assert_eq!(col.block(&t, lx, p.base + p.height - 3, lz), log);
+                    assert!((17..=31).contains(&p.height), "{p:?}");
                     n += 1;
                 }
             }

@@ -21,7 +21,10 @@ use crate::block::{BlockId, Blocks, srgb_to_linear};
 use crate::climate::{ColumnClimate, SurfaceClimate};
 use crate::geology::{Class, ColumnGeo, Geology, RockNoise};
 use crate::rivers::{Gauge, RiverHit, RiverParams, Rivers};
-use crate::vegetation::{BiomePlants, Part, Plant, PlantKind, cell_draw, default_vegetation};
+use crate::vegetation::{
+    BiomePlants, ModelBlock, Plant, Species, SpeciesModels, cell_draw, default_species,
+    default_vegetation,
+};
 pub use nascio_chunk::ChunkTint;
 use nascio_core::consts::WORLD_SIZE;
 use nascio_world::erosion::flow::NO_DIR;
@@ -127,8 +130,10 @@ pub struct VoxelConfig {
     /// Plants grow on slopes up to this, m/m.
     pub plant_max_slope: f64,
     /// Side of the vegetation cells (at most one plant each), m; divides `WORLD_SIZE`, at
-    /// least 3 (one block between trunks).
+    /// least the widest trunk + 2 (one block between trunks).
     pub plant_cell_m: i32,
+    /// Plant species (`[[voxel.species]]`); one whose blocks are missing is dropped.
+    pub species: Vec<Species>,
     /// Plants of each biome (`[[voxel.vegetation]]`); biomes not listed have none.
     pub vegetation: Vec<BiomePlants>,
     /// Far ground (horizon tiles, far colours): the expected cover seen from above is
@@ -284,6 +289,7 @@ impl Default for VoxelConfig {
             tree_line_warm_c: 10.0,
             plant_max_slope: 0.7,
             plant_cell_m: 5,
+            species: default_species(),
             vegetation: default_vegetation(),
             far_canopy_gain: 3.0,
             far_canopy_shade: 0.5,
@@ -324,8 +330,11 @@ impl VoxelConfig {
     }
 }
 
-/// Plant table indexed by biome code: `(density, models)`.
-fn resolve_plants(cfg: &VoxelConfig) -> [(f64, Vec<PlantKind>); biomes::code::COUNT] {
+/// Plant table indexed by biome code: `(density, species indices)`.
+fn resolve_plants(
+    cfg: &VoxelConfig,
+    species: &[SpeciesModels],
+) -> [(f64, Vec<u16>); biomes::code::COUNT] {
     std::array::from_fn(|b| {
         cfg.vegetation
             .iter()
@@ -334,11 +343,21 @@ fn resolve_plants(cfg: &VoxelConfig) -> [(f64, Vec<PlantKind>); biomes::code::CO
                 let kinds: Vec<_> = v
                     .plants
                     .iter()
-                    .filter_map(|n| PlantKind::from_name(n))
+                    .filter_map(|n| species.iter().position(|s| s.name == *n))
+                    .map(|k| k as u16)
                     .collect();
                 (v.density.clamp(0.0, 1.0), kinds)
             })
     })
+}
+
+/// The species of `cfg` whose blocks exist and whose trunk fits the cells.
+fn resolve_species(cfg: &VoxelConfig, blocks: &Blocks, cell: i32) -> Vec<SpeciesModels> {
+    cfg.species
+        .iter()
+        .filter_map(|s| SpeciesModels::new(s, blocks))
+        .filter(|s| s.trunk_width + 2 <= cell)
+        .collect()
 }
 
 /// The surface of a world: everything chunk generation needs, immutable and thread-safe.
@@ -365,8 +384,13 @@ pub struct Terrain {
     climate: SurfaceClimate,
     /// River water.
     rivers: Rivers,
-    /// Plants by biome code.
-    plants: [(f64, Vec<PlantKind>); biomes::code::COUNT],
+    /// Plant species and their models.
+    species: Vec<SpeciesModels>,
+    /// Plants by biome code: density and species.
+    plants: [(f64, Vec<u16>); biomes::code::COUNT],
+    /// Widest trunk, and farthest block from a trunk, blocks.
+    trunk_max: i32,
+    plant_reach: i32,
     /// Hash salt of the vegetation cells.
     plant_salt: u64,
     /// Noise of the sea and lake freezing threshold.
@@ -431,6 +455,13 @@ fn lake_level(elevation: &PeriodicGrid<f32>, depth: &PeriodicGrid<f32>) -> Perio
     })
 }
 
+/// Side of the vegetation cells: `plant_cell_m` when valid (at least 3, divides the world),
+/// else 5.
+fn plant_cell(cfg: &VoxelConfig) -> i32 {
+    let c = cfg.plant_cell_m;
+    if c >= 3 && WORLD_SIZE % c == 0 { c } else { 5 }
+}
+
 impl Terrain {
     /// Builds the terrain of a generated world.
     pub fn from_world(world: &World, cfg: VoxelConfig) -> anyhow::Result<Self> {
@@ -486,6 +517,7 @@ impl Terrain {
             &cfg.river_params(),
         );
         let seed = world.config.seed;
+        let species = resolve_species(&cfg, &blocks, plant_cell(&cfg));
         Ok(Self {
             ruggedness: ruggedness(
                 &tectonic,
@@ -495,7 +527,10 @@ impl Terrain {
             baked_spacing: baked_min_spacing(elevation.cell_size()),
             detail: Detail::new(seed, &world.config.erosion),
             soils: resolve_soils(&cfg, &blocks),
-            plants: resolve_plants(&cfg),
+            plants: resolve_plants(&cfg, &species),
+            trunk_max: species.iter().map(|s| s.trunk_width).max().unwrap_or(1),
+            plant_reach: species.iter().map(SpeciesModels::reach).max().unwrap_or(0),
+            species,
             plant_salt: nascio_world::rng::stage_u64(seed, "vegetation"),
             ice_noise: nascio_world::noise::Fbm::new(
                 nascio_world::rng::stage_u64(seed, "water-ice-dither"),
@@ -897,26 +932,30 @@ impl Terrain {
     }
 
     fn plant_cell(&self) -> i32 {
-        let c = self.cfg.plant_cell_m;
-        if c >= 3 && WORLD_SIZE % c == 0 { c } else { 5 }
+        plant_cell(&self.cfg)
     }
 
-    /// Block of a plant part (`None` in registries without vegetation).
-    #[inline]
-    pub fn part_block(&self, part: Part) -> Option<BlockId> {
-        let ids = &self.blocks.ids;
-        match part {
-            Part::Log => ids.spruce_log,
-            Part::Leaves => ids.spruce_leaves,
-            Part::Cactus => ids.cactus,
-        }
+    /// Plant species of the world (indices of [`Plant::species`]).
+    pub fn species(&self) -> &[SpeciesModels] {
+        &self.species
+    }
+
+    /// Farthest block of a plant from its trunk's first column, horizontally, blocks.
+    pub fn plant_reach(&self) -> i32 {
+        self.plant_reach
+    }
+
+    /// Model of a plant (unrotated: see [`crate::vegetation::rotate`]) and its species.
+    pub fn plant_model(&self, p: &Plant) -> (&SpeciesModels, &[ModelBlock]) {
+        let s = &self.species[usize::from(p.species)];
+        (s, s.model(p.height))
     }
 
     /// Plants whose trunk is in the block range `x0..=x1`, `z0..=z1` (unwrapped; the plants
     /// come back in the same frame), in a fixed order.
     pub fn plants_in(&self, x0: i32, z0: i32, x1: i32, z1: i32) -> Vec<Plant> {
         let mut out = Vec::new();
-        if self.blocks.ids.spruce_log.is_none() {
+        if self.species.is_empty() {
             return out;
         }
         let cell = self.plant_cell();
@@ -924,17 +963,18 @@ impl Terrain {
         let max_density = self.plants.iter().map(|p| p.0).fold(0.0, f64::max);
         for cj in z0.div_euclid(cell)..=z1.div_euclid(cell) {
             for ci in x0.div_euclid(cell)..=x1.div_euclid(cell) {
-                let (ox, oz, u, pick) = cell_draw(
+                let d = cell_draw(
                     self.plant_salt,
                     i64::from(ci).rem_euclid(n),
                     i64::from(cj).rem_euclid(n),
                     cell,
+                    self.trunk_max,
                 );
-                let (x, z) = (ci * cell + ox, cj * cell + oz);
-                if u >= max_density || !(x0..=x1).contains(&x) || !(z0..=z1).contains(&z) {
+                let (x, z) = (ci * cell + d.ox, cj * cell + d.oz);
+                if d.u >= max_density || !(x0..=x1).contains(&x) || !(z0..=z1).contains(&z) {
                     continue;
                 }
-                if let Some(p) = self.plant_at(x, z, u, pick) {
+                if let Some(p) = self.plant_at(x, z, &d) {
                     out.push(p);
                 }
             }
@@ -943,15 +983,16 @@ impl Terrain {
     }
 
     /// The plant drawn at column `(x, z)`, if its biome and ground allow it.
-    fn plant_at(&self, x: i32, z: i32, u: f64, pick: f64) -> Option<Plant> {
+    fn plant_at(&self, x: i32, z: i32, d: &crate::vegetation::CellDraw) -> Option<Plant> {
         let (fx, fz) = (f64::from(x) + 0.5, f64::from(z) + 0.5);
         let col = self.column_geo(fx, fz);
         let biome = col.biome;
         let (density, kinds) = &self.plants[usize::from(biome).min(biomes::code::COUNT - 1)];
-        if u >= *density || kinds.is_empty() || col.river {
+        if d.u >= *density || kinds.is_empty() || col.river {
             return None;
         }
-        let kind = kinds[((pick * kinds.len() as f64) as usize).min(kinds.len() - 1)];
+        let species = kinds[((d.pick * kinds.len() as f64) as usize).min(kinds.len() - 1)];
+        let kind = &self.species[usize::from(species)];
         let top = self.height(fx, fz).floor() as i32;
         if top <= self.cfg.beach_high_m || self.water_top(fx, fz) > top + 1 {
             return None;
@@ -975,7 +1016,9 @@ impl Terrain {
             x,
             z,
             base: top + 1,
-            kind,
+            species,
+            height: kind.height(d.size),
+            rot: d.rot,
         })
     }
 
@@ -1014,8 +1057,7 @@ impl Terrain {
     fn canopy(&self, col: &ColumnGeo, x: f64, z: f64, top: i32, slope: f64) -> (f64, [f32; 3]) {
         let none = (0.0, [0.0; 3]);
         let (density, kinds) = &self.plants[usize::from(col.biome).min(biomes::code::COUNT - 1)];
-        if *density <= 0.0 || kinds.is_empty() || col.river || self.blocks.ids.spruce_log.is_none()
-        {
+        if *density <= 0.0 || kinds.is_empty() || col.river {
             return none;
         }
         if top <= self.cfg.beach_high_m || self.water_top(x, z) > top + 1 {
@@ -1033,16 +1075,17 @@ impl Terrain {
             && self.t_warm(&col.climate, top) >= self.cfg.tree_line_warm_c;
         let (mut area, mut color) = (0.0, [0.0f32; 3]);
         for &k in kinds {
+            let k = &self.species[usize::from(k)];
             let ok = if k.is_tree() {
                 trees_ok
             } else {
                 soil.top == ids.sand
             };
-            let Some(block) = self.part_block(k.crown_part()).filter(|_| ok) else {
+            if !ok {
                 continue;
-            };
-            let a = k.footprint().0 as f64;
-            let rgb = self.blocks.linear(block);
+            }
+            let a = k.footprint() as f64;
+            let rgb = self.blocks.linear(k.crown_block());
             area += a;
             for i in 0..3 {
                 color[i] += a as f32 * rgb[i];

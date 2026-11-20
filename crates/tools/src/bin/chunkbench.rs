@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use nascio_core::consts::CHUNKS_PER_AXIS;
+use nascio_protocol::chunk::Column;
 use nascio_voxel::{ColumnSet, GenConfig, Terrain, mesh_chunk};
 use nascio_worldgen::rng::mix64;
 use nascio_worldgen::world_io::World;
@@ -44,6 +45,41 @@ struct Cli {
     /// Allow `--voxel-config`.
     #[arg(long)]
     dev_override: bool,
+    /// Sites given in world metres `x,z` (repeatable), instead of the drawn ones.
+    #[arg(long, value_parser = parse_xz)]
+    at: Vec<(i32, i32)>,
+}
+
+fn parse_xz(s: &str) -> Result<(i32, i32), String> {
+    let (x, z) = s.split_once(',').ok_or("expected x,z")?;
+    let p = |v: &str| v.trim().parse::<f64>().map_err(|e| e.to_string());
+    Ok((p(x)? as i32, p(z)? as i32))
+}
+
+/// Compressed size of a column as the server sends it (codec v2, zstd, no edits), bytes.
+fn column_bytes(terrain: &Terrain, cx: i32, cz: i32) -> anyhow::Result<usize> {
+    let col = ColumnSet::new(terrain, cx, cz);
+    let range = col.chunk_range(terrain.config().underground_chunks);
+    let chunks = range
+        .clone()
+        .map(|cy| {
+            let mut c = col.padded_chunk(terrain, cy).inner();
+            c.compact();
+            c
+        })
+        .collect();
+    let mut tint = terrain.chunk_tint(cx, cz);
+    tint.water_depth = col.water_depths();
+    let bytes = Column {
+        cx,
+        cz,
+        cy_min: *range.start(),
+        version: 0,
+        chunks,
+        tint,
+    }
+    .compress()?;
+    Ok(bytes.len())
 }
 
 /// Times summed over the work items (CPU time), and counts.
@@ -116,12 +152,32 @@ fn main() -> anyhow::Result<()> {
         ms(t.elapsed())
     );
 
-    let keys: Vec<(i32, i32)> = (0..cli.sites)
-        .flat_map(|s| {
-            let h = mix64(cli.seed ^ mix64(s + 1));
-            let cx0 = (h % CHUNKS_PER_AXIS as u64) as i32;
-            let cz0 = ((h >> 32) % CHUNKS_PER_AXIS as u64) as i32;
-            (0..cli.side * cli.side).map(move |i| (cx0 + i % cli.side, cz0 + i / cli.side))
+    let side = cli.side;
+    let origins: Vec<(i32, i32)> = if cli.at.is_empty() {
+        (0..cli.sites)
+            .map(|s| {
+                let h = mix64(cli.seed ^ mix64(s + 1));
+                (
+                    (h % CHUNKS_PER_AXIS as u64) as i32,
+                    ((h >> 32) % CHUNKS_PER_AXIS as u64) as i32,
+                )
+            })
+            .collect()
+    } else {
+        let c = nascio_core::consts::CHUNK_SIZE;
+        cli.at
+            .iter()
+            .map(|&(x, z)| (x.div_euclid(c) - side / 2, z.div_euclid(c) - side / 2))
+            .collect()
+    };
+    let keys: Vec<(i32, i32)> = origins
+        .iter()
+        .flat_map(|&(cx0, cz0)| (0..side * side).map(move |i| (cx0 + i % side, cz0 + i / side)))
+        .map(|(cx, cz)| {
+            (
+                cx.rem_euclid(CHUNKS_PER_AXIS),
+                cz.rem_euclid(CHUNKS_PER_AXIS),
+            )
         })
         .collect();
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
@@ -132,7 +188,7 @@ fn main() -> anyhow::Result<()> {
     };
     println!(
         "{} sites x {}x{} columns = {} columns, {cores} cores available",
-        cli.sites,
+        origins.len(),
         cli.side,
         cli.side,
         keys.len()
@@ -174,5 +230,15 @@ fn main() -> anyhow::Result<()> {
             ms(tally.mesh) / ch
         );
     }
+    let sizes = keys
+        .par_iter()
+        .map(|&(cx, cz)| column_bytes(&terrain, cx, cz))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    println!(
+        "
+network: {:.0} bytes/column compressed (mean), {} max",
+        sizes.iter().sum::<usize>() as f64 / sizes.len() as f64,
+        sizes.iter().max().unwrap_or(&0)
+    );
     Ok(())
 }
