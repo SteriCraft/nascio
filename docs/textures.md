@@ -9,7 +9,7 @@ Un fichier PNG de 32×32 par texture, dans le dossier des textures, nommé d'apr
 - `bloc_top.png` : le dessus seul ; `bloc_bottom.png` : le dessous seul ;
 - `bloc_end.png` : le dessus et le dessous (troncs, colonnes).
 
-Priorité pour une face : `_top` ou `_bottom`, puis `_end`, puis `_side`, puis `bloc.png`. Les côtés prennent `_side`, sinon `bloc.png`. Exceptions écrites dans le code : le dessous de `grass` et de `podzol` est `dirt`, `snow_layer` prend `snow`.
+Priorité pour une face : `_top` ou `_bottom`, puis `_end`, puis `_side`, puis `bloc.png`. Les côtés prennent `_side`, sinon `bloc.png`. Exceptions écrites dans le code : le dessous de `grass` et de `podzol` est `dirt`, `snow_layer` prend `snow`. Au maillage, le côté d'un bloc `grass` qui domine d'un seul bloc un autre `grass` prend la texture du dessus (terrasses vertes).
 
 Transparence : seuls les blocs de feuillage (`FOLIAGE`) gardent l'alpha de leur image ; un pixel d'alpha inférieur à 0,5 est découpé. Les autres blocs sont opaques (leurs pixels transparents prennent la couleur moyenne de l'image).
 

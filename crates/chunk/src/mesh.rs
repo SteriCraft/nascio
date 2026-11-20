@@ -162,7 +162,20 @@ struct Face {
     layer: bool,
     /// Foliage: cut out, in its own mesh, tagged [`MATERIAL_FOLIAGE`].
     foliage: bool,
+    /// Side of a one-block grass step ([`grass_step`]): drawn with the top texture.
+    step: bool,
     ao: [u8; 4],
+}
+
+/// Whether the side face of `block` whose air-side cell is `nb` is the side of a one-block
+/// grass step: the climate-tinted block, the same block right under `nb`. It then shows the
+/// top texture, so grassy terraces read green; higher steps, or a step down to another block
+/// (stone, sand, snow…), keep their earth side.
+fn grass_step(p: &PaddedChunk, tint: &ChunkTint, block: BlockId, d: usize, nb: [i32; 3]) -> bool {
+    if d == 1 || tint.grass != Some(block) {
+        return false;
+    }
+    p.get(nb[0], nb[1] - 1, nb[2]) == block
 }
 
 /// Thickness of a [`Matter::Layer`] block, m.
@@ -343,6 +356,7 @@ fn mesh_into(
                             },
                             layer: matter == Matter::Layer,
                             foliage: blocks.is_foliage(block),
+                            step: grass_step(p, tint, block, d, nb),
                             ao,
                         });
                     }
@@ -454,7 +468,11 @@ fn emit(
         }
     }
     let alpha = if f.water { water_alpha(f.depth) } else { 1.0 };
-    let texture = blocks.face_texture(f.block, d, sign);
+    let texture = if f.step {
+        blocks.face_texture(f.block, 1, 1)
+    } else {
+        blocks.face_texture(f.block, d, sign)
+    };
     let cut = f.foliage && mode == FoliageMode::CutOut;
     let kind = if f.water {
         MATERIAL_WATER
@@ -570,6 +588,7 @@ pub fn mesh_reference_with(
                                     },
                                     layer: blocks.matter(block) == Matter::Layer,
                                     foliage: blocks.is_foliage(block),
+                                    step: grass_step(p, tint, block, d, nb),
                                     ao,
                                 }
                             });
@@ -919,6 +938,56 @@ mod tests {
         for i in top_vertices(&m) {
             assert_eq!(m.colors[i], [c[0], c[1], c[2], 1.0]);
         }
+    }
+
+    #[test]
+    fn one_block_grass_steps_have_green_sides() {
+        let mut b = Blocks::builtin();
+        let (grass, stone) = (b.id("grass").unwrap(), b.id("granite").unwrap());
+        let bt = BlockTextures {
+            top: tex(1, FaceTint::Climate(1.0)),
+            side: tex(2, FaceTint::None),
+            ..Default::default()
+        };
+        with_textures(&mut b, &[(grass, bt)]);
+        let mut tint = ChunkTint::NONE;
+        tint.grass = Some(grass);
+        // Grass on a pillar `rise` blocks above the surrounding ground, whose top block is
+        // `ground`.
+        let sides = |rise: i32, ground: BlockId| {
+            let p = padded(|x, y, z| match (x, y, z) {
+                (4, 10, 6) => grass,
+                (4, ..10, 6) => stone,
+                _ if y == 10 - rise => ground,
+                _ if y < 10 - rise => stone,
+                _ => AIR,
+            });
+            let m = mesh_chunk(&p, &b, &tint);
+            assert_eq!(m, mesh_reference(&p, &b, &tint));
+            let m = m.opaque;
+            (0..m.quad_count())
+                .filter(|&q| m.normals[4 * q][1] == 0.0 && m.positions[4 * q][1] >= 10.0)
+                .filter(|&q| (0..4).all(|k| m.positions[4 * q + k][1] >= 10.0))
+                .map(|q| m.material[4 * q][1])
+                .collect::<Vec<_>>()
+        };
+        // One-block step down to grass: the four sides take the top texture.
+        assert_eq!(sides(1, grass), vec![1.0; 4]);
+        // Down to another block, or two blocks down: earth sides.
+        assert!(sides(1, stone).iter().all(|&l| l == 2.0));
+        assert!(sides(2, grass).iter().all(|&l| l == 2.0));
+        // Without the climate tint, grass keeps its side texture.
+        let p = padded(|x, y, z| match (x, y, z) {
+            (4, 10, 6) => grass,
+            (_, ..10, _) => stone,
+            _ => AIR,
+        });
+        let m = mesh_chunk(&p, &b, &ChunkTint::NONE).opaque;
+        assert!(
+            (0..m.quad_count())
+                .filter(|&q| m.normals[4 * q][1] == 0.0)
+                .all(|q| m.material[4 * q][1] == 2.0)
+        );
     }
 
     #[test]

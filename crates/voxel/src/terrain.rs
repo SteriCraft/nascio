@@ -136,8 +136,6 @@ pub struct VoxelConfig {
     pub far_canopy_gain: f64,
     /// Far ground: brightness of the crowns' colour (self-shadowing of the foliage).
     pub far_canopy_shade: f64,
-    /// Far ground: horizon tiles rise by this share of the mean plant height × cover.
-    pub far_canopy_relief: f64,
     /// Each column reads its biome this far (at most, triangular draw per axis) from its
     /// centre: biome boundaries become a mixed fringe (soils, plant density), m.
     pub biome_dither_m: f64,
@@ -289,7 +287,6 @@ impl Default for VoxelConfig {
             vegetation: default_vegetation(),
             far_canopy_gain: 3.0,
             far_canopy_shade: 0.5,
-            far_canopy_relief: 1.0,
             biome_dither_m: 64.0,
             delta_palette_above: crate::delta::DEFAULT_PALETTE_ABOVE,
         }
@@ -997,36 +994,25 @@ impl Terrain {
     }
 
     /// The far ground at `(x, z)` (world metres), surface height `h`, top block at `top`:
-    /// colour of the top block mixed with the plants' crowns by their expected cover, and how
-    /// far the horizon tiles rise over the crowns, m.
-    pub fn far_ground(&self, x: f64, z: f64, top: i32, h: f64, slope: f64) -> ([f32; 3], f64) {
+    /// colour of the top block mixed with the plants' crowns by their expected cover.
+    pub fn far_ground(&self, x: f64, z: f64, top: i32, h: f64, slope: f64) -> [f32; 3] {
         let (xi, zi) = (
             nascio_core::torus::wrap(x.floor() as i32),
             nascio_core::torus::wrap(z.floor() as i32),
         );
         let col = self.column_geo(f64::from(xi) + 0.5, f64::from(zi) + 0.5);
         let ground = self.surface_color(self.top_block_of(&col, xi, zi, top, slope), x, z, h);
-        let (cover, crown, height) = self.canopy(&col, x, z, h.floor() as i32, slope);
+        let (cover, crown) = self.canopy(&col, x, z, h.floor() as i32, slope);
         let cover = (cover * self.cfg.far_canopy_gain).min(1.0);
         let (c, shade) = (cover as f32, self.cfg.far_canopy_shade as f32);
-        (
-            [0, 1, 2].map(|i| ground[i] * (1.0 - c) + crown[i] * shade * c),
-            self.cfg.far_canopy_relief * height * cover,
-        )
+        [0, 1, 2].map(|i| ground[i] * (1.0 - c) + crown[i] * shade * c)
     }
 
     /// Expected plant cover seen from above at `(x, z)`, ground top block at `top`, without
-    /// drawing the plants: `(cover in [0, 1], mean crown colour, mean plant height)`. The same
+    /// drawing the plants: `(cover in [0, 1], mean crown colour)`. The same
     /// ground rules as [`Self::plant_at`]; the models of a biome are drawn evenly.
-    fn canopy(
-        &self,
-        col: &ColumnGeo,
-        x: f64,
-        z: f64,
-        top: i32,
-        slope: f64,
-    ) -> (f64, [f32; 3], f64) {
-        let none = (0.0, [0.0; 3], 0.0);
+    fn canopy(&self, col: &ColumnGeo, x: f64, z: f64, top: i32, slope: f64) -> (f64, [f32; 3]) {
+        let none = (0.0, [0.0; 3]);
         let (density, kinds) = &self.plants[usize::from(col.biome).min(biomes::code::COUNT - 1)];
         if *density <= 0.0 || kinds.is_empty() || col.river || self.blocks.ids.spruce_log.is_none()
         {
@@ -1045,7 +1031,7 @@ impl Terrain {
         let ids = &self.blocks.ids;
         let trees_ok = ![ids.sand, ids.gravel].contains(&soil.top)
             && self.t_warm(&col.climate, top) >= self.cfg.tree_line_warm_c;
-        let (mut area, mut color, mut height) = (0.0, [0.0f32; 3], 0.0);
+        let (mut area, mut color) = (0.0, [0.0f32; 3]);
         for &k in kinds {
             let ok = if k.is_tree() {
                 trees_ok
@@ -1055,11 +1041,9 @@ impl Terrain {
             let Some(block) = self.part_block(k.crown_part()).filter(|_| ok) else {
                 continue;
             };
-            let (a, h) = k.footprint();
-            let a = a as f64;
+            let a = k.footprint().0 as f64;
             let rgb = self.blocks.linear(block);
             area += a;
-            height += a * f64::from(h);
             for i in 0..3 {
                 color[i] += a as f32 * rgb[i];
             }
@@ -1071,7 +1055,6 @@ impl Terrain {
         (
             (density * area / kinds.len() as f64 / (cell * cell)).min(1.0),
             color.map(|c| c / area as f32),
-            height / area,
         )
     }
 }
@@ -1306,8 +1289,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let t0 = Terrain::from_world(&test_world(), cfg0).unwrap();
-        let relief = VoxelConfig::default().far_canopy_relief;
-        let mut raised = 0;
+        let mut covered = 0;
         let mut sampled = 0;
         for i in 0..40 {
             for j in 0..40 {
@@ -1323,29 +1305,24 @@ pub(crate) mod tests {
                 }
                 sampled += 1;
                 let top = h.floor() as i32;
-                let (c, rise) = t.far_ground(x, z, top, h, 0.0);
+                let c = t.far_ground(x, z, top, h, 0.0);
                 for v in c {
                     assert!(
                         v.is_finite() && (0.0..=1.5).contains(&v),
                         "{c:?} at {x} {z}"
                     );
                 }
-                assert!(
-                    (0.0..=9.0 * relief).contains(&rise),
-                    "rise {rise} at {x} {z}"
-                );
-                if rise > 0.0 {
-                    raised += 1;
+                let c0 = t0.far_ground(x, z, top, h, 0.0);
+                if c != c0 {
+                    covered += 1;
                 }
-                let (c0, rise0) = t0.far_ground(x, z, top, h, 0.0);
                 let (xi, zi) = (wrap(x.floor() as i32), wrap(z.floor() as i32));
                 let col = t0.column_geo(f64::from(xi) + 0.5, f64::from(zi) + 0.5);
                 let block = t0.top_block_of(&col, xi, zi, top, 0.0);
                 assert_eq!(c0, t0.surface_color(block, x, z, h));
-                assert_eq!(rise0, 0.0);
             }
         }
         assert!(sampled > 0, "no ground sampled");
-        assert!(raised > 0, "no sampled point has plants");
+        assert!(covered > 0, "no sampled point has plants");
     }
 }

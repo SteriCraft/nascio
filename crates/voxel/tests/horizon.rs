@@ -72,14 +72,10 @@ fn surfaces_are_consistent_and_deterministic() {
             );
             let base = quantize_height(t.height_lod(wx, wz, 0.5 * s) + 0.5);
             assert_eq!(v.water, t.water_level(wx, wz).round() as f32);
+            assert_eq!(v.height, base);
             match v.surface {
-                Surface::Ground => {
-                    assert!(v.height >= v.water);
-                    assert!(v.height >= base);
-                    assert!(v.height <= base + 40.0);
-                }
+                Surface::Ground => assert!(v.height >= v.water),
                 Surface::Water | Surface::Ice => {
-                    assert_eq!(v.height, base);
                     assert!(v.height < v.water);
                     if v.surface == Surface::Ice {
                         assert_eq!(v.color, [0; 3]);

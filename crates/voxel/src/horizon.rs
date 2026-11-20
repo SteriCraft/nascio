@@ -49,9 +49,9 @@ pub fn horizon_tile(terrain: &Terrain, key: TileKey) -> HorizonTile {
             let water = terrain.water_level(x, z).round() as f32;
             let dx = f64::from(at(a + 1, b) - at(a - 1, b)) / (2.0 * s);
             let dz = f64::from(at(a, b + 1) - at(a, b - 1)) / (2.0 * s);
-            let (surface, color, rise) = if raw < water {
+            let (surface, color) = if raw < water {
                 if terrain.water_frozen(&terrain.climate(x, z)) {
-                    (Surface::Ice, [0; 3], 0.0)
+                    (Surface::Ice, [0; 3])
                 } else {
                     // The bottom's colour: the client lays the water over it by depth.
                     let bed = terrain.top_block(
@@ -61,21 +61,16 @@ pub fn horizon_tile(terrain: &Terrain, key: TileKey) -> HorizonTile {
                         dx.det_hypot(dz),
                     );
                     let c = terrain.surface_color(bed, x, z, f64::from(raw));
-                    (Surface::Water, c.map(linear_to_srgb8), 0.0)
+                    (Surface::Water, c.map(linear_to_srgb8))
                 }
             } else {
                 // Beaches are too thin to show at horizon scale.
                 let top = (raw.floor() as i32).max(beach);
-                let (c, rise) = terrain.far_ground(x, z, top, f64::from(raw), dx.det_hypot(dz));
-                (Surface::Ground, c.map(linear_to_srgb8), rise)
+                let c = terrain.far_ground(x, z, top, f64::from(raw), dx.det_hypot(dz));
+                (Surface::Ground, c.map(linear_to_srgb8))
             };
             vertices.push(HorizonVertex {
-                // Ground vertices rise over the plants' crowns (relief of the canopy).
-                height: if rise > 0.0 {
-                    quantize_height(f64::from(raw) + rise)
-                } else {
-                    raw
-                },
+                height: raw,
                 water,
                 surface,
                 color,
@@ -117,9 +112,7 @@ pub fn ground_colors(terrain: &Terrain, res: usize) -> Vec<u8> {
                     water_color(water, terrain.surface_color(bed, x, z, h), wl - h)
                 } else {
                     let top = (h.floor() as i32).max(terrain.config().beach_high_m + 1);
-                    terrain
-                        .far_ground(x, z, top, h, dx.det_hypot(dz) / (2.0 * cell))
-                        .0
+                    terrain.far_ground(x, z, top, h, dx.det_hypot(dz) / (2.0 * cell))
                 };
                 row.extend(c.map(linear_to_srgb8));
             }
