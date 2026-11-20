@@ -116,7 +116,7 @@ Décisions en vigueur, sous leur forme actuelle. Une décision remplacée est r�
 | 2026-11-15 | Sable seulement au niveau de l'eau et dessous | Pas de plaines littorales ensablées |
 | 2026-11-17 | Sols par biome (`[[voxel.soils]]`), épaisseur réduite avec la pente ; herbe unique, teinte en dégradé selon le climat (par sommet) | Transitions en dégradé, même avec les textures |
 | 2026-11-17 | Glace et neige permanentes selon le mois le plus chaud ramené au bloc ; `snow_layer` (1/8 de bloc) en frange ; banquise de 2 m, seuil tramé (±1,5 °C) | Glaciers et banquise sans lignes droites |
-| 2026-11-17 | Végétation provisoire : sapin et cactus, une plante au plus par cellule de 5 m par hachage, densités par biome (`[[voxel.vegetation]]`), limite des arbres à 10 °C, pente ≤ 0,7 | En attendant l'étape « Végétation » |
+| 2026-11-20 | Végétation provisoire : sapin et cactus, une plante au plus par cellule de 5 m par hachage, tronc dans `[0, c − 1 − w]` de sa cellule, densités par biome (`[[voxel.vegetation]]`), limite des arbres à 10 °C, pente ≤ 0,7 | Au moins un bloc entre deux troncs, sans comparer les cellules ; le reste en attendant les étapes de « Végétation » |
 | 2026-11-17 | Maillage glouton par masques de bits avec occlusion ambiante par sommet ; eau en maillage séparé contre l'air ; canal matériau en UV0 (`MeshData::material`) | 0,27 ms par chunk ; alpha réservé à l'opacité |
 | 2026-11-18 | Crate `nascio-chunk` (dépend de `core` seulement) : table des blocs, `Chunk`, `ChunkTint`, maillage, types de tuiles d'horizon | Le client ne peut pas générer (vérifié par `no_generation.rs`) |
 

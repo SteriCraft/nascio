@@ -126,7 +126,8 @@ pub struct VoxelConfig {
     pub tree_line_warm_c: f64,
     /// Plants grow on slopes up to this, m/m.
     pub plant_max_slope: f64,
-    /// Side of the vegetation cells (at most one plant each), m; divides `WORLD_SIZE`.
+    /// Side of the vegetation cells (at most one plant each), m; divides `WORLD_SIZE`, at
+    /// least 3 (one block between trunks).
     pub plant_cell_m: i32,
     /// Plants of each biome (`[[voxel.vegetation]]`); biomes not listed have none.
     pub vegetation: Vec<BiomePlants>,
@@ -890,7 +891,7 @@ impl Terrain {
 
     fn plant_cell(&self) -> i32 {
         let c = self.cfg.plant_cell_m;
-        if c > 0 && WORLD_SIZE % c == 0 { c } else { 5 }
+        if c >= 3 && WORLD_SIZE % c == 0 { c } else { 5 }
     }
 
     /// Block of a plant part (`None` in registries without vegetation).
@@ -995,6 +996,27 @@ pub(crate) mod tests {
         static T: std::sync::OnceLock<Terrain> = std::sync::OnceLock::new();
         T.get_or_init(|| Terrain::from_world(&test_world(), VoxelConfig::default()).unwrap())
             .clone()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Two trunks are never adjacent (Chebyshev distance >= 2), also across the seam.
+        #[test]
+        fn trunks_are_at_least_one_block_apart(
+            x0 in prop_oneof![-40i32..40, (WORLD_SIZE - 40)..WORLD_SIZE],
+            z0 in prop_oneof![-40i32..40, (WORLD_SIZE - 40)..WORLD_SIZE],
+        ) {
+            let t = test_terrain();
+            let plants = t.plants_in(x0, z0, x0 + 63, z0 + 63);
+            for (i, a) in plants.iter().enumerate() {
+                for b in &plants[i + 1..] {
+                    let dx = nascio_core::torus::delta(a.x, b.x);
+                    let dz = nascio_core::torus::delta(a.z, b.z);
+                    prop_assert!(dx.abs().max(dz.abs()) >= 2, "{a:?} {b:?}");
+                }
+            }
+        }
     }
 
     pub fn test_world() -> World {

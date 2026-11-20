@@ -126,11 +126,17 @@ pub enum Part {
     Cactus,
 }
 
+/// Width of every trunk, blocks.
+pub const TRUNK_WIDTH: i32 = 1;
+
 /// The draw of one vegetation cell `(ci, cj)` (wrapped): offset of the plant in the cell,
 /// a uniform number in `[0, 1)` for the density and one to pick the model.
+///
+/// The trunk lies in `[0, cell - 1 - TRUNK_WIDTH]` of its cell, so two trunks of neighbouring
+/// cells are at least one block apart, diagonals and the seam included. `cell` is at least 3.
 pub fn cell_draw(salt: u64, ci: i64, cj: i64, cell: i32) -> (i32, i32, f64, f64) {
     let h = mix64(salt ^ mix64(((ci as u64) << 32) ^ (cj as u64 & 0xFFFF_FFFF)));
-    let c = cell as u64;
+    let c = (cell - TRUNK_WIDTH) as u64;
     let ox = (h % c) as i32;
     let oz = ((h >> 16) % c) as i32;
     let u = ((h >> 32) & 0xFF_FFFF) as f64 / f64::from(1 << 24);
@@ -164,7 +170,7 @@ mod tests {
     fn draws_are_deterministic_and_inside_the_cell() {
         for k in 0..1000 {
             let (ox, oz, u, pick) = cell_draw(7, k, -k, 5);
-            assert!((0..5).contains(&ox) && (0..5).contains(&oz));
+            assert!((0..4).contains(&ox) && (0..4).contains(&oz));
             assert!((0.0..1.0).contains(&u) && (0.0..1.0).contains(&pick));
             assert_eq!(cell_draw(7, k, -k, 5), (ox, oz, u, pick));
         }

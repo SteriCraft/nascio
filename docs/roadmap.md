@@ -133,6 +133,32 @@ Audit complet du projet par Fable, à partir des derniers benchmarks du PC Windo
 - banc du visualiseur `bench/default.toml` (1920×1080, 25 700 images) : moyenne 3,84 ms (260 i/s), p95 6,07 ms, p99 8,00 ms, 1 % low 97,6 i/s, 4 images au-delà de 16,7 ms ; CPU 2,46 ms, GPU 1,17 ms en moyenne. Une première passe, perturbée par des blocages périodiques extérieurs au banc, donnait la même charge CPU et GPU (2,52 et 1,20 ms) mais un p95 de 16,18 ms : elle est écartée ;
 - le portable Linux (RTX 3050 Mobile) sera re-mesuré plus tard, à la demande de l'auteur.
 
+## Végétation
+Remplace la végétation provisoire de M6 (un sapin, un cactus). Arbres à **taille réelle** ; deux essences au moins par biome qui porte des arbres. Une étape à la fois ; à la fin de chaque étape, un court rapport, puis l'auteur vérifie. Chaque étape qui change les chunks incrémente `generator_version` et met à jour la spec (§5, végétation) et `decisions.md`.
+
+1. **Espacement des troncs** — fait (2026-11-20, à valider ; `generator_version` 21) : au moins un bloc entre deux troncs, diagonale comprise. Dans une cellule de côté `c`, un tronc de largeur `w` se place dans `[0, c − 1 − w]` : l'écart avec toute cellule voisine est alors d'au moins un bloc, sans comparer les cellules entre elles (couture comprise). Largeur de tronc de 2 au plus avec `c = 5`. **Validation** : test de propriétés (`proptest`) sur l'écart, couture comprise ; promenade de l'auteur.
+2. **Couleur et relief du lointain** : les tuiles d'horizon et le sol lointain (`ground_colors`) tiennent compte des arbres par une **couverture attendue**, calculée sans tirer les arbres : densité du biome × aire moyenne des couronnes de ses essences ÷ aire d'une cellule, nulle là où les arbres ne poussent pas (limite des arbres, pente, sable, gravier, rivières, eau), bornée à 1. La couleur mêle celle du sol et celle des feuillages selon la couverture ; la hauteur des tuiles peut être relevée d'une fraction de la hauteur des arbres × couverture (relief de canopée), à garder ou non après essai. **Validation** : passage des chunks aux tuiles sans saut de couleur visible, en forêt dense et en lisière.
+3. **Modèles paramétriques et taille variable** : un modèle par forme (conique, ovale, ronde, parasol, plate, palmier, retombante…) et paramètres en TOML (hauteur visée, part du tronc, rayon de couronne, largeur du tronc, blocs) ; modèles construits une fois par essence et par hauteur. Facteur de taille tiré du hachage de la cellule dans [0,7 ; 1,3] (réglable par essence), qui s'applique à la hauteur et à la couronne ; orientation parmi quatre. Portée horizontale (`MAX_RADIUS`) déduite de la table. L'épicéa passe au nouveau format, à taille réelle. Densités par biome recalées sur les couronnes réelles. **Validation** : hauteurs dans ±30 % (test), `chunkbench` et octets par colonne mesurés (la portée des couronnes augmente le nombre de cellules lues par chunk).
+4. **Zone d'essai** : option du serveur qui remplace la végétation dans un rayon d'environ 100 m autour de la position enregistrée d'un compte par une seule essence, sur une copie du monde dans `out/` ; paramètres de l'essence relus à chaque lancement. Le client s'y connecte et l'auteur s'y promène.
+5. **Essences**, une par une, chacune essayée dans la zone d'essai puis validée ou retouchée par l'auteur ; deux blocs par essence (tronc, feuilles) ajoutés à `FOLIAGE` et à `docs/textures.md`.
+
+   | Biome | Essences |
+   |---|---|
+   | Forêt boréale | épicéa, pin sylvestre |
+   | Toundra (sous la limite des arbres) | épicéa, bouleau |
+   | Forêt tempérée | chêne, bouleau |
+   | Méditerranéen | pin parasol, olivier |
+   | Steppe | chêne, pin sylvestre |
+   | Savane | acacia, baobab (tronc 2×2) |
+   | Forêt tropicale | fromager (tronc 2×2), palmier |
+   | Mangrove | palétuvier, palmier |
+   | Marais, lac | saule, bouleau |
+   | Désert chaud | cactus (inchangé) |
+6. **Arbres dans l'eau** : le palétuvier pousse dans une eau de 1 m de profondeur au plus.
+7. **Dégradé entre biomes** : la fréquence d'une essence croît progressivement en entrant dans son biome, pour passer d'un type de forêt à l'autre sans limite nette.
+
+**Plus tard** : saisons du feuillage (couleurs d'automne, arbres nus en hiver), avec leur effet sur la couleur du lointain.
+
 ## Reste à faire (phase « Monde »)
 Les limites détaillées sont dans `docs/limites.md` (numéros L…). Cocher ou retirer une ligne quand elle est faite.
 - [ ] Banc complet sur le portable Linux (RTX 3050 Mobile), aurores comprises (L8, `rapport-audit-M7.md` §9).
